@@ -1,0 +1,600 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>VCF Operations Open Telegraf Helper</title>
+  <link rel="stylesheet" href="/static/tokens.css">
+  <link rel="stylesheet" href="/static/lattice.css">
+  <style>
+    .lat-container {
+      max-width: 1040px;
+      margin: 20px auto;
+      padding: 0 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+    .grid-2 {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 16px;
+    }
+    .grid-3 {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 12px;
+    }
+    @media (max-width: 768px) {
+      .grid-2, .grid-3 { grid-template-columns: 1fr; }
+    }
+    .check-card {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 12px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius-lg);
+      background: var(--surface);
+      cursor: pointer;
+    }
+    .check-card input[type="checkbox"] {
+      width: 16px;
+      height: 16px;
+      cursor: pointer;
+    }
+    .flex-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .flex-between {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .stage-item {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 8px 12px;
+      border-bottom: 1px solid var(--line-soft);
+      font-size: 13px;
+    }
+    .tab-content { display: none; }
+    .tab-content.is-active { display: block; }
+  </style>
+</head>
+<body>
+
+  <!-- Top Header -->
+  <header class="lat-header">
+    <div style="font-weight: 650; font-size: 15px; color: var(--ink);">VCF Operations Open Telegraf Helper</div>
+    <span class="lat-ver">v0.1.0</span>
+    <span class="lat-pill">Local Admin Mode</span>
+    <div style="margin-left: auto; display: flex; align-items: center; gap: 8px;">
+      <button type="button" class="lat-btn lat-btn--ghost" id="themeToggleBtn" onclick="toggleTheme()">Theme: Dark</button>
+      <button type="button" class="lat-btn lat-btn--ghost" onclick="shutdownServer()">Exit Helper</button>
+    </div>
+  </header>
+
+  <!-- Step Tabs -->
+  <div class="lat-container">
+    <nav class="lat-tabs" id="stepTabs">
+      <button type="button" class="lat-tab is-on" onclick="switchTab('vcf')">1. VCF Operations</button>
+      <button type="button" class="lat-tab" onclick="switchTab('endpoint')">2. Target Endpoint</button>
+      <button type="button" class="lat-tab" onclick="switchTab('monitoring')">3. Monitoring</button>
+      <button type="button" class="lat-tab" onclick="switchTab('preview')">4. Review & Preview</button>
+      <button type="button" class="lat-tab" onclick="switchTab('execute')">5. Execute & Summary</button>
+    </nav>
+
+    <!-- STEP 1: VCF OPERATIONS -->
+    <div id="tab-vcf" class="tab-content is-active">
+      <div class="lat-card">
+        <h2 class="lat-card-title">VCF Operations 9.1 Environment</h2>
+        <p class="lat-hint" style="margin-top: -6px; margin-bottom: 14px;">
+          Configure connection details to VCF Operations Suite API and destination Cloud Proxy.
+        </p>
+
+        <div class="grid-2">
+          <div>
+            <label class="lat-label" for="vcfUrl">VCF Operations URL</label>
+            <input type="text" id="vcfUrl" class="lat-input" value="https://vcf-ops.local" placeholder="https://vcf-ops.corp.local">
+          </div>
+          <div>
+            <label class="lat-label" for="collectorIp">Cloud Proxy / Collector IP or FQDN</label>
+            <input type="text" id="collectorIp" class="lat-input" value="10.10.10.50" placeholder="10.10.10.50">
+          </div>
+          <div>
+            <label class="lat-label" for="vcfUser">Username</label>
+            <input type="text" id="vcfUser" class="lat-input" value="admin">
+          </div>
+          <div>
+            <label class="lat-label" for="vcfPass">Password (Session-only)</label>
+            <input type="password" id="vcfPass" class="lat-input" placeholder="Enter password">
+          </div>
+        </div>
+
+        <div style="margin-top: 14px;" class="flex-row">
+          <label class="flex-row" style="cursor: pointer; font-size: 13px;">
+            <input type="checkbox" id="verifySsl"> Verify TLS/SSL certificates
+          </label>
+          <label class="flex-row" style="cursor: pointer; font-size: 13px; margin-left: 20px;">
+            <input type="checkbox" id="mockVcf" checked> Simulated VCF Environment (Offline Test Mode)
+          </label>
+        </div>
+
+        <div style="margin-top: 18px;" class="flex-between">
+          <button type="button" class="lat-btn" onclick="validateVcf()">Validate VCF Connection</button>
+          <button type="button" class="lat-btn lat-btn--primary" onclick="switchTab('endpoint')">Next: Target Endpoint &rarr;</button>
+        </div>
+
+        <div id="vcfStatusBanner" style="margin-top: 14px; display: none;"></div>
+      </div>
+    </div>
+
+    <!-- STEP 2: TARGET ENDPOINT -->
+    <div id="tab-endpoint" class="tab-content">
+      <div class="lat-card">
+        <h2 class="lat-card-title">Target Linux Endpoint</h2>
+        <p class="lat-hint" style="margin-top: -6px; margin-bottom: 14px;">
+          Specify the remote Linux host or VM to inspect and configure.
+        </p>
+
+        <div class="grid-2">
+          <div>
+            <label class="lat-label" for="targetHost">Target Hostname or IP</label>
+            <input type="text" id="targetHost" class="lat-input" value="web01.corp.local" placeholder="web01.corp.local">
+          </div>
+          <div>
+            <label class="lat-label" for="connMethod">Connection Method</label>
+            <select id="connMethod" class="lat-select" onchange="onConnMethodChange()">
+              <option value="mock" selected>Mock / Dry-Run (Safe Simulation)</option>
+              <option value="ssh">SSH (Direct Linux Push)</option>
+              <option value="local">Local System Execution</option>
+              <option value="package">Package / Script Only (Offline Deployment)</option>
+            </select>
+          </div>
+        </div>
+
+        <div id="sshFields" class="grid-2" style="margin-top: 12px; display: none;">
+          <div>
+            <label class="lat-label" for="sshUser">SSH Username</label>
+            <input type="text" id="sshUser" class="lat-input" value="root">
+          </div>
+          <div>
+            <label class="lat-label" for="sshKey">SSH Private Key Path</label>
+            <input type="text" id="sshKey" class="lat-input" placeholder="~/.ssh/id_rsa">
+          </div>
+          <div>
+            <label class="lat-label" for="sshPass">SSH Password (if key not used)</label>
+            <input type="password" id="sshPass" class="lat-input" placeholder="SSH Password">
+          </div>
+        </div>
+
+        <div style="margin-top: 18px;" class="flex-between">
+          <button type="button" class="lat-btn" onclick="detectEndpoint()">Detect & Inspect Endpoint</button>
+          <div class="flex-row">
+            <button type="button" class="lat-btn lat-btn--ghost" onclick="switchTab('vcf')">&larr; Back</button>
+            <button type="button" class="lat-btn lat-btn--primary" onclick="switchTab('monitoring')">Next: Monitoring &rarr;</button>
+          </div>
+        </div>
+
+        <div id="endpointStatusBanner" style="margin-top: 14px; display: none;"></div>
+
+        <div id="discoveryCard" class="lat-card" style="margin-top: 14px; background: var(--surface-sunken); display: none;">
+          <h2 class="lat-card-title">Discovered System Profile</h2>
+          <table class="lat-table">
+            <tbody>
+              <tr><td style="width: 200px;">Operating System</td><td id="discOs">Linux</td></tr>
+              <tr><td>Architecture</td><td id="discArch">x86_64</td></tr>
+              <tr><td>Telegraf Installed</td><td id="discTelegraf">Yes</td></tr>
+              <tr><td>Telegraf Version</td><td id="discVer">1.30.0</td></tr>
+              <tr><td>Service State</td><td id="discSvc">active</td></tr>
+              <tr><td>Managed Fragment Directory</td><td><code>/etc/telegraf/telegraf.d</code></td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- STEP 3: MONITORING -->
+    <div id="tab-monitoring" class="tab-content">
+      <div class="lat-card">
+        <h2 class="lat-card-title">Monitoring Selection</h2>
+        <p class="lat-hint" style="margin-top: -6px; margin-bottom: 14px;">
+          Select core OS telemetry plugins compliant with Broadcom VCF Operations metric schemas.
+        </p>
+
+        <div class="grid-2">
+          <label class="check-card">
+            <input type="checkbox" id="monCpu" checked>
+            <div>
+              <div style="font-weight: 600; font-size: 13px;">CPU Monitoring</div>
+              <div class="lat-hint">Per-cpu, totalcpu, collect_cpu_time, active state</div>
+            </div>
+          </label>
+
+          <label class="check-card">
+            <input type="checkbox" id="monMem" checked>
+            <div>
+              <div style="font-weight: 600; font-size: 13px;">Memory Monitoring</div>
+              <div class="lat-hint">RAM utilization, buffers, and cached memory</div>
+            </div>
+          </label>
+
+          <label class="check-card">
+            <input type="checkbox" id="monDisk" checked>
+            <div>
+              <div style="font-weight: 600; font-size: 13px;">Disk Usage</div>
+              <div class="lat-hint">Mount point capacity, excluding virtual filesystems</div>
+            </div>
+          </label>
+
+          <label class="check-card">
+            <input type="checkbox" id="monNet" checked>
+            <div>
+              <div style="font-weight: 600; font-size: 13px;">Network Interfaces</div>
+              <div class="lat-hint">Packet counts, bytes transferred, and interface errors</div>
+            </div>
+          </label>
+
+          <label class="check-card">
+            <input type="checkbox" id="monSystem" checked>
+            <div>
+              <div style="font-weight: 600; font-size: 13px;">System Load & Uptime</div>
+              <div class="lat-hint">Load averages (1, 5, 15m) and system uptime</div>
+            </div>
+          </label>
+
+          <label class="check-card">
+            <input type="checkbox" id="monSwap" checked>
+            <div>
+              <div style="font-weight: 600; font-size: 13px;">Swap Memory</div>
+              <div class="lat-hint">Paging and swap space utilization</div>
+            </div>
+          </label>
+        </div>
+
+        <div style="margin-top: 18px;" class="flex-between">
+          <button type="button" class="lat-btn lat-btn--ghost" onclick="switchTab('endpoint')">&larr; Back</button>
+          <button type="button" class="lat-btn lat-btn--primary" onclick="loadPreview()">Next: Review & Preview &rarr;</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- STEP 4: REVIEW & PREVIEW -->
+    <div id="tab-preview" class="tab-content">
+      <div class="lat-card">
+        <h2 class="lat-card-title">Pre-Flight Review & Configuration Preview</h2>
+        <p class="lat-hint" style="margin-top: -6px; margin-bottom: 14px;">
+          Inspect the exact TOML fragments and planned actions before any target changes are made.
+        </p>
+
+        <div style="margin-bottom: 16px;">
+          <h3 class="lat-label" style="font-weight: 650; margin-bottom: 6px;">Managed File 1: /etc/telegraf/telegraf.d/vcf-helper-system.conf</h3>
+          <pre class="lat-code" id="previewSystemToml">Loading preview...</pre>
+        </div>
+
+        <div style="margin-bottom: 16px;">
+          <h3 class="lat-label" style="font-weight: 650; margin-bottom: 6px;">Managed File 2: /etc/telegraf/telegraf.d/cloudproxy-http.conf</h3>
+          <pre class="lat-code" id="previewVcfToml">Loading preview...</pre>
+        </div>
+
+        <div class="lat-banner lat-banner--info" style="margin-bottom: 16px;">
+          <strong>Operational Safety Notice:</strong> Existing configuration in <code>/etc/telegraf/telegraf.conf</code> and unrelated files in <code>telegraf.d/</code> will remain completely untouched. Changes can be rolled back by removing these two managed fragments.
+        </div>
+
+        <div class="flex-between">
+          <button type="button" class="lat-btn lat-btn--ghost" onclick="switchTab('monitoring')">&larr; Back</button>
+          <button type="button" class="lat-btn lat-btn--primary" onclick="runWorkflow()">Start Guided Execution &rarr;</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- STEP 5: EXECUTE & SUMMARY -->
+    <div id="tab-execute" class="tab-content">
+      <div class="lat-card">
+        <h2 class="lat-card-title">Workflow Execution & Verification</h2>
+
+        <div id="execProgressContainer" style="margin-bottom: 18px;">
+          <div class="flex-between" style="margin-bottom: 8px;">
+            <span style="font-weight: 600; font-size: 13px;" id="execStatusHeader">Ready to execute</span>
+            <span class="lat-pill" id="execStatusPill">Idle</span>
+          </div>
+
+          <div style="border: 1px solid var(--line); border-radius: var(--radius-lg); background: var(--surface);">
+            <div id="stageList"></div>
+          </div>
+        </div>
+
+        <div id="summaryResults" style="display: none; margin-top: 20px;">
+          <h2 class="lat-card-title">Operational Verification Checklist</h2>
+          <table class="lat-table" style="margin-bottom: 16px;">
+            <thead>
+              <tr>
+                <th>Verification Check</th>
+                <th style="width: 140px; text-align: center;">Result</th>
+              </tr>
+            </thead>
+            <tbody id="verificationsBody"></tbody>
+          </table>
+
+          <h2 class="lat-card-title">Managed Configuration Files</h2>
+          <ul id="managedFilesList" style="font-size: 13px; color: var(--ink); margin-bottom: 18px;"></ul>
+
+          <div class="flex-row">
+            <button type="button" class="lat-btn" onclick="exportReport('md')">Download Markdown Summary</button>
+            <button type="button" class="lat-btn" onclick="exportReport('json')">Download JSON Summary</button>
+            <button type="button" class="lat-btn lat-btn--primary" onclick="switchTab('vcf')">Configure Another Endpoint</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <script>
+    let currentSummary = null;
+
+    function toggleTheme() {
+      const root = document.documentElement;
+      const current = root.getAttribute('data-theme') || 'light';
+      const next = current === 'light' ? 'dark' : 'light';
+      root.setAttribute('data-theme', next);
+      document.getElementById('themeToggleBtn').innerText = next === 'light' ? 'Theme: Dark' : 'Theme: Light';
+    }
+
+    function switchTab(name) {
+      const tabs = document.querySelectorAll('.lat-tab');
+      tabs.forEach(t => t.classList.remove('is-on'));
+      const contents = document.querySelectorAll('.tab-content');
+      contents.forEach(c => c.classList.remove('is-active'));
+
+      const tabMap = { 'vcf': 0, 'endpoint': 1, 'monitoring': 2, 'preview': 3, 'execute': 4 };
+      if (tabs[tabMap[name]]) tabs[tabMap[name]].classList.add('is-on');
+      const targetContent = document.getElementById('tab-' + name);
+      if (targetContent) targetContent.classList.add('is-active');
+
+      if (name === 'preview') loadPreview();
+    }
+
+    function onConnMethodChange() {
+      const method = document.getElementById('connMethod').value;
+      const sshDiv = document.getElementById('sshFields');
+      sshDiv.style.display = (method === 'ssh') ? 'grid' : 'none';
+    }
+
+    async function validateVcf() {
+      const banner = document.getElementById('vcfStatusBanner');
+      banner.style.display = 'block';
+      banner.className = 'lat-banner lat-banner--info';
+      banner.innerText = 'Validating VCF Operations connection...';
+
+      const payload = {
+        url: document.getElementById('vcfUrl').value,
+        username: document.getElementById('vcfUser').value,
+        password: document.getElementById('vcfPass').value,
+        collector: document.getElementById('collectorIp').value,
+        verify_ssl: document.getElementById('verifySsl').checked,
+        mock: document.getElementById('mockVcf').checked
+      };
+
+      try {
+        const resp = await fetch('/api/vcf/validate', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        const res = await resp.json();
+        if (res.valid) {
+          banner.className = 'lat-banner lat-banner--ok';
+          banner.innerText = 'Connected successfully. Version: ' + res.version;
+        } else {
+          banner.className = 'lat-banner lat-banner--bad';
+          banner.innerText = 'Validation failed: ' + res.message;
+        }
+      } catch (e) {
+        banner.className = 'lat-banner lat-banner--bad';
+        banner.innerText = 'Network error contacting helper backend: ' + e;
+      }
+    }
+
+    async function detectEndpoint() {
+      const banner = document.getElementById('endpointStatusBanner');
+      banner.style.display = 'block';
+      banner.className = 'lat-banner lat-banner--info';
+      banner.innerText = 'Inspecting endpoint...';
+
+      const payload = {
+        hostname: document.getElementById('targetHost').value,
+        connection_method: document.getElementById('connMethod').value,
+        ssh_user: document.getElementById('sshUser').value,
+        ssh_key: document.getElementById('sshKey').value,
+        ssh_pass: document.getElementById('sshPass').value
+      };
+
+      try {
+        const resp = await fetch('/api/endpoint/detect', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        const res = await resp.json();
+        if (res.success) {
+          banner.className = 'lat-banner lat-banner--ok';
+          banner.innerText = 'Endpoint reached successfully.';
+          document.getElementById('discoveryCard').style.display = 'block';
+          document.getElementById('discOs').innerText = res.discovery.os_version || 'Linux';
+          document.getElementById('discArch').innerText = res.discovery.arch;
+          document.getElementById('discTelegraf').innerText = res.discovery.telegraf_installed ? 'Yes' : 'No';
+          document.getElementById('discVer').innerText = res.discovery.telegraf_version || 'Not installed';
+          document.getElementById('discSvc').innerText = res.discovery.service_state;
+        } else {
+          banner.className = 'lat-banner lat-banner--bad';
+          banner.innerText = 'Inspection failed: ' + res.message;
+        }
+      } catch (e) {
+        banner.className = 'lat-banner lat-banner--bad';
+        banner.innerText = 'Detection error: ' + e;
+      }
+    }
+
+    async function loadPreview() {
+      const payload = {
+        collector: document.getElementById('collectorIp').value,
+        hostname: document.getElementById('targetHost').value,
+        cpu: document.getElementById('monCpu').checked,
+        mem: document.getElementById('monMem').checked,
+        disk: document.getElementById('monDisk').checked,
+        net: document.getElementById('monNet').checked,
+        system: document.getElementById('monSystem').checked,
+        swap: document.getElementById('monSwap').checked,
+        verify_ssl: document.getElementById('verifySsl').checked
+      };
+
+      try {
+        const resp = await fetch('/api/render', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        const res = await resp.json();
+        document.getElementById('previewSystemToml').innerText = res.system_toml;
+        document.getElementById('previewVcfToml').innerText = res.vcf_toml;
+        switchTab('preview');
+      } catch (e) {
+        console.error(e);
+      }
+    }
+
+    async function runWorkflow() {
+      switchTab('execute');
+      document.getElementById('execStatusHeader').innerText = 'Executing 8-stage onboarding sequence...';
+      document.getElementById('execStatusPill').innerText = 'Running';
+      document.getElementById('stageList').innerHTML = '';
+      document.getElementById('summaryResults').style.display = 'none';
+
+      const payload = {
+        vcf_url: document.getElementById('vcfUrl').value,
+        vcf_user: document.getElementById('vcfUser').value,
+        vcf_pass: document.getElementById('vcfPass').value,
+        collector: document.getElementById('collectorIp').value,
+        verify_ssl: document.getElementById('verifySsl').checked,
+        mock_vcf: document.getElementById('mockVcf').checked,
+        hostname: document.getElementById('targetHost').value,
+        connection_method: document.getElementById('connMethod').value,
+        ssh_user: document.getElementById('sshUser').value,
+        ssh_key: document.getElementById('sshKey').value,
+        ssh_pass: document.getElementById('sshPass').value,
+        cpu: document.getElementById('monCpu').checked,
+        mem: document.getElementById('monMem').checked,
+        disk: document.getElementById('monDisk').checked,
+        net: document.getElementById('monNet').checked,
+        system: document.getElementById('monSystem').checked,
+        swap: document.getElementById('monSwap').checked
+      };
+
+      try {
+        const resp = await fetch('/api/workflow/run', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        const summary = await resp.json();
+        currentSummary = summary;
+
+        // Render stages
+        const stageList = document.getElementById('stageList');
+        stageList.innerHTML = '';
+        summary.stages.forEach(s => {
+          let badgeClass = 'lat-badge--ok';
+          if (s.status === 'FAIL') badgeClass = 'lat-badge--bad';
+          else if (s.status === 'WARNING') badgeClass = 'lat-badge--warn';
+          else if (s.status === 'SKIPPED') badgeClass = '';
+
+          const div = document.createElement('div');
+          div.className = 'stage-item';
+          div.innerHTML = `
+            <div>
+              <span class="lat-badge ${badgeClass}" style="margin-right: 8px;">${s.status}</span>
+              <strong>${s.stage}</strong>: ${s.message}
+            </div>
+            <span class="lat-hint">${s.duration_ms} ms</span>
+          `;
+          stageList.appendChild(div);
+        });
+
+        // Update header status
+        if (summary.success) {
+          document.getElementById('execStatusHeader').innerText = 'Workflow Completed Successfully';
+          document.getElementById('execStatusPill').innerText = 'Completed';
+          document.getElementById('execStatusPill').className = 'lat-pill is-on';
+        } else {
+          document.getElementById('execStatusHeader').innerText = 'Workflow Halted on Failure';
+          document.getElementById('execStatusPill').innerText = 'Failed';
+          document.getElementById('execStatusPill').className = 'lat-pill';
+        }
+
+        // Render checklist
+        const verBody = document.getElementById('verificationsBody');
+        verBody.innerHTML = '';
+        for (const [k, v] of Object.entries(summary.verifications)) {
+          let badge = `<span class="lat-badge lat-badge--ok">${v}</span>`;
+          if (v === 'FAIL') badge = `<span class="lat-badge lat-badge--bad">${v}</span>`;
+          else if (v === 'UNKNOWN') badge = `<span class="lat-badge lat-badge--warn">${v}</span>`;
+          else if (v === 'SKIPPED') badge = `<span class="lat-badge">${v}</span>`;
+
+          const tr = document.createElement('tr');
+          tr.innerHTML = `<td>${k}</td><td style="text-align: center;">${badge}</td>`;
+          verBody.appendChild(tr);
+        }
+
+        // Render managed files
+        const filesUl = document.getElementById('managedFilesList');
+        filesUl.innerHTML = '';
+        summary.managed_files.forEach(f => {
+          const li = document.createElement('li');
+          li.innerHTML = `<code>${f}</code>`;
+          filesUl.appendChild(li);
+        });
+
+        document.getElementById('summaryResults').style.display = 'block';
+      } catch (e) {
+        document.getElementById('execStatusHeader').innerText = 'Execution error: ' + e;
+      }
+    }
+
+    function exportReport(format) {
+      if (!currentSummary) return;
+      let filename = 'vcf-telegraf-summary.' + format;
+      let blob;
+      if (format === 'json') {
+        blob = new Blob([JSON.stringify(currentSummary, null, 2)], { type: 'application/json' });
+      } else {
+        // Markdown
+        let md = `# VCF Operations Open Telegraf Helper: Run Summary\n\n`;
+        md += `**Timestamp:** ${currentSummary.timestamp}  \n`;
+        md += `**Target Host:** ${currentSummary.target_hostname}  \n`;
+        md += `**Overall Status:** ${currentSummary.success ? 'SUCCESS' : 'FAILED'}\n\n`;
+        md += `## Verification Checklist\n\n`;
+        for (const [k, v] of Object.entries(currentSummary.verifications)) {
+          md += `* **${k}:** \`${v}\`\n`;
+        }
+        blob = new Blob([md], { type: 'text/markdown' });
+      }
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = filename;
+      a.click();
+    }
+
+    async function shutdownServer() {
+      if (confirm('Exit the local helper utility?')) {
+        await fetch('/api/shutdown', { method: 'POST' });
+        document.body.innerHTML = '<div style="padding: 40px; font-family: sans-serif; text-align: center;"><h2>Helper Stopped</h2><p>You may now close this browser tab.</p></div>';
+      }
+    }
+  </script>
+</body>
+</html>

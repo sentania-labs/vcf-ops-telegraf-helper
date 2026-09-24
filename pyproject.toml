@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vcf-ops-telegraf-helper"
+version = "0.1.0"
+description = "Local administrator utility for VCF Operations open-source Telegraf onboarding"
+authors = [{ name = "Scott" }]
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "click>=8.0.0",
+    "rich>=13.0.0",
+    "pydantic>=2.0.0",
+    "tomli>=2.0.0; python_version < '3.11'",
+    "tomli_w>=1.0.0",
+    "requests>=2.28.0",
+    "paramiko>=3.0.0",
+]
+
+[project.scripts]
+vcf-telegraf-helper = "vcf_ops_telegraf_helper.cli.main:cli"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["vcf_ops_telegraf_helper*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
