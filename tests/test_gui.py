@@ -1,91 +1,122 @@
-"""Tests for local GUI server endpoints and template delivery."""
+"""Tests for native Lattice-styled PySide6 GUI.
+
+Adheres to the photoflow testing pattern:
+- Sets QT_QPA_PLATFORM=offscreen before importing QtWidgets so tests run headless.
+- Uses pytest.importorskip to guard Qt imports.
+- Tests window instantiation, step navigation, theme switching, preview rendering,
+  and worker signals.
+"""
 
 from __future__ import annotations
 
-import threading
-from http.server import ThreadingHTTPServer
-import requests
+import os
+import pytest
 
-from vcf_ops_telegraf_helper.gui.server import HelperHTTPRequestHandler
+# Ensure Qt runs offscreen in headless test environments
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+pytest.importorskip(
+    "PySide6.QtWidgets",
+    reason="PySide6.QtWidgets is required to run native GUI tests",
+)
+
+from PySide6.QtWidgets import QApplication  # noqa: E402
+from vcf_ops_telegraf_helper.gui.main_window import MainWindow  # noqa: E402
+from vcf_ops_telegraf_helper.gui.theme import build_stylesheet  # noqa: E402
+from vcf_ops_telegraf_helper.storage.state import StateStore  # noqa: E402
 
 
-def test_gui_server_routes():
-    """Verify local GUI HTTP server serves HTML, CSS, and API endpoints."""
-    # Spin up server on an ephemeral free port (port 0)
-    server = ThreadingHTTPServer(("127.0.0.1", 0), HelperHTTPRequestHandler)
-    port = server.server_address[1]
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
+@pytest.fixture(scope="session")
+def qapp():
+    """Session-wide QApplication instance for offscreen GUI tests."""
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication([])
+    return app
 
-    base_url = f"http://127.0.0.1:{port}"
 
-    try:
-        # 1. Test index HTML delivery
-        res_idx = requests.get(f"{base_url}/", timeout=5)
-        assert res_idx.status_code == 200
-        assert "text/html" in res_idx.headers["Content-Type"]
-        assert "VCF Operations Open Telegraf Helper" in res_idx.text
-        assert "lattice.css" in res_idx.text
+def test_theme_generation():
+    """Verify Lattice tokens compile into valid QSS strings."""
+    dark_qss = build_stylesheet("dark")
+    assert "#1b1f24" in dark_qss  # bg
+    assert "#23282f" in dark_qss  # surface
+    assert "#363d47" in dark_qss  # line
+    assert "#199e70" in dark_qss  # ok
+    assert "#d95926" in dark_qss  # bad
 
-        # 2. Test static CSS files
-        res_css = requests.get(f"{base_url}/static/lattice.css", timeout=5)
-        assert res_css.status_code == 200
-        assert "text/css" in res_css.headers["Content-Type"]
-        assert ".lat-btn" in res_css.text
+    light_qss = build_stylesheet("light")
+    assert "#f6f7f9" in light_qss  # bg
+    assert "#ffffff" in light_qss  # surface
+    assert "#d9dee5" in light_qss  # line
 
-        res_tokens = requests.get(f"{base_url}/static/tokens.css", timeout=5)
-        assert res_tokens.status_code == 200
-        assert "--accent:" in res_tokens.text
 
-        # 3. Test API /api/vcf/validate (mock mode)
-        res_vcf = requests.post(
-            f"{base_url}/api/vcf/validate",
-            json={"url": "https://vcf-ops.local", "mock": True},
-            timeout=5,
-        )
-        assert res_vcf.status_code == 200
-        vcf_data = res_vcf.json()
-        assert vcf_data["valid"] is True
+def test_main_window_initialization(qapp, tmp_path):
+    """Verify MainWindow initializes with all 5 steps and defaults."""
+    state_file = tmp_path / "state.json"
+    store = StateStore(state_file=state_file)
 
-        # 4. Test API /api/endpoint/detect (mock mode)
-        res_disc = requests.post(
-            f"{base_url}/api/endpoint/detect",
-            json={"hostname": "srv01.corp.local", "connection_method": "mock"},
-            timeout=5,
-        )
-        assert res_disc.status_code == 200
-        disc_data = res_disc.json()
-        assert disc_data["success"] is True
-        assert disc_data["discovery"]["telegraf_installed"] is True
+    window = MainWindow(state_store=store)
+    assert window.windowTitle() == "VCF Operations Open Telegraf Helper"
+    assert window.step_list.count() == 5
+    assert window.page_stack.count() == 5
+    assert window.current_theme == "dark"
 
-        # 5. Test API /api/render
-        res_render = requests.post(
-            f"{base_url}/api/render",
-            json={"collector": "10.0.0.1", "hostname": "srv01.corp.local", "cpu": True},
-            timeout=5,
-        )
-        assert res_render.status_code == 200
-        render_data = res_render.json()
-        assert "[[inputs.cpu]]" in render_data["system_toml"]
-        assert "[[outputs.http]]" in render_data["vcf_toml"]
 
-        # 6. Test API /api/workflow/run (mock mode)
-        res_run = requests.post(
-            f"{base_url}/api/workflow/run",
-            json={
-                "vcf_url": "https://vcf-ops.local",
-                "collector": "10.0.0.1",
-                "hostname": "srv01.corp.local",
-                "connection_method": "mock",
-                "mock_vcf": True,
-            },
-            timeout=5,
-        )
-        assert res_run.status_code == 200
-        run_data = res_run.json()
-        assert run_data["success"] is True
-        assert len(run_data["stages"]) == 8
+def test_main_window_step_navigation(qapp, tmp_path):
+    """Verify navigating through steps changes active page and updates preview."""
+    state_file = tmp_path / "state.json"
+    store = StateStore(state_file=state_file)
+    window = MainWindow(state_store=store)
 
-    finally:
-        server.shutdown()
-        server.server_close()
+    # Step 1 -> Step 2
+    window.step_list.setCurrentRow(1)
+    assert window.page_stack.currentIndex() == 1
+
+    # Step 2 -> Step 3
+    window.step_list.setCurrentRow(2)
+    assert window.page_stack.currentIndex() == 2
+
+    # Step 3 -> Step 4 (triggers preview update)
+    window.step_list.setCurrentRow(3)
+    assert window.page_stack.currentIndex() == 3
+    assert "[[inputs.cpu]]" in window.preview_system_box.toPlainText()
+    assert "[[outputs.http]]" in window.preview_output_box.toPlainText()
+
+
+def test_main_window_theme_toggle(qapp, tmp_path):
+    """Verify toggling theme alternates between dark and light."""
+    state_file = tmp_path / "state.json"
+    store = StateStore(state_file=state_file)
+    window = MainWindow(state_store=store)
+
+    assert window.current_theme == "dark"
+    window._toggle_theme()
+    assert window.current_theme == "light"
+    window._toggle_theme()
+    assert window.current_theme == "dark"
+
+
+def test_main_window_endpoint_detection_mock(qapp, tmp_path):
+    """Verify endpoint detection with Mock executor updates UI state."""
+    state_file = tmp_path / "state.json"
+    store = StateStore(state_file=state_file)
+    window = MainWindow(state_store=store)
+
+    window.ep_host_input.setText("mock-host.sentania.local")
+    window.ep_method_combo.setCurrentIndex(1)  # Mock (Simulated)
+
+    window._detect_endpoint()
+    assert "Connected & Discovered" in window.ep_status_label.text()
+    assert "Telegraf Installed: YES" in window.ep_details_box.toPlainText()
+
+
+def test_main_window_vcf_connection_mock(qapp, tmp_path):
+    """Verify VCF connection test with mock adapter updates UI state."""
+    state_file = tmp_path / "state.json"
+    store = StateStore(state_file=state_file)
+    window = MainWindow(state_store=store)
+
+    window.mock_vcf_check.setChecked(True)
+    window._test_vcf_connection()
+
+    assert "PASS" in window.vcf_status_label.text()

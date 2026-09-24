@@ -33,9 +33,13 @@ pip install -e .
 
 ## Quick Start
 
-### 1. Browser GUI (Lattice Design)
-Launch the local web-based helper interface in your browser:
+### 1. Native Desktop GUI (Lattice Design)
+Launch the native PySide6 desktop helper interface styled with Lattice:
 ```bash
+# Install with optional GUI dependencies:
+pip install -e '.[gui]'
+
+# Launch native desktop application:
 vcf-telegraf-helper gui
 ```
 

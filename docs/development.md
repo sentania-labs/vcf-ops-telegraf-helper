@@ -32,9 +32,13 @@ This guide covers local development, testing, and linting for VCF Operations Ope
 
 ## Running the Utility Locally
 
-### Local GUI Mode (Lattice Design)
-Launch the local browser GUI using the Sentania Lattice design system:
+### Native Desktop GUI (Lattice Design)
+Launch the native PySide6 desktop GUI styled with Lattice design tokens:
 ```bash
+# Ensure PySide6 is installed:
+pip install -e '.[gui]'
+
+# Launch the desktop window:
 vcf-telegraf-helper gui
 ```
 

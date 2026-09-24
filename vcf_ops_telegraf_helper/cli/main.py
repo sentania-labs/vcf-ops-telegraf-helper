@@ -61,14 +61,11 @@ def wizard_cmd() -> None:
 
 
 @cli.command("gui")
-@click.option("--host", default="127.0.0.1", help="Host interface to bind")
-@click.option("--port", default=8765, type=int, help="Port to listen on")
-@click.option("--no-browser", is_flag=True, help="Do not automatically open web browser")
-def gui_cmd(host: str, port: int, no_browser: bool) -> None:
-    """Launch the local browser GUI styled with Lattice."""
-    from vcf_ops_telegraf_helper.gui.server import start_gui
-    display_banner(console)
-    start_gui(host=host, port=port, open_browser=not no_browser)
+@click.option("--theme", type=click.Choice(["dark", "light"]), default="dark", help="Initial Lattice theme")
+def gui_cmd(theme: str) -> None:
+    """Launch the native desktop GUI styled with Lattice."""
+    from vcf_ops_telegraf_helper.gui.app import run_gui
+    sys.exit(run_gui(theme=theme))
 
 
 @cli.command("run")
