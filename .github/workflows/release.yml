@@ -1,0 +1,207 @@
+# Release workflow for VCF Operations Open Telegraf Helper.
+# Builds multi-platform standalone executables (Linux, Windows, macOS ARM64 and x86_64).
+# Supports Apple Developer ID signing and notarization via xcrun notarytool when secrets are configured.
+# Placement (github-ci skill): GitHub-hosted runners for multi-OS build matrix.
+
+name: Release
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+
+      - name: Refuse tag not reachable from main
+        run: |
+          git fetch origin main
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::$GITHUB_REF_NAME is not reachable from main; refusing to release"
+            exit 1
+          fi
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+
+      - name: Run test suite
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e '.[gui]' pytest pytest-asyncio respx hypothesis
+          pytest -v tests
+
+  binaries:
+    needs: validate
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            name: linux
+            ext: ""
+          - os: windows-latest
+            name: windows
+            ext: ".exe"
+          - os: macos-latest
+            name: macos-arm64
+            ext: ""
+          - os: macos-15-intel
+            name: macos-x86_64
+            ext: ""
+    runs-on: ${{ matrix.os }}
+    env:
+      QT_QPA_PLATFORM: offscreen
+    steps:
+      - name: Check out
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies and PyInstaller
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e '.[gui]' pyinstaller
+
+      - name: Build standalone binary
+        shell: bash
+        run: |
+          python -m PyInstaller \
+            --onefile \
+            --clean \
+            --noconfirm \
+            --name "vcf-telegraf-helper-${{ matrix.name }}" \
+            --copy-metadata vcf-ops-telegraf-helper \
+            --collect-all vcf_ops_telegraf_helper \
+            --hidden-import PySide6 \
+            --hidden-import PySide6.QtCore \
+            --hidden-import PySide6.QtGui \
+            --hidden-import PySide6.QtWidgets \
+            vcf_ops_telegraf_helper/cli/main.py
+
+      # Apple Code Signing and Notarization for macOS builds
+      - name: Sign macOS binary (if signing certificate provided)
+        if: runner.os == 'macOS' && env.MACOS_CERTIFICATE != ''
+        shell: bash
+        env:
+          MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+          MACOS_CERTIFICATE_PWD: ${{ secrets.MACOS_CERTIFICATE_PWD }}
+        run: |
+          echo "Setting up temporary keychain for Developer ID signing..."
+          KEYCHAIN_PATH=$RUNNER_TEMP/build.keychain
+          KEYCHAIN_PWD="temporary-keychain-password"
+          security create-keychain -p "$KEYCHAIN_PWD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PWD" "$KEYCHAIN_PATH"
+
+          CERT_PATH=$RUNNER_TEMP/cert.p12
+          echo "$MACOS_CERTIFICATE" | base64 --decode > "$CERT_PATH"
+          security import "$CERT_PATH" -k "$KEYCHAIN_PATH" -P "$MACOS_CERTIFICATE_PWD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PWD" "$KEYCHAIN_PATH"
+
+          echo "Signing binary with hardened runtime..."
+          codesign --deep --force --options runtime --timestamp \
+            --sign "Developer ID Application" \
+            --keychain "$KEYCHAIN_PATH" \
+            "dist/vcf-telegraf-helper-${{ matrix.name }}"
+
+      - name: Notarize macOS binary with Apple (if credentials provided)
+        if: runner.os == 'macOS' && env.APPLE_ID != ''
+        shell: bash
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          echo "Zipping binary for Apple notarization..."
+          ZIP_PATH="$RUNNER_TEMP/vcf-telegraf-helper-${{ matrix.name }}.zip"
+          ditto -c -k --keepParent "dist/vcf-telegraf-helper-${{ matrix.name }}" "$ZIP_PATH"
+
+          echo "Submitting to Apple notary service..."
+          xcrun notarytool submit "$ZIP_PATH" \
+            --apple-id "$APPLE_ID" \
+            --password "$APPLE_APP_SPECIFIC_PASSWORD" \
+            --team-id "$APPLE_TEAM_ID" \
+            --wait
+
+      - name: Smoke test standalone binary
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/smoke"
+          cp "dist/vcf-telegraf-helper-${{ matrix.name }}${{ matrix.ext }}" "$RUNNER_TEMP/smoke/"
+          cd "$RUNNER_TEMP/smoke"
+          "./vcf-telegraf-helper-${{ matrix.name }}${{ matrix.ext }}" --help
+          "./vcf-telegraf-helper-${{ matrix.name }}${{ matrix.ext }}" render --cpu --mem --disk --net
+
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: vcf-telegraf-helper-${{ matrix.name }}
+          path: dist/vcf-telegraf-helper-${{ matrix.name }}${{ matrix.ext }}
+          if-no-files-found: error
+
+  publish:
+    needs: binaries
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Check out
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+
+      - name: Build Python wheel and sdist
+        run: |
+          python -m pip install --upgrade pip build
+          python -m build
+          ls -l dist/
+
+      - name: Download all platform binaries
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          path: binaries
+          merge-multiple: true
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          chmod +x binaries/vcf-telegraf-helper-linux binaries/vcf-telegraf-helper-macos-arm64 binaries/vcf-telegraf-helper-macos-x86_64 || true
+          ls -l binaries/
+          TAG="$GITHUB_REF_NAME"
+          ASSETS="dist/*.whl dist/*.tar.gz binaries/vcf-telegraf-helper-linux binaries/vcf-telegraf-helper-macos-arm64 binaries/vcf-telegraf-helper-macos-x86_64 binaries/vcf-telegraf-helper-windows.exe"
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$TAG" $ASSETS --clobber --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create "$TAG" $ASSETS \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "vcf-ops-telegraf-helper $TAG" \
+              --notes "Multi-platform standalone binaries for Linux, macOS (Apple Silicon and Intel), and Windows, plus Python package distributions."
+          fi
