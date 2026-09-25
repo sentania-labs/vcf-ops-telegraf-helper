@@ -44,7 +44,7 @@ class VCFOpsIntegration(ABC):
         pass
 
     @abstractmethod
-    def prepare_telegraf_integration(self) -> IntegrationArtifacts:
+    def prepare_telegraf_integration(self, os_family: str = "linux") -> IntegrationArtifacts:
         """Prepare tokens, URLs, and artifacts for the open-source Telegraf workflow."""
         pass
 

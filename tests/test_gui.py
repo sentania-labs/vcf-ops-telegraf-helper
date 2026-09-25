@@ -97,27 +97,62 @@ def test_main_window_theme_toggle(qapp, tmp_path):
     assert window.current_theme == "dark"
 
 
-def test_main_window_endpoint_detection_mock(qapp, tmp_path):
-    """Verify endpoint detection with Mock executor updates UI state."""
+def test_main_window_endpoint_detection_linux(qapp, tmp_path):
+    """Verify Linux endpoint detection updates UI state with discovered details."""
+    from unittest.mock import MagicMock
+    from vcf_ops_telegraf_helper.executors.base import CommandResult
+
     state_file = tmp_path / "state.json"
     store = StateStore(state_file=state_file)
     window = MainWindow(state_store=store)
 
-    window.ep_host_input.setText("mock-host.sentania.local")
-    window.ep_method_combo.setCurrentIndex(1)  # Mock (Simulated)
+    window.ep_host_input.setText("linux-host.corp.local")
+    mock_exec = MagicMock()
+    mock_exec.test_connection.return_value = True
+    mock_exec.execute.side_effect = lambda cmd, **kw: CommandResult(
+        exit_code=0,
+        stdout='PRETTY_NAME="Ubuntu 22.04 LTS"' if "os-release" in cmd else ("active" if "systemctl" in cmd else "x86_64"),
+        command=cmd,
+    )
+    window._create_executor = lambda target: mock_exec
 
     window._detect_endpoint()
     assert "Connected & Discovered" in window.ep_status_label.text()
-    assert "Telegraf Installed: YES" in window.ep_details_box.toPlainText()
+    assert "Ubuntu 22.04 LTS" in window.ep_details_box.toPlainText()
 
 
-def test_main_window_vcf_connection_mock(qapp, tmp_path):
-    """Verify VCF connection test with mock adapter updates UI state."""
+def test_main_window_endpoint_detection_windows(qapp, tmp_path):
+    """Verify Windows endpoint detection adjusts defaults and shows Windows paths."""
     state_file = tmp_path / "state.json"
     store = StateStore(state_file=state_file)
     window = MainWindow(state_store=store)
 
-    window.mock_vcf_check.setChecked(True)
-    window._test_vcf_connection()
+    window.ep_os_combo.setCurrentText("Windows")
+    assert window.ep_user_input.text() == "Administrator"
+    assert not window.ep_key_input.isEnabled()
+
+    from unittest.mock import MagicMock
+    mock_exec = MagicMock()
+    mock_exec.test_connection.return_value = True
+    window._create_executor = lambda target: mock_exec
+
+    window._detect_endpoint()
+    assert "Connected & Discovered (Windows)" in window.ep_status_label.text()
+    assert "C:\\telegraf\\telegraf.d" in window.ep_details_box.toPlainText()
+    assert "telegraf-utils.ps1" in window.ep_details_box.toPlainText()
+
+
+def test_main_window_vcf_connection(qapp, tmp_path):
+    """Verify VCF connection test with adapter updates UI status."""
+    from unittest.mock import MagicMock, patch
+
+    state_file = tmp_path / "state.json"
+    store = StateStore(state_file=state_file)
+    window = MainWindow(state_store=store)
+
+    mock_adapter = MagicMock()
+    mock_adapter.validate_connection.return_value = True
+    with patch("vcf_ops_telegraf_helper.gui.main_window.get_adapter", return_value=mock_adapter):
+        window._test_vcf_connection()
 
     assert "PASS" in window.vcf_status_label.text()

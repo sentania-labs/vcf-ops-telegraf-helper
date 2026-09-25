@@ -33,12 +33,13 @@ class MockVCFOpsIntegration(VCFOpsIntegration):
     def get_collector_information(self) -> CollectorInfo:
         return self.env.collector
 
-    def prepare_telegraf_integration(self) -> IntegrationArtifacts:
+    def prepare_telegraf_integration(self, os_family: str = "linux") -> IntegrationArtifacts:
         collector_addr = self.env.collector.address
+        script_name = "telegraf-utils.ps1" if os_family.lower() == "windows" else "telegraf-utils.sh"
         return IntegrationArtifacts(
             token="simulated-vcf-token-abc123xyz",
             collector_address=collector_addr,
-            script_url=f"https://{collector_addr}/downloads/salt/telegraf-utils.sh",
+            script_url=f"https://{collector_addr}/downloads/salt/{script_name}",
             output_url=f"https://{collector_addr}/opensource/default/metric",
             skip_certificate=not self.env.verify_ssl,
         )

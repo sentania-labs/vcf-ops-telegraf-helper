@@ -52,7 +52,10 @@ class LocalExecutor(EndpointExecutor):
             dest.write_text(source_content, encoding="utf-8")
         else:
             dest.write_bytes(source_content)
-        os.chmod(dest, mode)
+        try:
+            os.chmod(dest, mode)
+        except OSError:
+            pass
 
     def download(self, source_path: str) -> str:
         return Path(source_path).read_text(encoding="utf-8")

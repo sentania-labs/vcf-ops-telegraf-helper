@@ -40,6 +40,17 @@ def run_gui(theme: str = "dark") -> int:
         app = QApplication(sys.argv)
     app.setApplicationName("VCF Operations Open Telegraf Helper")
 
+    # Hide background console window on Windows
+    if sys.platform == "win32":
+        try:
+            import ctypes
+
+            hwnd = ctypes.windll.kernel32.GetConsoleWindow()
+            if hwnd:
+                ctypes.windll.user32.ShowWindow(hwnd, 0)  # SW_HIDE
+        except Exception:
+            pass
+
     window = MainWindow()
     if theme in ("light", "dark"):
         window.current_theme = theme

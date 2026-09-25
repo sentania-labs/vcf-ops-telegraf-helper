@@ -11,6 +11,7 @@ Provides the complete 5-step guided onboarding workflow:
 from __future__ import annotations
 
 from pathlib import Path
+import sys
 from typing import Any, Optional
 
 from PySide6.QtCore import QObject, QThread, Signal
@@ -38,13 +39,16 @@ from PySide6.QtWidgets import (
 )
 
 from vcf_ops_telegraf_helper.adapters.factory import get_adapter
-from vcf_ops_telegraf_helper.adapters.mock import MockVCFOpsIntegration
 from vcf_ops_telegraf_helper.executors.local import LocalExecutor
-from vcf_ops_telegraf_helper.executors.mock import MockExecutor
 from vcf_ops_telegraf_helper.executors.package import PackageExecutor
 from vcf_ops_telegraf_helper.executors.ssh import SSHExecutor
 from vcf_ops_telegraf_helper.gui.theme import build_stylesheet
-from vcf_ops_telegraf_helper.models.endpoint import ConnectionMethod, EndpointTarget
+from vcf_ops_telegraf_helper.logger import get_log_file_path, get_logger
+from vcf_ops_telegraf_helper.models.endpoint import (
+    ConnectionMethod,
+    EndpointTarget,
+    OSFamily,
+)
 from vcf_ops_telegraf_helper.models.monitoring import (
     CpuInputConfig,
     DiskInputConfig,
@@ -98,6 +102,7 @@ class MainWindow(QMainWindow):
         self.current_theme = "dark"
         self.last_summary: Optional[RunSummary] = None
         self.worker_thread: Optional[QThread] = None
+        self.logger = get_logger("gui")
 
         self.setWindowTitle("VCF Operations Open Telegraf Helper")
         self.resize(1020, 720)
@@ -106,6 +111,7 @@ class MainWindow(QMainWindow):
         self._init_ui()
         self._apply_theme()
         self._load_saved_state()
+        self.logger.info("MainWindow initialized")
 
     def _apply_theme(self) -> None:
         self.setStyleSheet(build_stylesheet(self.current_theme))
@@ -115,6 +121,22 @@ class MainWindow(QMainWindow):
     def _toggle_theme(self) -> None:
         self.current_theme = "light" if self.current_theme == "dark" else "dark"
         self._apply_theme()
+
+    def _show_log_dialog(self) -> None:
+        log_path = get_log_file_path()
+        content = "Log file does not exist yet."
+        if log_path.exists():
+            try:
+                lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
+                content = "\n".join(lines[-200:])
+            except Exception as exc:
+                content = f"Error reading log file: {exc}"
+
+        dlg = QMessageBox(self)
+        dlg.setWindowTitle("Application Log")
+        dlg.setText(f"Log file: {log_path}")
+        dlg.setDetailedText(content)
+        dlg.exec()
 
     def _init_ui(self) -> None:
         central = QWidget(self)
@@ -131,7 +153,7 @@ class MainWindow(QMainWindow):
 
         title_label = QLabel("VCF Operations Open Telegraf Helper")
         title_label.setProperty("class", "lattice-title")
-        subtitle_label = QLabel("v0.1.0  |  Broadcom Supported Workflow  |  Local Utility")
+        subtitle_label = QLabel("v0.1.5  |  Broadcom Supported Workflow  |  Local Utility")
         subtitle_label.setProperty("class", "lattice-caption")
 
         header_title_col = QVBoxLayout()
@@ -141,6 +163,10 @@ class MainWindow(QMainWindow):
 
         header_layout.addLayout(header_title_col)
         header_layout.addStretch()
+
+        self.log_btn = QPushButton("View Log")
+        self.log_btn.clicked.connect(self._show_log_dialog)
+        header_layout.addWidget(self.log_btn)
 
         self.theme_btn = QPushButton("Theme: Light")
         self.theme_btn.clicked.connect(self._toggle_theme)
@@ -275,9 +301,6 @@ class MainWindow(QMainWindow):
         self.vcf_ssl_check = QCheckBox("Verify TLS certificates (disable for self-signed lab certs)")
         c_layout.addWidget(self.vcf_ssl_check)
 
-        self.mock_vcf_check = QCheckBox("Simulate VCF Operations (Offline test adapter)")
-        c_layout.addWidget(self.mock_vcf_check)
-
         btn_row = QHBoxLayout()
         self.test_vcf_btn = QPushButton("Validate VCF Connection")
         self.test_vcf_btn.clicked.connect(self._test_vcf_connection)
@@ -307,16 +330,16 @@ class MainWindow(QMainWindow):
         self.vcf_status_label.setText("Testing connection...")
         try:
             env = self._get_vcf_env()
-            if self.mock_vcf_check.isChecked():
-                adapter = MockVCFOpsIntegration(env=env)
-            else:
-                adapter = get_adapter(env)
+            self.logger.info("Validating VCF connection to %s", env.url)
+            adapter = get_adapter(env)
             valid = adapter.validate_connection()
             if valid:
+                self.logger.info("VCF connection validated successfully to %s", env.url)
                 self.vcf_status_label.setText("Status: PASS (Connected)")
                 self.vcf_status_label.setStyleSheet("color: #199e70; font-weight: 600;")
                 self.state_store.save_environment(env)
             else:
+                self.logger.warning("VCF connection refused or unreachable for %s", env.url)
                 self.vcf_status_label.setText("Status: FAIL (Connection refused or unreachable)")
                 self.vcf_status_label.setStyleSheet("color: #d95926; font-weight: 600;")
         except Exception as exc:
@@ -361,23 +384,30 @@ class MainWindow(QMainWindow):
         self.ep_host_input = QLineEdit("10.10.10.101")
         grid.addWidget(self.ep_host_input, 0, 1)
 
-        grid.addWidget(QLabel("Connection Method:"), 1, 0)
+        grid.addWidget(QLabel("Target OS:"), 1, 0)
+        self.ep_os_combo = QComboBox()
+        self.ep_os_combo.addItems(["Linux", "Windows"])
+        self.ep_os_combo.currentTextChanged.connect(self._on_os_changed)
+        grid.addWidget(self.ep_os_combo, 1, 1)
+
+        grid.addWidget(QLabel("Connection Method:"), 2, 0)
         self.ep_method_combo = QComboBox()
-        self.ep_method_combo.addItems(["SSH (Linux Remote)", "Mock (Simulated)", "Local Subprocess", "Package Script Bundle"])
-        grid.addWidget(self.ep_method_combo, 1, 1)
+        self.ep_method_combo.addItems(["SSH (Linux Remote)", "Local Subprocess", "Package Script Bundle"])
+        grid.addWidget(self.ep_method_combo, 2, 1)
 
-        grid.addWidget(QLabel("SSH Username:"), 2, 0)
+        grid.addWidget(QLabel("Username:"), 3, 0)
         self.ep_user_input = QLineEdit("root")
-        grid.addWidget(self.ep_user_input, 2, 1)
+        grid.addWidget(self.ep_user_input, 3, 1)
 
-        grid.addWidget(QLabel("SSH Password:"), 3, 0)
+        grid.addWidget(QLabel("Password:"), 4, 0)
         self.ep_pass_input = QLineEdit()
         self.ep_pass_input.setEchoMode(QLineEdit.Password)
-        grid.addWidget(self.ep_pass_input, 3, 1)
+        grid.addWidget(self.ep_pass_input, 4, 1)
 
-        grid.addWidget(QLabel("SSH Key Path:"), 4, 0)
+        self.ep_key_label = QLabel("SSH Key Path:")
+        grid.addWidget(self.ep_key_label, 5, 0)
         self.ep_key_input = QLineEdit("~/.ssh/id_rsa")
-        grid.addWidget(self.ep_key_input, 4, 1)
+        grid.addWidget(self.ep_key_input, 5, 1)
 
         c_layout.addLayout(grid)
 
@@ -420,15 +450,62 @@ class MainWindow(QMainWindow):
         v.addWidget(scroll)
         return page
 
+    def _on_os_changed(self, os_name: str) -> None:
+        if os_name.lower() == "windows":
+            if self.ep_user_input.text() == "root":
+                self.ep_user_input.setText("Administrator")
+            self.ep_key_input.setEnabled(False)
+            self.ep_key_label.setEnabled(False)
+        else:
+            if self.ep_user_input.text() == "Administrator":
+                self.ep_user_input.setText("root")
+            self.ep_key_input.setEnabled(True)
+            self.ep_key_label.setEnabled(True)
+
     def _detect_endpoint(self) -> None:
         self.ep_status_label.setText("Detecting...")
         try:
             target = self._get_endpoint_target()
+            self.logger.info("Detecting endpoint %s (%s, OS: %s)", target.hostname, target.connection_method.value, target.os_family.value)
             executor = self._create_executor(target)
             connected = executor.test_connection()
             if not connected:
+                self.logger.warning("Endpoint connection test failed for %s", target.hostname)
                 self.ep_status_label.setText("Connection failed: unable to connect")
                 self.ep_status_label.setStyleSheet("color: #d95926;")
+                return
+
+            if target.os_family == OSFamily.WINDOWS:
+                os_version = "Microsoft Windows"
+                arch = "x86_64"
+                installed = False
+                version_str = "N/A"
+                running = False
+                if target.connection_method == ConnectionMethod.LOCAL and sys.platform == "win32":
+                    telegraf_exe = Path("C:/telegraf/telegraf.exe")
+                    installed = telegraf_exe.exists()
+                    if installed:
+                        ver_res = executor.execute("C:\\telegraf\\telegraf.exe version", timeout=5)
+                        if ver_res.success:
+                            version_str = ver_res.stdout.strip()
+                    svc_res = executor.execute("sc.exe query telegraf", timeout=5)
+                    running = svc_res.success and "RUNNING" in svc_res.stdout
+
+                self.ep_status_label.setText("Connected & Discovered (Windows)")
+                self.ep_status_label.setStyleSheet("color: #199e70; font-weight: 600;")
+                collector_addr = self._get_vcf_env().collector.address
+                details = [
+                    f"OS: {os_version}",
+                    f"Architecture: {arch}",
+                    f"Telegraf Installed: {'YES' if installed else 'NO'}",
+                    f"Telegraf Version: {version_str}",
+                    f"Service Running: {'YES' if running else 'NO'}",
+                    "Config Directory: C:\\telegraf\\telegraf.d",
+                    f"Helper Script: https://{collector_addr}/downloads/salt/telegraf-utils.ps1",
+                ]
+                self.ep_details_box.setPlainText("\n".join(details))
+                self.state_store.record_endpoint(target.hostname)
+                self.logger.info("Endpoint discovered successfully: %s", target.hostname)
                 return
 
             arch_res = executor.execute("uname -m", timeout=5)
@@ -436,11 +513,15 @@ class MainWindow(QMainWindow):
 
             os_rel = executor.execute("cat /etc/os-release", timeout=5)
             os_version = "Unknown Linux"
-            if os_rel.success:
+            if os_rel.success and os_rel.stdout.strip():
                 for line in os_rel.stdout.splitlines():
                     if line.startswith("PRETTY_NAME="):
-                        os_version = line.split("=", 1)[1].strip('"')
+                        os_version = line.split("=", 1)[1].strip('"\'')
                         break
+                    if line.startswith("NAME=") and os_version == "Unknown Linux":
+                        os_version = line.split("=", 1)[1].strip('"\'')
+                if os_version == "Unknown Linux" and not any("=" in entry for entry in os_rel.stdout.splitlines()):
+                    os_version = os_rel.stdout.strip().splitlines()[0]
 
             which_res = executor.execute("which telegraf", timeout=5)
             installed = which_res.success
@@ -458,6 +539,7 @@ class MainWindow(QMainWindow):
             self.ep_status_label.setText("Connected & Discovered")
             self.ep_status_label.setStyleSheet("color: #199e70; font-weight: 600;")
 
+            collector_addr = self._get_vcf_env().collector.address
             details = [
                 f"OS: {os_version}",
                 f"Architecture: {arch}",
@@ -465,10 +547,13 @@ class MainWindow(QMainWindow):
                 f"Telegraf Version: {version_str}",
                 f"Service Running: {'YES' if running else 'NO'}",
                 "Config Directory: /etc/telegraf/telegraf.d",
+                f"Helper Script: https://{collector_addr}/downloads/salt/telegraf-utils.sh",
             ]
             self.ep_details_box.setPlainText("\n".join(details))
             self.state_store.record_endpoint(target.hostname)
+            self.logger.info("Endpoint discovered successfully: %s", target.hostname)
         except Exception as exc:
+            self.logger.exception("Endpoint detection exception for %s", self.ep_host_input.text().strip())
             self.ep_status_label.setText(f"Detection error: {exc}")
             self.ep_status_label.setStyleSheet("color: #d95926;")
 
@@ -666,11 +751,17 @@ class MainWindow(QMainWindow):
             verify_ssl=env.verify_ssl,
         )
 
+        is_win = target.os_family == OSFamily.WINDOWS
+        script_file = "telegraf-utils.ps1" if is_win else "telegraf-utils.sh"
+        conf_dir = "C:\\telegraf\\telegraf.d" if is_win else "/etc/telegraf/telegraf.d"
+
         summary_lines = [
-            f"Target: {target.hostname} ({target.connection_method.value})",
+            f"Target: {target.hostname} ({target.connection_method.value}, OS: {target.os_family.value})",
             f"VCF Collector: {env.collector.address} (SSL Verify: {env.verify_ssl})",
+            f"Helper Script: https://{env.collector.address}/downloads/salt/{script_file}",
             f"Deployment Mode: {mode.value}",
-            "Managed Fragments: /etc/telegraf/telegraf.d/vcf-helper-system.conf, /etc/telegraf/telegraf.d/cloudproxy-http.conf",
+            f"Config Directory: {conf_dir}",
+            f"Managed Fragments: {conf_dir}/vcf-helper-system.conf, {conf_dir}/cloudproxy-http.conf",
         ]
         self.review_summary_box.setPlainText("\n".join(summary_lines))
         self.preview_system_box.setPlainText(sys_toml)
@@ -780,10 +871,7 @@ class MainWindow(QMainWindow):
         )
 
         executor = self._create_executor(target)
-        if self.mock_vcf_check.isChecked():
-            adapter = MockVCFOpsIntegration(env=env)
-        else:
-            adapter = get_adapter(env)
+        adapter = get_adapter(env)
 
         workflow = ConfigureEndpointWorkflow(
             target=target,
@@ -870,10 +958,14 @@ class MainWindow(QMainWindow):
         method_str = self.ep_method_combo.currentText().split()[0].lower()
         if method_str not in ("ssh", "mock", "local", "package"):
             method_str = "ssh"
+        os_str = getattr(self, "ep_os_combo", None)
+        os_family = OSFamily.WINDOWS if os_str and os_str.currentText().lower() == "windows" else OSFamily.LINUX
+        default_user = "Administrator" if os_family == OSFamily.WINDOWS else "root"
         return EndpointTarget(
             hostname=self.ep_host_input.text().strip() or "10.10.10.101",
+            os_family=os_family,
             connection_method=ConnectionMethod(method_str),
-            username=self.ep_user_input.text().strip() or "root",
+            username=self.ep_user_input.text().strip() or default_user,
             password=self.ep_pass_input.text().strip() or None,
             key_filename=self.ep_key_input.text().strip() or None,
         )
@@ -897,13 +989,17 @@ class MainWindow(QMainWindow):
 
     def _create_executor(self, target: EndpointTarget) -> Any:
         m = target.connection_method.value
-        if m == "mock":
-            return MockExecutor()
         if m == "local":
             return LocalExecutor()
         if m == "package":
             return PackageExecutor(output_dir="./vcf-telegraf-bundle")
-        return SSHExecutor(target=target)
+        return SSHExecutor(
+            hostname=target.hostname,
+            port=target.port,
+            username=target.username,
+            password=target.password,
+            key_filename=target.key_filename,
+        )
 
     def _load_saved_state(self) -> None:
         recent_envs = self.state_store.list_environments()

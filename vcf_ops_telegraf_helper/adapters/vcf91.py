@@ -78,7 +78,7 @@ class VCF91OpenTelegrafIntegration(VCFOpsIntegration):
         """Return collector target details."""
         return self.env.collector
 
-    def prepare_telegraf_integration(self) -> IntegrationArtifacts:
+    def prepare_telegraf_integration(self, os_family: str = "linux") -> IntegrationArtifacts:
         """Prepare artifacts required for Cloud Proxy Wavefront ingestion."""
         token = self.env.token
         if not token:
@@ -89,10 +89,11 @@ class VCF91OpenTelegrafIntegration(VCFOpsIntegration):
                 token = "local-simulated-token"
 
         collector_addr = self.env.collector.address
+        script_name = "telegraf-utils.ps1" if os_family.lower() == "windows" else "telegraf-utils.sh"
         return IntegrationArtifacts(
             token=token,
             collector_address=collector_addr,
-            script_url=f"https://{collector_addr}/downloads/salt/telegraf-utils.sh",
+            script_url=f"https://{collector_addr}/downloads/salt/{script_name}",
             output_url=f"https://{collector_addr}/opensource/default/metric",
             skip_certificate=not self.env.verify_ssl,
             ca_cert_path=self.env.ca_cert_path,
