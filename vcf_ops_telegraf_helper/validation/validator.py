@@ -52,13 +52,23 @@ class Validator:
             or config.swap.enabled
             or config.diskio.enabled
             or config.processes.enabled
+            or config.win_perf_counters.enabled
+            or config.win_services.enabled
+            or config.nginx.enabled
+            or config.apache.enabled
+            or config.mysql.enabled
+            or config.postgresql.enabled
+            or config.mssql.enabled
+            or config.docker.enabled
+            or config.ping.enabled
+            or bool(config.custom_toml and config.custom_toml.strip())
         )
         if not enabled_any:
             return ValidationResult(
                 domain="Structured Configuration",
                 is_valid=False,
                 message="No monitoring inputs selected",
-                remediation="Enable at least one core metric plugin (e.g. CPU or Memory).",
+                remediation="Enable at least one core metric or workload plugin.",
             )
 
         return ValidationResult(
@@ -117,25 +127,39 @@ class Validator:
         executor: EndpointExecutor,
         collector_address: str,
         port: int = 443,
+        is_windows: bool = False,
     ) -> ValidationResult:
         """Check whether the target endpoint can connect to the Cloud Proxy on HTTPS."""
-        # Use curl or bash dev/tcp socket test on the endpoint
-        cmd = f"curl -k -s -o /dev/null -w '%{{http_code}}' https://{collector_address}:{port}/ || nc -z -w3 {collector_address} {port} || timeout 3 bash -c '</dev/tcp/{collector_address}/{port}'"
-        res = executor.execute(cmd, timeout=10)
-
-        # HTTP status code or success exit indicates network reachability
-        if res.exit_code == 0 or res.stdout.strip() in ("200", "401", "403", "404"):
-            return ValidationResult(
-                domain="Collector Reachability",
-                is_valid=True,
-                message=f"Cloud Proxy {collector_address}:{port} is reachable from target",
+        if is_windows or type(executor).__name__ == "WinRMExecutor":
+            cmd = (
+                f"try {{ $c = New-Object System.Net.Sockets.TcpClient; $c.Connect('{collector_address}', {port}); "
+                "$c.Connected; $c.Close() } catch { Test-NetConnection -ComputerName "
+                f"'{collector_address}' -Port {port} -WarningAction SilentlyContinue | Select-Object -ExpandProperty TcpTestSucceeded }}"
             )
+            res = executor.execute(cmd, timeout=10)
+            if res.exit_code == 0 and "True" in str(res.stdout):
+                return ValidationResult(
+                    domain="Collector Reachability",
+                    is_valid=True,
+                    message=f"Cloud Proxy {collector_address}:{port} is reachable from target",
+                )
+        else:
+            # Use curl or bash dev/tcp socket test on the endpoint
+            cmd = f"curl -k -s -o /dev/null -w '%{{http_code}}' https://{collector_address}:{port}/ || nc -z -w3 {collector_address} {port} || timeout 3 bash -c '</dev/tcp/{collector_address}/{port}'"
+            res = executor.execute(cmd, timeout=10)
+            if res.exit_code == 0 or str(res.stdout).strip() in ("200", "401", "403", "404"):
+                return ValidationResult(
+                    domain="Collector Reachability",
+                    is_valid=True,
+                    message=f"Cloud Proxy {collector_address}:{port} is reachable from target",
+                )
 
+        err_detail = str(res.stderr or res.stdout or "").strip()
         return ValidationResult(
             domain="Collector Reachability",
             is_valid=False,
             message=f"Cloud Proxy {collector_address}:{port} is unreachable from target",
-            details=res.stderr or res.stdout,
+            details=err_detail or None,
             remediation="Verify firewall rules and routing from target to Cloud Proxy port 443.",
         )
 
@@ -145,9 +169,13 @@ class Validator:
         telegraf_bin: str,
         config_path: str,
         config_dir: str,
+        is_windows: bool = False,
     ) -> ValidationResult:
         """Run Telegraf test mode to validate all plugins and syntax on the endpoint."""
-        cmd = f"{telegraf_bin} --test --config {config_path} --config-directory {config_dir}"
+        if is_windows or type(executor).__name__ == "WinRMExecutor":
+            cmd = f"& '{telegraf_bin}' --test --config '{config_path}' --config-directory '{config_dir}'"
+        else:
+            cmd = f"{telegraf_bin} --test --config {config_path} --config-directory {config_dir}"
         res = executor.execute(cmd, timeout=15)
 
         if res.exit_code == 0:
@@ -167,24 +195,38 @@ class Validator:
         )
 
     @staticmethod
-    def validate_service_state(executor: EndpointExecutor) -> ValidationResult:
+    def validate_service_state(
+        executor: EndpointExecutor,
+        is_windows: bool = False,
+    ) -> ValidationResult:
         """Verify that the Telegraf service is active on the target."""
-        res = executor.execute("systemctl is-active telegraf", timeout=5)
-        state = res.stdout.strip()
-
-        if res.exit_code == 0 and state == "active":
-            return ValidationResult(
-                domain="Service State",
-                is_valid=True,
-                message="Telegraf systemd service is active (running)",
-            )
+        if is_windows or type(executor).__name__ == "WinRMExecutor":
+            res = executor.execute("(Get-Service telegraf -ErrorAction SilentlyContinue).Status", timeout=5)
+            state = res.stdout.strip()
+            if res.exit_code == 0 and "Running" in state:
+                return ValidationResult(
+                    domain="Service State",
+                    is_valid=True,
+                    message="Telegraf Windows service is active (running)",
+                )
+            remediation = "Review 'Get-EventLog -LogName Application -Source telegraf' or service logs for errors."
+        else:
+            res = executor.execute("systemctl is-active telegraf", timeout=5)
+            state = res.stdout.strip()
+            if res.exit_code == 0 and state == "active":
+                return ValidationResult(
+                    domain="Service State",
+                    is_valid=True,
+                    message="Telegraf systemd service is active (running)",
+                )
+            remediation = "Review 'systemctl status telegraf' or 'journalctl -u telegraf' for startup errors."
 
         return ValidationResult(
             domain="Service State",
             is_valid=False,
             message=f"Telegraf service is not active (state: {state or 'unknown'})",
             details=res.stderr or res.stdout,
-            remediation="Review 'systemctl status telegraf' or 'journalctl -u telegraf' for startup errors.",
+            remediation=remediation,
         )
 
     @staticmethod

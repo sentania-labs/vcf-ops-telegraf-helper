@@ -34,14 +34,18 @@ from PySide6.QtWidgets import (
     QRadioButton,
     QScrollArea,
     QStackedWidget,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
 
+from vcf_ops_telegraf_helper.adapters.base import VCFOpsIntegration
 from vcf_ops_telegraf_helper.adapters.factory import get_adapter
+from vcf_ops_telegraf_helper.executors.base import EndpointExecutor
 from vcf_ops_telegraf_helper.executors.local import LocalExecutor
 from vcf_ops_telegraf_helper.executors.package import PackageExecutor
 from vcf_ops_telegraf_helper.executors.ssh import SSHExecutor
+from vcf_ops_telegraf_helper.executors.winrm import WinRMExecutor
 from vcf_ops_telegraf_helper.gui.theme import build_stylesheet
 from vcf_ops_telegraf_helper.logger import get_log_file_path, get_logger
 from vcf_ops_telegraf_helper.models.endpoint import (
@@ -50,13 +54,24 @@ from vcf_ops_telegraf_helper.models.endpoint import (
     OSFamily,
 )
 from vcf_ops_telegraf_helper.models.monitoring import (
+    ApacheInputConfig,
     CpuInputConfig,
     DiskInputConfig,
+    DiskIoInputConfig,
+    DockerInputConfig,
     MemInputConfig,
     MonitoringConfig,
+    MssqlInputConfig,
+    MysqlInputConfig,
     NetInputConfig,
+    NginxInputConfig,
+    PingInputConfig,
+    PostgresqlInputConfig,
+    ProcessesInputConfig,
     SwapInputConfig,
     SystemInputConfig,
+    WinPerfCountersInputConfig,
+    WinServicesInputConfig,
 )
 from vcf_ops_telegraf_helper.models.vcf import CollectorInfo, VCFEnvironment
 from vcf_ops_telegraf_helper.models.workflow import (
@@ -71,6 +86,22 @@ from vcf_ops_telegraf_helper.storage.state import StateStore
 from vcf_ops_telegraf_helper.workflow.engine import ConfigureEndpointWorkflow
 
 
+class QtProgressReporter:
+    """Adapts workflow progress events into Qt signals."""
+
+    def __init__(self, callback: Any) -> None:
+        self._callback = callback
+
+    def on_stage_start(self, stage: WorkflowStage) -> None:
+        pass
+
+    def on_stage_complete(self, result: StageResult) -> None:
+        self._callback(result)
+
+    def on_message(self, message: str) -> None:
+        pass
+
+
 class WorkflowWorker(QObject):
     """Background worker executing the ConfigureEndpointWorkflow to keep Qt event loop responsive."""
 
@@ -78,19 +109,33 @@ class WorkflowWorker(QObject):
     finished = Signal(object)  # RunSummary
     failed = Signal(str)
 
-    def __init__(self, workflow: ConfigureEndpointWorkflow) -> None:
+    def __init__(
+        self,
+        environment: VCFEnvironment,
+        target: EndpointTarget,
+        monitoring: MonitoringConfig,
+        executor: EndpointExecutor,
+        adapter: VCFOpsIntegration,
+        options: Optional[WorkflowOptions] = None,
+    ) -> None:
         super().__init__()
-        self.workflow = workflow
+        self.reporter = QtProgressReporter(self.stage_updated.emit)
+        self.workflow = ConfigureEndpointWorkflow(
+            environment=environment,
+            target=target,
+            monitoring=monitoring,
+            executor=executor,
+            adapter=adapter,
+            options=options,
+            reporter=self.reporter,
+        )
 
     def run(self) -> None:
         try:
-            summary = self.workflow.run(progress_callback=self._on_stage)
+            summary = self.workflow.run()
             self.finished.emit(summary)
         except Exception as exc:
             self.failed.emit(str(exc))
-
-    def _on_stage(self, stage: WorkflowStage, result: StageResult) -> None:
-        self.stage_updated.emit(result)
 
 
 class MainWindow(QMainWindow):
@@ -153,7 +198,7 @@ class MainWindow(QMainWindow):
 
         title_label = QLabel("VCF Operations Open Telegraf Helper")
         title_label.setProperty("class", "lattice-title")
-        subtitle_label = QLabel("v0.1.5  |  Broadcom Supported Workflow  |  Local Utility")
+        subtitle_label = QLabel("v0.2.0  |  Broadcom Supported Workflow  |  Local Utility")
         subtitle_label.setProperty("class", "lattice-caption")
 
         header_title_col = QVBoxLayout()
@@ -380,34 +425,42 @@ class MainWindow(QMainWindow):
         grid = QGridLayout()
         grid.setSpacing(10)
 
-        grid.addWidget(QLabel("Hostname or IP Address:"), 0, 0)
-        self.ep_host_input = QLineEdit("10.10.10.101")
-        grid.addWidget(self.ep_host_input, 0, 1)
-
-        grid.addWidget(QLabel("Target OS:"), 1, 0)
+        grid.addWidget(QLabel("Target OS:"), 0, 0)
         self.ep_os_combo = QComboBox()
         self.ep_os_combo.addItems(["Linux", "Windows"])
         self.ep_os_combo.currentTextChanged.connect(self._on_os_changed)
-        grid.addWidget(self.ep_os_combo, 1, 1)
+        grid.addWidget(self.ep_os_combo, 0, 1)
+
+        grid.addWidget(QLabel("Hostname or IP Address:"), 1, 0)
+        self.ep_host_input = QLineEdit("10.10.10.101")
+        grid.addWidget(self.ep_host_input, 1, 1)
 
         grid.addWidget(QLabel("Connection Method:"), 2, 0)
         self.ep_method_combo = QComboBox()
-        self.ep_method_combo.addItems(["SSH (Linux Remote)", "Local Subprocess", "Package Script Bundle"])
+        self.ep_method_combo.addItems(["SSH (Linux Remote)", "WinRM (Windows Remote)", "Local Subprocess", "Package Script Bundle"])
         grid.addWidget(self.ep_method_combo, 2, 1)
 
-        grid.addWidget(QLabel("Username:"), 3, 0)
-        self.ep_user_input = QLineEdit("root")
-        grid.addWidget(self.ep_user_input, 3, 1)
+        grid.addWidget(QLabel("Port:"), 3, 0)
+        self.ep_port_input = QLineEdit("22")
+        grid.addWidget(self.ep_port_input, 3, 1)
 
-        grid.addWidget(QLabel("Password:"), 4, 0)
+        grid.addWidget(QLabel("Username:"), 4, 0)
+        self.ep_user_input = QLineEdit("root")
+        grid.addWidget(self.ep_user_input, 4, 1)
+
+        grid.addWidget(QLabel("Password:"), 5, 0)
         self.ep_pass_input = QLineEdit()
         self.ep_pass_input.setEchoMode(QLineEdit.Password)
-        grid.addWidget(self.ep_pass_input, 4, 1)
+        grid.addWidget(self.ep_pass_input, 5, 1)
 
         self.ep_key_label = QLabel("SSH Key Path:")
-        grid.addWidget(self.ep_key_label, 5, 0)
+        grid.addWidget(self.ep_key_label, 6, 0)
         self.ep_key_input = QLineEdit("~/.ssh/id_rsa")
-        grid.addWidget(self.ep_key_input, 5, 1)
+        grid.addWidget(self.ep_key_input, 6, 1)
+
+        self.ep_auto_install_check = QCheckBox("Install Telegraf agent if missing (via Cloud Proxy bootstrap script)")
+        self.ep_auto_install_check.setChecked(True)
+        grid.addWidget(self.ep_auto_install_check, 7, 0, 1, 2)
 
         c_layout.addLayout(grid)
 
@@ -452,11 +505,15 @@ class MainWindow(QMainWindow):
 
     def _on_os_changed(self, os_name: str) -> None:
         if os_name.lower() == "windows":
+            self.ep_method_combo.setCurrentText("WinRM (Windows Remote)")
+            self.ep_port_input.setText("5985")
             if self.ep_user_input.text() == "root":
                 self.ep_user_input.setText("Administrator")
             self.ep_key_input.setEnabled(False)
             self.ep_key_label.setEnabled(False)
         else:
+            self.ep_method_combo.setCurrentText("SSH (Linux Remote)")
+            self.ep_port_input.setText("22")
             if self.ep_user_input.text() == "Administrator":
                 self.ep_user_input.setText("root")
             self.ep_key_input.setEnabled(True)
@@ -481,15 +538,18 @@ class MainWindow(QMainWindow):
                 installed = False
                 version_str = "N/A"
                 running = False
-                if target.connection_method == ConnectionMethod.LOCAL and sys.platform == "win32":
-                    telegraf_exe = Path("C:/telegraf/telegraf.exe")
-                    installed = telegraf_exe.exists()
-                    if installed:
-                        ver_res = executor.execute("C:\\telegraf\\telegraf.exe version", timeout=5)
-                        if ver_res.success:
-                            version_str = ver_res.stdout.strip()
-                    svc_res = executor.execute("sc.exe query telegraf", timeout=5)
-                    running = svc_res.success and "RUNNING" in svc_res.stdout
+                if target.connection_method in (ConnectionMethod.WINRM, ConnectionMethod.LOCAL):
+                    if target.connection_method == ConnectionMethod.WINRM or sys.platform == "win32":
+                        installed = executor.file_exists("C:\\telegraf\\telegraf.exe")
+                        if installed:
+                            ver_res = executor.execute("C:\\telegraf\\telegraf.exe version", timeout=10)
+                            if ver_res.success:
+                                version_str = ver_res.stdout.strip()
+                        svc_res = executor.execute("sc.exe query telegraf", timeout=10)
+                        running = svc_res.success and "RUNNING" in svc_res.stdout
+                        caption_res = executor.execute("(Get-CimInstance Win32_OperatingSystem).Caption", timeout=10)
+                        if caption_res.success and caption_res.stdout.strip():
+                            os_version = caption_res.stdout.strip().splitlines()[0]
 
                 self.ep_status_label.setText("Connected & Discovered (Windows)")
                 self.ep_status_label.setStyleSheet("color: #199e70; font-weight: 600;")
@@ -588,33 +648,152 @@ class MainWindow(QMainWindow):
         desc.setWordWrap(True)
         c_layout.addWidget(desc)
 
-        sec_in = QLabel("METRIC INPUTS")
+        sec_in = QLabel("PLUGIN SELECTION & CONFIGURATION")
         sec_in.setProperty("class", "lattice-section-label")
         c_layout.addWidget(sec_in)
 
+        self.plugin_tabs = QTabWidget()
+
+        # Tab 1: Host OS Telemetry
+        tab_host = QWidget()
+        th_layout = QVBoxLayout(tab_host)
+        th_layout.setContentsMargins(12, 12, 12, 12)
+        th_layout.setSpacing(8)
+
         self.cpu_check = QCheckBox("CPU Metrics (inputs.cpu: percpu, totalcpu, collect_cpu_time, report_active)")
         self.cpu_check.setChecked(True)
-        c_layout.addWidget(self.cpu_check)
+        th_layout.addWidget(self.cpu_check)
 
         self.mem_check = QCheckBox("Memory Metrics (inputs.mem: system memory usage and percentages)")
         self.mem_check.setChecked(True)
-        c_layout.addWidget(self.mem_check)
+        th_layout.addWidget(self.mem_check)
 
         self.disk_check = QCheckBox("Disk Usage (inputs.disk: mount points, excluding pseudo/virtual fs)")
         self.disk_check.setChecked(True)
-        c_layout.addWidget(self.disk_check)
+        th_layout.addWidget(self.disk_check)
 
         self.net_check = QCheckBox("Network Interface Metrics (inputs.net: bandwidth and error counts)")
         self.net_check.setChecked(True)
-        c_layout.addWidget(self.net_check)
+        th_layout.addWidget(self.net_check)
 
         self.sys_check = QCheckBox("System Load & Uptime (inputs.system: 1m/5m/15m load averages)")
         self.sys_check.setChecked(True)
-        c_layout.addWidget(self.sys_check)
+        th_layout.addWidget(self.sys_check)
 
         self.swap_check = QCheckBox("Swap Usage (inputs.swap: swap in/out and space utilization)")
         self.swap_check.setChecked(True)
-        c_layout.addWidget(self.swap_check)
+        th_layout.addWidget(self.swap_check)
+
+        self.diskio_check = QCheckBox("Disk I/O (inputs.diskio: read/write byte rates and operations)")
+        self.diskio_check.setChecked(False)
+        th_layout.addWidget(self.diskio_check)
+
+        self.proc_check = QCheckBox("Process Counts (inputs.processes: total, running, sleeping, blocked)")
+        self.proc_check.setChecked(False)
+        th_layout.addWidget(self.proc_check)
+
+        th_layout.addStretch()
+        self.plugin_tabs.addTab(tab_host, "Host OS Telemetry")
+
+        # Tab 2: Windows Telemetry
+        tab_win = QWidget()
+        tw_layout = QVBoxLayout(tab_win)
+        tw_layout.setContentsMargins(12, 12, 12, 12)
+        tw_layout.setSpacing(10)
+
+        self.win_perf_check = QCheckBox("Windows Performance Counters (inputs.win_perf_counters)")
+        self.win_perf_check.setChecked(False)
+        tw_layout.addWidget(self.win_perf_check)
+        lbl_wp = QLabel("  Collects Processor, Memory, LogicalDisk, Network Interface, and System counters.")
+        lbl_wp.setProperty("class", "lattice-muted")
+        tw_layout.addWidget(lbl_wp)
+
+        self.win_svc_check = QCheckBox("Windows Services Status (inputs.win_services)")
+        self.win_svc_check.setChecked(False)
+        tw_layout.addWidget(self.win_svc_check)
+
+        svc_row = QHBoxLayout()
+        svc_row.addWidget(QLabel("  Service Names Filter (comma-separated, * for all):"))
+        self.win_svc_names_input = QLineEdit("*")
+        svc_row.addWidget(self.win_svc_names_input)
+        tw_layout.addLayout(svc_row)
+
+        tw_layout.addStretch()
+        self.plugin_tabs.addTab(tab_win, "Windows Metrics")
+
+        # Tab 3: Applications & Workloads
+        tab_apps = QWidget()
+        ta_layout = QVBoxLayout(tab_apps)
+        ta_layout.setContentsMargins(12, 12, 12, 12)
+        ta_layout.setSpacing(8)
+
+        app_grid = QGridLayout()
+        app_grid.setSpacing(8)
+
+        # NGINX
+        self.nginx_check = QCheckBox("NGINX (inputs.nginx)")
+        app_grid.addWidget(self.nginx_check, 0, 0)
+        self.nginx_url_input = QLineEdit("http://localhost/status")
+        app_grid.addWidget(self.nginx_url_input, 0, 1)
+
+        # Apache
+        self.apache_check = QCheckBox("Apache (inputs.apache)")
+        app_grid.addWidget(self.apache_check, 1, 0)
+        self.apache_url_input = QLineEdit("http://localhost/server-status?auto")
+        app_grid.addWidget(self.apache_url_input, 1, 1)
+
+        # MySQL
+        self.mysql_check = QCheckBox("MySQL / MariaDB (inputs.mysql)")
+        app_grid.addWidget(self.mysql_check, 2, 0)
+        self.mysql_server_input = QLineEdit("tcp(127.0.0.1:3306)/")
+        app_grid.addWidget(self.mysql_server_input, 2, 1)
+
+        # PostgreSQL
+        self.postgres_check = QCheckBox("PostgreSQL (inputs.postgresql)")
+        app_grid.addWidget(self.postgres_check, 3, 0)
+        self.postgres_addr_input = QLineEdit("host=localhost user=postgres sslmode=disable")
+        app_grid.addWidget(self.postgres_addr_input, 3, 1)
+
+        # MSSQL
+        self.mssql_check = QCheckBox("Microsoft SQL Server (inputs.sqlserver)")
+        app_grid.addWidget(self.mssql_check, 4, 0)
+        self.mssql_server_input = QLineEdit("Server=127.0.0.1;Port=1433;User Id=sa;Password=;app name=telegraf;log=1;")
+        app_grid.addWidget(self.mssql_server_input, 4, 1)
+
+        # Docker
+        self.docker_check = QCheckBox("Docker Containers (inputs.docker)")
+        app_grid.addWidget(self.docker_check, 5, 0)
+        self.docker_endpoint_input = QLineEdit("unix:///var/run/docker.sock")
+        app_grid.addWidget(self.docker_endpoint_input, 5, 1)
+
+        # Ping
+        self.ping_check = QCheckBox("ICMP Ping / Reachability (inputs.ping)")
+        app_grid.addWidget(self.ping_check, 6, 0)
+        self.ping_url_input = QLineEdit("10.10.10.1")
+        app_grid.addWidget(self.ping_url_input, 6, 1)
+
+        ta_layout.addLayout(app_grid)
+        ta_layout.addStretch()
+        self.plugin_tabs.addTab(tab_apps, "Applications & Workloads")
+
+        # Tab 4: Custom TOML Fragment
+        tab_custom = QWidget()
+        tc_layout = QVBoxLayout(tab_custom)
+        tc_layout.setContentsMargins(12, 12, 12, 12)
+        tc_layout.setSpacing(6)
+
+        tc_desc = QLabel("Inject custom Telegraf input plugin configurations directly into the managed configuration:")
+        tc_desc.setProperty("class", "lattice-muted")
+        tc_layout.addWidget(tc_desc)
+
+        self.custom_toml_input = QPlainTextEdit()
+        self.custom_toml_input.setProperty("class", "code-block")
+        self.custom_toml_input.setPlaceholderText("# Paste custom [[inputs.xyz]] plugin stanzas here...")
+        tc_layout.addWidget(self.custom_toml_input)
+
+        self.plugin_tabs.addTab(tab_custom, "Custom TOML")
+
+        c_layout.addWidget(self.plugin_tabs)
 
         sec_mode = QLabel("DEPLOYMENT MODE")
         sec_mode.setProperty("class", "lattice-section-label")
@@ -743,24 +922,70 @@ class MainWindow(QMainWindow):
         mon = self._get_monitoring_config()
         mode = self._get_deployment_mode()
 
+        is_win = target.os_family == OSFamily.WINDOWS
+        script_file = "telegraf-utils.ps1" if is_win else "telegraf-utils.sh"
+        conf_dir = "C:\\telegraf\\telegraf.d" if is_win else "/etc/telegraf/telegraf.d"
+        default_ca = f"{conf_dir}\\ca.pem" if is_win else f"{conf_dir}/ca.pem"
+        default_cert = f"{conf_dir}\\cert.pem" if is_win else f"{conf_dir}/cert.pem"
+        default_key = f"{conf_dir}\\key.pem" if is_win else f"{conf_dir}/key.pem"
+
         renderer = TelegrafRenderer()
         sys_toml = renderer.render_system_inputs(mon)
         out_toml = renderer.render_vcf_output(
             collector_address=env.collector.address,
             hostname=target.hostname,
             verify_ssl=env.verify_ssl,
+            ca_cert_path=default_ca,
+            cert_path=default_cert,
+            key_path=default_key,
         )
 
-        is_win = target.os_family == OSFamily.WINDOWS
-        script_file = "telegraf-utils.ps1" if is_win else "telegraf-utils.sh"
-        conf_dir = "C:\\telegraf\\telegraf.d" if is_win else "/etc/telegraf/telegraf.d"
+        active_plugins = []
+        if mon.cpu.enabled:
+            active_plugins.append("cpu")
+        if mon.mem.enabled:
+            active_plugins.append("mem")
+        if mon.disk.enabled:
+            active_plugins.append("disk")
+        if mon.net.enabled:
+            active_plugins.append("net")
+        if mon.system.enabled:
+            active_plugins.append("system")
+        if mon.swap.enabled:
+            active_plugins.append("swap")
+        if mon.diskio.enabled:
+            active_plugins.append("diskio")
+        if mon.processes.enabled:
+            active_plugins.append("processes")
+        if mon.win_perf_counters.enabled:
+            active_plugins.append("win_perf_counters")
+        if mon.win_services.enabled:
+            active_plugins.append("win_services")
+        if mon.nginx.enabled:
+            active_plugins.append("nginx")
+        if mon.apache.enabled:
+            active_plugins.append("apache")
+        if mon.mysql.enabled:
+            active_plugins.append("mysql")
+        if mon.postgresql.enabled:
+            active_plugins.append("postgresql")
+        if mon.mssql.enabled:
+            active_plugins.append("sqlserver")
+        if mon.docker.enabled:
+            active_plugins.append("docker")
+        if mon.ping.enabled:
+            active_plugins.append("ping")
+        if mon.custom_toml:
+            active_plugins.append("custom_toml")
 
         summary_lines = [
             f"Target: {target.hostname} ({target.connection_method.value}, OS: {target.os_family.value})",
             f"VCF Collector: {env.collector.address} (SSL Verify: {env.verify_ssl})",
             f"Helper Script: https://{env.collector.address}/downloads/salt/{script_file}",
+            f"Auto-Install Telegraf: {'YES' if target.install_telegraf else 'NO'}",
             f"Deployment Mode: {mode.value}",
             f"Config Directory: {conf_dir}",
+            f"Active Plugins ({len(active_plugins)}): {', '.join(active_plugins)}",
             f"Managed Fragments: {conf_dir}/vcf-helper-system.conf, {conf_dir}/cloudproxy-http.conf",
         ]
         self.review_summary_box.setPlainText("\n".join(summary_lines))
@@ -868,22 +1093,21 @@ class MainWindow(QMainWindow):
             dry_run=self.dry_run_check.isChecked(),
             restart_service=(mode == DeploymentMode.PUSH and not self.dry_run_check.isChecked()),
             verify_telemetry=True,
+            install_telegraf=target.install_telegraf,
         )
 
         executor = self._create_executor(target)
         adapter = get_adapter(env)
 
-        workflow = ConfigureEndpointWorkflow(
+        self.worker_thread = QThread()
+        self.worker = WorkflowWorker(
+            environment=env,
             target=target,
-            vcf_env=env,
             monitoring=mon,
             executor=executor,
-            vcf_adapter=adapter,
+            adapter=adapter,
             options=opts,
         )
-
-        self.worker_thread = QThread()
-        self.worker = WorkflowWorker(workflow)
         self.worker.moveToThread(self.worker_thread)
 
         self.worker_thread.started.connect(self.worker.run)
@@ -956,21 +1180,42 @@ class MainWindow(QMainWindow):
 
     def _get_endpoint_target(self) -> EndpointTarget:
         method_str = self.ep_method_combo.currentText().split()[0].lower()
-        if method_str not in ("ssh", "mock", "local", "package"):
+        if method_str not in ("ssh", "winrm", "mock", "local", "package"):
             method_str = "ssh"
         os_str = getattr(self, "ep_os_combo", None)
         os_family = OSFamily.WINDOWS if os_str and os_str.currentText().lower() == "windows" else OSFamily.LINUX
         default_user = "Administrator" if os_family == OSFamily.WINDOWS else "root"
+        try:
+            port_val = int(self.ep_port_input.text().strip())
+        except Exception:
+            port_val = 5985 if os_family == OSFamily.WINDOWS else 22
+        auto_install = self.ep_auto_install_check.isChecked() if hasattr(self, "ep_auto_install_check") else False
+
         return EndpointTarget(
             hostname=self.ep_host_input.text().strip() or "10.10.10.101",
             os_family=os_family,
             connection_method=ConnectionMethod(method_str),
+            port=port_val,
             username=self.ep_user_input.text().strip() or default_user,
             password=self.ep_pass_input.text().strip() or None,
             key_filename=self.ep_key_input.text().strip() or None,
+            winrm_use_ssl=(port_val == 5986),
+            install_telegraf=auto_install,
         )
 
     def _get_monitoring_config(self) -> MonitoringConfig:
+        svc_names_raw = self.win_svc_names_input.text().strip() if hasattr(self, "win_svc_names_input") else "*"
+        svc_list = [s.strip() for s in svc_names_raw.split(",") if s.strip()] or ["*"]
+
+        nginx_url = self.nginx_url_input.text().strip() if hasattr(self, "nginx_url_input") else "http://localhost/status"
+        apache_url = self.apache_url_input.text().strip() if hasattr(self, "apache_url_input") else "http://localhost/server-status?auto"
+        mysql_srv = self.mysql_server_input.text().strip() if hasattr(self, "mysql_server_input") else "tcp(127.0.0.1:3306)/"
+        pg_addr = self.postgres_addr_input.text().strip() if hasattr(self, "postgres_addr_input") else "host=localhost user=postgres sslmode=disable"
+        mssql_srv = self.mssql_server_input.text().strip() if hasattr(self, "mssql_server_input") else "Server=127.0.0.1;Port=1433;User Id=sa;Password=;app name=telegraf;log=1;"
+        docker_ep = self.docker_endpoint_input.text().strip() if hasattr(self, "docker_endpoint_input") else "unix:///var/run/docker.sock"
+        ping_url = self.ping_url_input.text().strip() if hasattr(self, "ping_url_input") else "10.10.10.1"
+        custom_txt = self.custom_toml_input.toPlainText().strip() if hasattr(self, "custom_toml_input") else ""
+
         return MonitoringConfig(
             cpu=CpuInputConfig(enabled=self.cpu_check.isChecked()),
             mem=MemInputConfig(enabled=self.mem_check.isChecked()),
@@ -978,6 +1223,18 @@ class MainWindow(QMainWindow):
             net=NetInputConfig(enabled=self.net_check.isChecked()),
             system=SystemInputConfig(enabled=self.sys_check.isChecked()),
             swap=SwapInputConfig(enabled=self.swap_check.isChecked()),
+            diskio=DiskIoInputConfig(enabled=bool(getattr(self, "diskio_check", None) and self.diskio_check.isChecked())),
+            processes=ProcessesInputConfig(enabled=bool(getattr(self, "proc_check", None) and self.proc_check.isChecked())),
+            win_perf_counters=WinPerfCountersInputConfig(enabled=bool(getattr(self, "win_perf_check", None) and self.win_perf_check.isChecked())),
+            win_services=WinServicesInputConfig(enabled=bool(getattr(self, "win_svc_check", None) and self.win_svc_check.isChecked()), service_names=svc_list),
+            nginx=NginxInputConfig(enabled=bool(getattr(self, "nginx_check", None) and self.nginx_check.isChecked()), urls=[nginx_url]),
+            apache=ApacheInputConfig(enabled=bool(getattr(self, "apache_check", None) and self.apache_check.isChecked()), urls=[apache_url]),
+            mysql=MysqlInputConfig(enabled=bool(getattr(self, "mysql_check", None) and self.mysql_check.isChecked()), servers=[mysql_srv]),
+            postgresql=PostgresqlInputConfig(enabled=bool(getattr(self, "postgres_check", None) and self.postgres_check.isChecked()), address=pg_addr),
+            mssql=MssqlInputConfig(enabled=bool(getattr(self, "mssql_check", None) and self.mssql_check.isChecked()), servers=[mssql_srv]),
+            docker=DockerInputConfig(enabled=bool(getattr(self, "docker_check", None) and self.docker_check.isChecked()), endpoint=docker_ep),
+            ping=PingInputConfig(enabled=bool(getattr(self, "ping_check", None) and self.ping_check.isChecked()), urls=[ping_url]),
+            custom_toml=custom_txt,
         )
 
     def _get_deployment_mode(self) -> DeploymentMode:
@@ -993,6 +1250,14 @@ class MainWindow(QMainWindow):
             return LocalExecutor()
         if m == "package":
             return PackageExecutor(output_dir="./vcf-telegraf-bundle")
+        if m == "winrm":
+            return WinRMExecutor(
+                hostname=target.hostname,
+                port=target.port,
+                username=target.username,
+                password=target.password,
+                use_ssl=target.winrm_use_ssl,
+            )
         return SSHExecutor(
             hostname=target.hostname,
             port=target.port,

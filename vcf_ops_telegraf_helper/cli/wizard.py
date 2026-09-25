@@ -18,6 +18,7 @@ from vcf_ops_telegraf_helper.executors.local import LocalExecutor
 from vcf_ops_telegraf_helper.executors.mock import MockExecutor
 from vcf_ops_telegraf_helper.executors.package import PackageExecutor
 from vcf_ops_telegraf_helper.executors.ssh import SSHExecutor
+from vcf_ops_telegraf_helper.executors.winrm import WinRMExecutor
 from vcf_ops_telegraf_helper.models.endpoint import (
     ConnectionMethod,
     EndpointTarget,
@@ -82,7 +83,7 @@ def run_wizard(console: Optional[Console] = None) -> None:
     target_host = Prompt.ask("Target Hostname or IP", default="localhost", console=con)
     conn_choice = Prompt.ask(
         "Connection method",
-        choices=["ssh", "mock", "local", "package"],
+        choices=["ssh", "winrm", "mock", "local", "package"],
         default="mock" if target_host == "localhost" else "ssh",
         console=con,
     )
@@ -90,7 +91,10 @@ def run_wizard(console: Optional[Console] = None) -> None:
     ssh_user: Optional[str] = None
     ssh_pass: Optional[str] = None
     ssh_key: Optional[str] = None
+    winrm_ssl: bool = False
+    auto_install: bool = False
     conn_method = ConnectionMethod(conn_choice)
+    is_win = conn_method == ConnectionMethod.WINRM
 
     if conn_method == ConnectionMethod.SSH:
         ssh_user = Prompt.ask("SSH Username", default="root", console=con)
@@ -100,14 +104,22 @@ def run_wizard(console: Optional[Console] = None) -> None:
             ssh_key = Prompt.ask("SSH Key Path", default=default_key, console=con)
         else:
             ssh_pass = Prompt.ask("SSH Password", password=True, console=con)
+        auto_install = Confirm.ask("Install Telegraf agent if missing via Cloud Proxy bootstrap?", default=True, console=con)
+    elif conn_method == ConnectionMethod.WINRM:
+        ssh_user = Prompt.ask("WinRM Username", default="Administrator", console=con)
+        ssh_pass = Prompt.ask("WinRM Password", password=True, console=con)
+        winrm_ssl = Confirm.ask("Use HTTPS for WinRM (port 5986)?", default=False, console=con)
+        auto_install = Confirm.ask("Install Telegraf agent if missing via Cloud Proxy bootstrap?", default=True, console=con)
 
     target = EndpointTarget(
         hostname=target_host,
-        os_family=OSFamily.LINUX,
+        os_family=OSFamily.WINDOWS if is_win else OSFamily.LINUX,
         connection_method=conn_method,
         username=ssh_user,
         password=ssh_pass,
         key_filename=ssh_key,
+        winrm_use_ssl=winrm_ssl,
+        install_telegraf=auto_install,
     )
 
     # Instantiate chosen executor
@@ -117,6 +129,14 @@ def run_wizard(console: Optional[Console] = None) -> None:
         executor = LocalExecutor()
     elif conn_method == ConnectionMethod.PACKAGE:
         executor = PackageExecutor(output_dir=f"./vcf-bundle-{target_host}")
+    elif conn_method == ConnectionMethod.WINRM:
+        executor = WinRMExecutor(
+            hostname=target_host,
+            port=target.port,
+            username=target.username,
+            password=target.password,
+            use_ssl=winrm_ssl,
+        )
     else:
         executor = SSHExecutor(
             hostname=target_host,

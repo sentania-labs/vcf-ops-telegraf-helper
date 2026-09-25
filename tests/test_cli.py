@@ -72,3 +72,28 @@ def test_main_script_direct_execution():
     assert proc.returncode == 0
     assert "Usage:" in proc.stdout
     assert len(proc.stdout.strip()) > 0
+
+
+def test_cli_run_with_install_and_mock():
+    """Verify run subcommand with --mock-vcf, --install-telegraf, and mock connection executes cleanly."""
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        [
+            "run",
+            "--vcf-url",
+            "https://vcf.local",
+            "--mock-vcf",
+            "--collector",
+            "10.10.10.50",
+            "--target-host",
+            "10.10.10.101",
+            "--connection",
+            "mock",
+            "--install-telegraf",
+            "--dry-run",
+        ],
+    )
+    assert result.exit_code == 0
+    assert "Operational Verification Checklist" in result.output
+

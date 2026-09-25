@@ -22,8 +22,8 @@ _SENSITIVE_PATTERNS = [
     re.compile(r'(Authorization:\s*Basic\s+)([a-zA-Z0-9+/=]+)', re.IGNORECASE),
     # URLs with embedded user:password credentials
     re.compile(r'(https?://[^:\s/]+:)([^@\s]+)(@)', re.IGNORECASE),
-    # Explicit CLI token flags: telegraf-utils.sh -t <token>, --token <token>
-    re.compile(r'((?:telegraf-utils\.sh.*-t|--token)\s+)([a-zA-Z0-9_\-\.]+)', re.IGNORECASE),
+    # Explicit CLI token flags: telegraf-utils.sh/.ps1 -t <token>, --token <token>
+    re.compile(r'((?:telegraf-utils\.(?:sh|ps1).*-t|--token)\s+)([a-zA-Z0-9_\-\.]+)', re.IGNORECASE),
     # Explicit CLI password flags: --password <pass>, sshpass -p <pass>
     re.compile(r'((?:--password|sshpass\s+-p)\s+)([^\s]+)', re.IGNORECASE),
     # PEM Private Key blocks

@@ -60,6 +60,7 @@ class WorkflowOptions(BaseModel):
     restart_service: bool = True
     skip_collector_check: bool = False
     preview_only: bool = False
+    install_telegraf: bool = False
 
 
 class RunSummary(BaseModel):

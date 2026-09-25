@@ -109,3 +109,44 @@ def test_render_vcf_output_managed_vm():
     assert headers["vmId"] == "vm-42"
     assert headers["vcid"] == "vc-dc1-prod"
     assert headers["hostname"] == "vm-finance-01"
+
+
+def test_render_vcf_output_windows_paths():
+    """Verify Windows backslash paths in TLS parameters produce valid parseable TOML."""
+    rendered = TelegrafRenderer.render_vcf_output(
+        collector_address="10.10.10.10",
+        hostname="win-srv-01",
+        ca_cert_path="C:\\telegraf\\telegraf.d\\ca.pem",
+        cert_path="C:\\telegraf\\telegraf.d\\cert.pem",
+        key_path="C:\\telegraf\\telegraf.d\\key.pem",
+    )
+    assert 'tls_ca = "C:\\\\telegraf\\\\telegraf.d\\\\ca.pem"' in rendered
+    parsed = tomllib.loads(rendered)
+    http_out = parsed["outputs"]["http"][0]
+    assert http_out["tls_ca"] == "C:\\telegraf\\telegraf.d\\ca.pem"
+    assert http_out["tls_cert"] == "C:\\telegraf\\telegraf.d\\cert.pem"
+    assert http_out["tls_key"] == "C:\\telegraf\\telegraf.d\\key.pem"
+
+
+def test_render_system_inputs_windows_escaping():
+    """Verify backslash escaping in MSSQL instances and Windows services parses properly in tomllib."""
+    from vcf_ops_telegraf_helper.models.monitoring import (
+        MssqlInputConfig,
+        WinServicesInputConfig,
+    )
+
+    cfg = MonitoringConfig(
+        mssql=MssqlInputConfig(
+            enabled=True,
+            servers=["Server=10.0.0.5\\SQLEXPRESS;Port=1433;User Id=sa;Password=secret;"],
+        ),
+        win_services=WinServicesInputConfig(
+            enabled=True,
+            service_names=["W32Time", "LanmanServer\\test"],
+        ),
+    )
+    rendered = TelegrafRenderer.render_system_inputs(cfg)
+    parsed = tomllib.loads(rendered)
+    assert parsed["inputs"]["sqlserver"][0]["servers"][0] == "Server=10.0.0.5\\SQLEXPRESS;Port=1433;User Id=sa;Password=secret;"
+    assert parsed["inputs"]["win_services"][0]["service_names"] == ["W32Time", "LanmanServer\\test"]
+

@@ -6,9 +6,15 @@ fragments aligned with Broadcom VCF Operations 9.1 recommendations.
 
 from __future__ import annotations
 
+import json
 from typing import List, Optional
 
 from vcf_ops_telegraf_helper.models.monitoring import MonitoringConfig
+
+
+def _escape_toml_str(val: str) -> str:
+    """Format a string safely for TOML, properly escaping backslashes and quotes."""
+    return json.dumps(val)
 
 
 MANAGED_HEADER = """# ------------------------------------------------------------------------------
@@ -117,6 +123,130 @@ class TelegrafRenderer:
                 "",
             ])
 
+        # Windows Performance Counters
+        if config.win_perf_counters.enabled:
+            lines.extend([
+                "# Read Windows Performance Counters",
+                "[[inputs.win_perf_counters]]",
+                "  [[inputs.win_perf_counters.object]]",
+                '    ObjectName = "Processor"',
+                '    Instances = ["*"]',
+                '    Counters = ["% Processor Time", "% Idle Time", "% Privileged Time", "% User Time"]',
+                '    Measurement = "win_cpu"',
+                "",
+                "  [[inputs.win_perf_counters.object]]",
+                '    ObjectName = "Memory"',
+                '    Instances = ["------"]',
+                '    Counters = ["Available Bytes", "Committed Bytes", "% Committed Bytes In Use"]',
+                '    Measurement = "win_mem"',
+                "",
+                "  [[inputs.win_perf_counters.object]]",
+                '    ObjectName = "LogicalDisk"',
+                '    Instances = ["*"]',
+                '    Counters = ["% Free Space", "Free Megabytes", "Current Disk Queue Length"]',
+                '    Measurement = "win_disk"',
+                "",
+                "  [[inputs.win_perf_counters.object]]",
+                '    ObjectName = "Network Interface"',
+                '    Instances = ["*"]',
+                '    Counters = ["Bytes Received/sec", "Bytes Sent/sec", "Packets Received Errors", "Packets Outbound Errors"]',
+                '    Measurement = "win_net"',
+                "",
+                "  [[inputs.win_perf_counters.object]]",
+                '    ObjectName = "System"',
+                '    Instances = ["------"]',
+                '    Counters = ["Context Switches/sec", "System Calls/sec", "Processor Queue Length", "System Up Time"]',
+                '    Measurement = "win_system"',
+                "",
+            ])
+
+        # Windows Services
+        if config.win_services.enabled:
+            lines.extend([
+                "# Read Windows service states",
+                "[[inputs.win_services]]",
+            ])
+            svc_list = ", ".join(_escape_toml_str(s) for s in config.win_services.service_names)
+            lines.append(f"  service_names = [{svc_list}]")
+            lines.append("")
+
+        # NGINX
+        if config.nginx.enabled:
+            lines.extend([
+                "# Read NGINX status metrics",
+                "[[inputs.nginx]]",
+            ])
+            urls = ", ".join(_escape_toml_str(u) for u in config.nginx.urls)
+            lines.append(f"  urls = [{urls}]")
+            lines.append("")
+
+        # Apache
+        if config.apache.enabled:
+            lines.extend([
+                "# Read Apache server-status metrics",
+                "[[inputs.apache]]",
+            ])
+            urls = ", ".join(_escape_toml_str(u) for u in config.apache.urls)
+            lines.append(f"  urls = [{urls}]")
+            lines.append("")
+
+        # MySQL
+        if config.mysql.enabled:
+            lines.extend([
+                "# Read MySQL / MariaDB server metrics",
+                "[[inputs.mysql]]",
+            ])
+            servers = ", ".join(_escape_toml_str(s) for s in config.mysql.servers)
+            lines.append(f"  servers = [{servers}]")
+            lines.append("")
+
+        # PostgreSQL
+        if config.postgresql.enabled:
+            lines.extend([
+                "# Read PostgreSQL server metrics",
+                "[[inputs.postgresql]]",
+                f"  address = {_escape_toml_str(config.postgresql.address)}",
+                "",
+            ])
+
+        # Microsoft SQL Server
+        if config.mssql.enabled:
+            lines.extend([
+                "# Read Microsoft SQL Server metrics",
+                "[[inputs.sqlserver]]",
+            ])
+            servers = ", ".join(_escape_toml_str(s) for s in config.mssql.servers)
+            lines.append(f"  servers = [{servers}]")
+            lines.append("")
+
+        # Docker
+        if config.docker.enabled:
+            lines.extend([
+                "# Read Docker container metrics",
+                "[[inputs.docker]]",
+                f"  endpoint = {_escape_toml_str(config.docker.endpoint)}",
+                "",
+            ])
+
+        # Ping
+        if config.ping.enabled:
+            lines.extend([
+                "# Read ping and reachability metrics",
+                "[[inputs.ping]]",
+            ])
+            urls = ", ".join(_escape_toml_str(u) for u in config.ping.urls)
+            lines.append(f"  urls = [{urls}]")
+            lines.append(f"  count = {config.ping.count}")
+            lines.append("")
+
+        # Custom TOML Fragment
+        if config.custom_toml and config.custom_toml.strip():
+            lines.extend([
+                "# Custom administrator TOML fragment",
+                config.custom_toml.strip(),
+                "",
+            ])
+
         return "\n".join(lines).strip() + "\n"
 
     @staticmethod
@@ -180,9 +310,9 @@ class TelegrafRenderer:
 
         if verify_ssl:
             lines.extend([
-                f'  tls_ca = "{ca_cert_path}"',
-                f'  tls_cert = "{cert_path}"',
-                f'  tls_key = "{key_path}"',
+                f"  tls_ca = {_escape_toml_str(ca_cert_path)}",
+                f"  tls_cert = {_escape_toml_str(cert_path)}",
+                f"  tls_key = {_escape_toml_str(key_path)}",
                 '  tls_min_version = "TLS13"',
             ])
 
@@ -195,16 +325,16 @@ class TelegrafRenderer:
 
         if vm_mor and vc_id:
             lines.extend([
-                f'    vmId = "{vm_mor}"',
-                f'    vcid = "{vc_id}"',
-                f'    hostname = "{hostname}"',
+                f"    vmId = {_escape_toml_str(vm_mor)}",
+                f"    vcid = {_escape_toml_str(vc_id)}",
+                f"    hostname = {_escape_toml_str(hostname)}",
                 '    uuid = ""',
             ])
         else:
             lines.extend([
-                f'    uuid = "{uuid}"',
-                f'    ip = "{ip}"',
-                f'    hostname = "{hostname}"',
+                f"    uuid = {_escape_toml_str(uuid)}",
+                f"    ip = {_escape_toml_str(ip)}",
+                f"    hostname = {_escape_toml_str(hostname)}",
             ])
 
         lines.append("")

@@ -98,6 +98,7 @@ jobs:
             --copy-metadata vcf-ops-telegraf-helper \
             --collect-all vcf_ops_telegraf_helper \
             --collect-all tzdata \
+            --collect-all winrm \
             --hidden-import PySide6 \
             --hidden-import PySide6.QtCore \
             --hidden-import PySide6.QtGui \

@@ -72,6 +72,73 @@ class ProcessesInputConfig(BaseModel):
     enabled: bool = False
 
 
+class WinPerfCountersInputConfig(BaseModel):
+    """Configuration for Windows Performance Counters plugin."""
+
+    enabled: bool = False
+
+
+class WinServicesInputConfig(BaseModel):
+    """Configuration for Windows Services status plugin."""
+
+    enabled: bool = False
+    service_names: List[str] = Field(default_factory=lambda: ["*"])
+
+
+class NginxInputConfig(BaseModel):
+    """Configuration for NGINX stub_status plugin."""
+
+    enabled: bool = False
+    urls: List[str] = Field(default_factory=lambda: ["http://localhost/status"])
+
+
+class ApacheInputConfig(BaseModel):
+    """Configuration for Apache server-status plugin."""
+
+    enabled: bool = False
+    urls: List[str] = Field(default_factory=lambda: ["http://localhost/server-status?auto"])
+
+
+class MysqlInputConfig(BaseModel):
+    """Configuration for MySQL/MariaDB server plugin."""
+
+    enabled: bool = False
+    servers: List[str] = Field(default_factory=lambda: ["tcp(127.0.0.1:3306)/"])
+
+
+class PostgresqlInputConfig(BaseModel):
+    """Configuration for PostgreSQL server plugin."""
+
+    enabled: bool = False
+    address: str = "host=localhost user=postgres sslmode=disable"
+
+
+class MssqlInputConfig(BaseModel):
+    """Configuration for Microsoft SQL Server plugin."""
+
+    enabled: bool = False
+    servers: List[str] = Field(
+        default_factory=lambda: [
+            "Server=127.0.0.1;Port=1433;User Id=sa;Password=;app name=telegraf;log=1;"
+        ]
+    )
+
+
+class DockerInputConfig(BaseModel):
+    """Configuration for Docker container metrics plugin."""
+
+    enabled: bool = False
+    endpoint: str = "unix:///var/run/docker.sock"
+
+
+class PingInputConfig(BaseModel):
+    """Configuration for ICMP/Ping reachability plugin."""
+
+    enabled: bool = False
+    urls: List[str] = Field(default_factory=lambda: ["10.10.10.1"])
+    count: int = 1
+
+
 class MonitoringConfig(BaseModel):
     """Aggregated monitoring configuration for an endpoint."""
 
@@ -83,3 +150,13 @@ class MonitoringConfig(BaseModel):
     swap: SwapInputConfig = Field(default_factory=SwapInputConfig)
     diskio: DiskIoInputConfig = Field(default_factory=DiskIoInputConfig)
     processes: ProcessesInputConfig = Field(default_factory=ProcessesInputConfig)
+    win_perf_counters: WinPerfCountersInputConfig = Field(default_factory=WinPerfCountersInputConfig)
+    win_services: WinServicesInputConfig = Field(default_factory=WinServicesInputConfig)
+    nginx: NginxInputConfig = Field(default_factory=NginxInputConfig)
+    apache: ApacheInputConfig = Field(default_factory=ApacheInputConfig)
+    mysql: MysqlInputConfig = Field(default_factory=MysqlInputConfig)
+    postgresql: PostgresqlInputConfig = Field(default_factory=PostgresqlInputConfig)
+    mssql: MssqlInputConfig = Field(default_factory=MssqlInputConfig)
+    docker: DockerInputConfig = Field(default_factory=DockerInputConfig)
+    ping: PingInputConfig = Field(default_factory=PingInputConfig)
+    custom_toml: str = Field(default="", description="Optional custom TOML fragment injected into configuration")

@@ -10,6 +10,7 @@ from vcf_ops_telegraf_helper.executors.base import EndpointExecutor
 from vcf_ops_telegraf_helper.models.endpoint import (
     EndpointDiscoveryResult,
     EndpointTarget,
+    OSFamily,
 )
 from vcf_ops_telegraf_helper.models.monitoring import MonitoringConfig
 from vcf_ops_telegraf_helper.models.vcf import VCFEnvironment
@@ -112,67 +113,112 @@ class ConfigureEndpointWorkflow:
         self.reporter.on_stage_start(WorkflowStage.DETECT)
 
         try:
-            # Query OS details
-            os_name = "Linux"
-            arch_res = self.executor.execute("uname -m", timeout=5)
-            arch = arch_res.stdout.strip() if arch_res.success else "x86_64"
+            is_win = (self.target.os_family == OSFamily.WINDOWS) or (type(self.executor).__name__ == "WinRMExecutor")
+            if is_win:
+                os_name = "Windows"
+                arch = "x86_64"
+                ver_res = self.executor.execute("(Get-CimInstance Win32_OperatingSystem).Caption", timeout=10)
+                os_version = ver_res.stdout.strip() if ver_res.success and ver_res.stdout.strip() else "Microsoft Windows"
 
-            os_rel = self.executor.execute("cat /etc/os-release", timeout=5)
-            os_version = "Unknown Linux"
-            if os_rel.success:
-                for line in os_rel.stdout.splitlines():
-                    if line.startswith("PRETTY_NAME="):
-                        os_version = line.split("=", 1)[1].strip('"')
-                        break
+                chk_bin = self.executor.execute("Test-Path 'C:\\telegraf\\telegraf.exe'", timeout=10)
+                installed = chk_bin.success and "True" in chk_bin.stdout
 
-            # Check Telegraf binary
-            which_res = self.executor.execute("which telegraf", timeout=5)
-            installed = which_res.success
-            telegraf_bin = which_res.stdout.strip() if installed else "/usr/bin/telegraf"
+                version_str = None
+                if installed:
+                    ver_bin = self.executor.execute("& 'C:\\telegraf\\telegraf.exe' version", timeout=10)
+                    if ver_bin.success:
+                        version_str = ver_bin.stdout.strip()
 
-            version_str: Optional[str] = None
-            if installed:
-                ver_res = self.executor.execute(f"{telegraf_bin} version", timeout=5)
-                if ver_res.success:
-                    version_str = ver_res.stdout.strip()
+                svc_res = self.executor.execute("(Get-Service telegraf -ErrorAction SilentlyContinue).Status", timeout=10)
+                service_state = svc_res.stdout.strip() if svc_res.success and svc_res.stdout.strip() else "Stopped"
 
-            # Check service status
-            svc_res = self.executor.execute("systemctl is-active telegraf", timeout=5)
-            service_state = svc_res.stdout.strip() if svc_res.stdout else "unknown"
+                uuid_res = self.executor.execute("(Get-CimInstance Win32_ComputerSystemProduct).UUID", timeout=10)
+                host_uuid = uuid_res.stdout.strip() if uuid_res.success else ""
+                ip_res = self.executor.execute(
+                    "(Get-NetIPAddress -AddressFamily IPv4 | Where-Object { $_.InterfaceAlias -notlike '*Loopback*' }).IPAddress | Select-Object -First 1",
+                    timeout=10,
+                )
+                host_ip = ip_res.stdout.strip() if ip_res.success and ip_res.stdout.strip() else self.target.hostname
 
-            # Query host uuid and ip for unmanaged VCF mapping
-            uuid_res = self.executor.execute("cat /sys/class/dmi/id/product_uuid || cat /etc/machine-id", timeout=5)
-            host_uuid = uuid_res.stdout.strip() if uuid_res.success else ""
-            ip_res = self.executor.execute("hostname -I | awk '{print $1}'", timeout=5)
-            host_ip = ip_res.stdout.strip() if ip_res.success and ip_res.stdout.strip() else self.target.hostname
+                self.discovery = EndpointDiscoveryResult(
+                    hostname=self.target.hostname,
+                    os_name=os_name,
+                    os_version=os_version,
+                    arch=arch,
+                    telegraf_installed=installed,
+                    telegraf_version=version_str,
+                    service_state=service_state,
+                    config_dir="C:\\telegraf\\telegraf.d",
+                    main_config_path="C:\\telegraf\\telegraf.conf",
+                    telegraf_bin_path="C:\\telegraf\\telegraf.exe",
+                    host_uuid=host_uuid,
+                    host_ip=host_ip,
+                )
+            else:
+                os_name = "Linux"
+                arch_res = self.executor.execute("uname -m", timeout=5)
+                arch = arch_res.stdout.strip() if arch_res.success else "x86_64"
 
-            self.discovery = EndpointDiscoveryResult(
-                hostname=self.target.hostname,
-                os_name=os_name,
-                os_version=os_version,
-                arch=arch,
-                telegraf_installed=installed,
-                telegraf_version=version_str,
-                service_state=service_state,
-                config_dir="/etc/telegraf/telegraf.d",
-                main_config_path="/etc/telegraf/telegraf.conf",
-                telegraf_bin_path=telegraf_bin,
-                host_uuid=host_uuid,
-                host_ip=host_ip,
-            )
+                os_rel = self.executor.execute("cat /etc/os-release", timeout=5)
+                os_version = "Unknown Linux"
+                if os_rel.success and os_rel.stdout.strip():
+                    for line in os_rel.stdout.splitlines():
+                        if line.startswith("PRETTY_NAME="):
+                            os_version = line.split("=", 1)[1].strip('"\'')
+                            break
+                        if line.startswith("NAME=") and os_version == "Unknown Linux":
+                            os_version = line.split("=", 1)[1].strip('"\'')
+                    if os_version == "Unknown Linux" and not any("=" in entry for entry in os_rel.stdout.splitlines()):
+                        os_version = os_rel.stdout.strip().splitlines()[0]
+
+                which_res = self.executor.execute("which telegraf", timeout=5)
+                installed = which_res.success
+                telegraf_bin = which_res.stdout.strip() if installed else "/usr/bin/telegraf"
+
+                version_str = None
+                if installed:
+                    ver_res = self.executor.execute(f"{telegraf_bin} version", timeout=5)
+                    if ver_res.success:
+                        version_str = ver_res.stdout.strip()
+
+                svc_res = self.executor.execute("systemctl is-active telegraf", timeout=5)
+                service_state = svc_res.stdout.strip() if svc_res.stdout else "unknown"
+
+                uuid_res = self.executor.execute("cat /sys/class/dmi/id/product_uuid || cat /etc/machine-id", timeout=5)
+                host_uuid = uuid_res.stdout.strip() if uuid_res.success else ""
+                ip_res = self.executor.execute("hostname -I | awk '{print $1}'", timeout=5)
+                host_ip = ip_res.stdout.strip() if ip_res.success and ip_res.stdout.strip() else self.target.hostname
+
+                self.discovery = EndpointDiscoveryResult(
+                    hostname=self.target.hostname,
+                    os_name=os_name,
+                    os_version=os_version,
+                    arch=arch,
+                    telegraf_installed=installed,
+                    telegraf_version=version_str,
+                    service_state=service_state,
+                    config_dir="/etc/telegraf/telegraf.d",
+                    main_config_path="/etc/telegraf/telegraf.conf",
+                    telegraf_bin_path=telegraf_bin,
+                    host_uuid=host_uuid,
+                    host_ip=host_ip,
+                )
 
             dur = int((time.monotonic() - start) * 1000)
-            if not installed and self.options.mode == DeploymentMode.PUSH:
+            auto_install = self.target.install_telegraf or self.options.install_telegraf
+
+            if not installed and self.options.mode == DeploymentMode.PUSH and not auto_install:
                 res = StageResult(
                     stage=WorkflowStage.DETECT,
                     status=StageStatus.FAIL,
-                    message=f"Telegraf not installed on {self.target.hostname}. Install Telegraf before push, or use script mode.",
+                    message=f"Telegraf not installed on {self.target.hostname}. Install Telegraf before push, enable auto-install, or use script mode.",
                     details=f"{os_version} ({arch}), Service state: {service_state}",
                     duration_ms=dur,
                 )
             else:
-                msg = f"{os_version} ({arch}), Telegraf: {version_str or 'Not installed'}"
                 status = StageStatus.PASS if installed else StageStatus.WARNING
+                msg_suffix = " (will auto-install via collector bootstrap)" if (not installed and auto_install) else ""
+                msg = f"{os_version} ({arch}), Telegraf: {version_str or 'Not installed'}{msg_suffix}"
                 res = StageResult(
                     stage=WorkflowStage.DETECT,
                     status=status,
@@ -211,7 +257,7 @@ class ConfigureEndpointWorkflow:
                 self.reporter.on_stage_complete(res)
                 return res
 
-            self.artifacts = self.adapter.prepare_telegraf_integration()
+            self.artifacts = self.adapter.prepare_telegraf_integration(os_family=self.target.os_family.value)
             if self.artifacts.token and self.artifacts.token not in self._secrets:
                 self._secrets.append(self.artifacts.token)
 
@@ -252,13 +298,20 @@ class ConfigureEndpointWorkflow:
             )
             uuid_val = self.discovery.host_uuid if self.discovery else ""
             ip_val = self.discovery.host_ip if self.discovery and self.discovery.host_ip else self.target.hostname
+            is_win = (self.target.os_family == OSFamily.WINDOWS) or (type(self.executor).__name__ == "WinRMExecutor")
+            default_ca = "C:\\telegraf\\telegraf.d\\ca.pem" if is_win else "/etc/telegraf/telegraf.d/ca.pem"
+            default_cert = "C:\\telegraf\\telegraf.d\\cert.pem" if is_win else "/etc/telegraf/telegraf.d/cert.pem"
+            default_key = "C:\\telegraf\\telegraf.d\\key.pem" if is_win else "/etc/telegraf/telegraf.d/key.pem"
+
             self.vcf_conf_content = TelegrafRenderer.render_vcf_output(
                 collector_address=collector_addr,
                 hostname=self.target.hostname,
                 uuid=uuid_val,
                 ip=ip_val,
                 verify_ssl=self.env.verify_ssl,
-                ca_cert_path=self.env.ca_cert_path or "/etc/telegraf/telegraf.d/ca.pem",
+                ca_cert_path=self.env.ca_cert_path or default_ca,
+                cert_path=default_cert,
+                key_path=default_key,
             )
 
             # Validate syntax locally
@@ -319,8 +372,9 @@ class ConfigureEndpointWorkflow:
                 if self.artifacts
                 else self.env.collector.address
             )
+            is_win = (self.target.os_family == OSFamily.WINDOWS) or (type(self.executor).__name__ == "WinRMExecutor")
             if not self.options.skip_collector_check and self.options.mode == DeploymentMode.PUSH:
-                cp_val = Validator.validate_collector_reachability(self.executor, collector_addr)
+                cp_val = Validator.validate_collector_reachability(self.executor, collector_addr, is_windows=is_win)
                 self.verifications["Collector reachable"] = "PASS" if cp_val.is_valid else "FAIL"
                 if not cp_val.is_valid:
                     dur = int((time.monotonic() - start) * 1000)
@@ -373,22 +427,67 @@ class ConfigureEndpointWorkflow:
             return res
 
         try:
+            is_win = (self.target.os_family == OSFamily.WINDOWS) or (type(self.executor).__name__ == "WinRMExecutor")
             config_dir = (
                 self.discovery.config_dir
                 if self.discovery
-                else "/etc/telegraf/telegraf.d"
+                else ("C:\\telegraf\\telegraf.d" if is_win else "/etc/telegraf/telegraf.d")
             )
-            system_file = f"{config_dir}/vcf-helper-system.conf"
-            vcf_file = f"{config_dir}/cloudproxy-http.conf"
+            sep = "\\" if is_win else "/"
+            system_file = f"{config_dir}{sep}vcf-helper-system.conf"
+            vcf_file = f"{config_dir}{sep}cloudproxy-http.conf"
+
+            # Auto-install Telegraf if missing and requested
+            auto_install = self.target.install_telegraf or self.options.install_telegraf
+            if self.discovery and not self.discovery.telegraf_installed and auto_install:
+                if self.artifacts and self.artifacts.script_url:
+                    token_val = self.artifacts.token or ""
+                    coll_addr = self.artifacts.collector_address
+                    vcf_url = self.env.url
+                    if is_win:
+                        install_cmd = (
+                            "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; "
+                            "[System.Net.ServicePointManager]::ServerCertificateValidationCallback = {$true}; "
+                            f"$tmp = \"$env:TEMP\\telegraf-utils.ps1\"; "
+                            f"Invoke-WebRequest -Uri '{self.artifacts.script_url}' -OutFile $tmp -UseBasicParsing; "
+                            f"Unblock-File -Path $tmp -ErrorAction SilentlyContinue; "
+                            f"& powershell.exe -ExecutionPolicy Bypass -File $tmp -c '{coll_addr}' -t '{token_val}' -v '{vcf_url}'"
+                        )
+                    else:
+                        install_cmd = (
+                            f"curl -k -sSL '{self.artifacts.script_url}' -o /tmp/telegraf-utils.sh && "
+                            f"chmod +x /tmp/telegraf-utils.sh && "
+                            f"/tmp/telegraf-utils.sh -c '{coll_addr}' -t '{token_val}' -v '{vcf_url}'"
+                        )
+                    inst_res = self.executor.execute(install_cmd, timeout=180)
+                    if not inst_res.success:
+                        dur = int((time.monotonic() - start) * 1000)
+                        res = StageResult(
+                            stage=WorkflowStage.APPLY,
+                            status=StageStatus.FAIL,
+                            message=f"Failed to auto-install Telegraf agent: {inst_res.stderr or inst_res.stdout or 'Installation script failed'}",
+                            details=self._sanitize(inst_res.stderr or inst_res.stdout),
+                            duration_ms=dur,
+                        )
+                        self.reporter.on_stage_complete(res)
+                        return res
+                    self.discovery.telegraf_installed = True
 
             # Create destination directory
-            self.executor.execute(f"mkdir -p {config_dir}")
-
-            # Create backup copies of existing managed fragments before overwriting
-            if self.executor.file_exists(system_file):
-                self.executor.execute(f"cp {system_file} {system_file}.bak")
-            if self.executor.file_exists(vcf_file):
-                self.executor.execute(f"cp {vcf_file} {vcf_file}.bak")
+            if is_win:
+                self.executor.execute(
+                    f"if (-not (Test-Path '{config_dir}')) {{ New-Item -ItemType Directory -Path '{config_dir}' -Force | Out-Null }}"
+                )
+                if self.executor.file_exists(system_file):
+                    self.executor.execute(f"Copy-Item -Path '{system_file}' -Destination '{system_file}.bak' -Force")
+                if self.executor.file_exists(vcf_file):
+                    self.executor.execute(f"Copy-Item -Path '{vcf_file}' -Destination '{vcf_file}.bak' -Force")
+            else:
+                self.executor.execute(f"mkdir -p {config_dir}")
+                if self.executor.file_exists(system_file):
+                    self.executor.execute(f"cp {system_file} {system_file}.bak")
+                if self.executor.file_exists(vcf_file):
+                    self.executor.execute(f"cp {vcf_file} {vcf_file}.bak")
 
             # Upload managed fragments
             self.executor.upload(self.system_conf_content, system_file)
@@ -400,7 +499,7 @@ class ConfigureEndpointWorkflow:
                 telegraf_bin = (
                     self.discovery.telegraf_bin_path
                     if self.discovery
-                    else "/usr/bin/telegraf"
+                    else ("/usr/bin/telegraf" if not is_win else "C:\\telegraf\\telegraf.exe")
                 )
                 script_path = self.executor.generate_deploy_script(telegraf_bin=telegraf_bin)
                 self.managed_files.append(str(script_path))
@@ -447,27 +546,30 @@ class ConfigureEndpointWorkflow:
             return res
 
         try:
+            is_win = (self.target.os_family == OSFamily.WINDOWS) or (type(self.executor).__name__ == "WinRMExecutor")
             telegraf_bin = (
                 self.discovery.telegraf_bin_path
                 if self.discovery
-                else "/usr/bin/telegraf"
+                else ("C:\\telegraf\\telegraf.exe" if is_win else "/usr/bin/telegraf")
             )
             config_dir = (
                 self.discovery.config_dir
                 if self.discovery
-                else "/etc/telegraf/telegraf.d"
+                else ("C:\\telegraf\\telegraf.d" if is_win else "/etc/telegraf/telegraf.d")
             )
             main_cfg = (
                 self.discovery.main_config_path
                 if self.discovery
-                else "/etc/telegraf/telegraf.conf"
+                else ("C:\\telegraf\\telegraf.conf" if is_win else "/etc/telegraf/telegraf.conf")
             )
 
             # Pre-flight check on endpoint before service restart
-            test_res = self.executor.execute(
-                f"{telegraf_bin} --test --config {main_cfg} --config-directory {config_dir}",
-                timeout=15,
-            )
+            if is_win:
+                test_cmd = f"& '{telegraf_bin}' --test --config '{main_cfg}' --config-directory '{config_dir}'"
+            else:
+                test_cmd = f"{telegraf_bin} --test --config {main_cfg} --config-directory {config_dir}"
+
+            test_res = self.executor.execute(test_cmd, timeout=15)
             if not test_res.success:
                 dur = int((time.monotonic() - start) * 1000)
                 res = StageResult(
@@ -481,7 +583,10 @@ class ConfigureEndpointWorkflow:
                 return res
 
             # Restart service
-            restart_res = self.executor.execute("systemctl restart telegraf", timeout=15)
+            if is_win:
+                restart_res = self.executor.execute("Restart-Service telegraf -Force", timeout=15)
+            else:
+                restart_res = self.executor.execute("systemctl restart telegraf", timeout=15)
             dur = int((time.monotonic() - start) * 1000)
 
             if restart_res.success:
@@ -518,6 +623,7 @@ class ConfigureEndpointWorkflow:
         self.reporter.on_stage_start(WorkflowStage.VERIFY)
 
         try:
+            is_win = (self.target.os_family == OSFamily.WINDOWS) or (type(self.executor).__name__ == "WinRMExecutor")
             # 1. Telegraf installed check
             installed = (
                 self.discovery.telegraf_installed if self.discovery else False
@@ -530,27 +636,27 @@ class ConfigureEndpointWorkflow:
 
             if self.options.mode == DeploymentMode.PUSH and not self.options.dry_run:
                 # 3. Service running check
-                svc_val = Validator.validate_service_state(self.executor)
+                svc_val = Validator.validate_service_state(self.executor, is_windows=is_win)
                 self.verifications["Service running"] = "PASS" if svc_val.is_valid else "FAIL"
 
                 # 4. Local metrics generated
                 telegraf_bin = (
                     self.discovery.telegraf_bin_path
                     if self.discovery
-                    else "/usr/bin/telegraf"
+                    else ("C:\\telegraf\\telegraf.exe" if is_win else "/usr/bin/telegraf")
                 )
                 config_dir = (
                     self.discovery.config_dir
                     if self.discovery
-                    else "/etc/telegraf/telegraf.d"
+                    else ("C:\\telegraf\\telegraf.d" if is_win else "/etc/telegraf/telegraf.d")
                 )
                 main_cfg = (
                     self.discovery.main_config_path
                     if self.discovery
-                    else "/etc/telegraf/telegraf.conf"
+                    else ("C:\\telegraf\\telegraf.conf" if is_win else "/etc/telegraf/telegraf.conf")
                 )
                 test_val = Validator.validate_telegraf_config_on_endpoint(
-                    self.executor, telegraf_bin, main_cfg, config_dir
+                    self.executor, telegraf_bin, main_cfg, config_dir, is_windows=is_win
                 )
                 self.verifications["Local metrics generated"] = (
                     "PASS" if test_val.is_valid else "FAIL"

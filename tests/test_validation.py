@@ -74,3 +74,56 @@ def test_validate_collector_reachability():
     res_fail = Validator.validate_collector_reachability(unreachable_exec, "10.10.10.50")
     assert not res_fail.is_valid
     assert "unreachable" in res_fail.message
+
+
+def test_validate_structured_config_workloads():
+    """Verify structured config validation passes when workload or custom plugins are enabled without host plugins."""
+    from vcf_ops_telegraf_helper.models.monitoring import (
+        DiskIoInputConfig,
+        NginxInputConfig,
+        ProcessesInputConfig,
+        SwapInputConfig,
+        SystemInputConfig,
+    )
+
+    nginx_cfg = MonitoringConfig(
+        cpu=CpuInputConfig(enabled=False),
+        mem=MemInputConfig(enabled=False),
+        disk=DiskInputConfig(enabled=False),
+        net=NetInputConfig(enabled=False),
+        system=SystemInputConfig(enabled=False),
+        swap=SwapInputConfig(enabled=False),
+        diskio=DiskIoInputConfig(enabled=False),
+        processes=ProcessesInputConfig(enabled=False),
+        nginx=NginxInputConfig(enabled=True),
+    )
+    res = Validator.validate_structured_config(nginx_cfg)
+    assert res.is_valid
+
+    custom_cfg = MonitoringConfig(
+        cpu=CpuInputConfig(enabled=False),
+        mem=MemInputConfig(enabled=False),
+        disk=DiskInputConfig(enabled=False),
+        net=NetInputConfig(enabled=False),
+        system=SystemInputConfig(enabled=False),
+        swap=SwapInputConfig(enabled=False),
+        diskio=DiskIoInputConfig(enabled=False),
+        processes=ProcessesInputConfig(enabled=False),
+        custom_toml="[[inputs.test]]",
+    )
+    res_custom = Validator.validate_structured_config(custom_cfg)
+    assert res_custom.is_valid
+
+
+def test_validate_collector_reachability_windows():
+    """Verify collector reachability runs .NET check on Windows executors."""
+    from unittest.mock import MagicMock
+    from vcf_ops_telegraf_helper.executors.base import CommandResult
+
+    mock_exec = MagicMock()
+    mock_exec.execute.return_value = CommandResult(exit_code=0, stdout="True\r\n", stderr="")
+    res = Validator.validate_collector_reachability(mock_exec, "10.10.10.50", port=443, is_windows=True)
+    assert res.is_valid
+    cmd = mock_exec.execute.call_args[0][0]
+    assert "System.Net.Sockets.TcpClient" in cmd
+
