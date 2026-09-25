@@ -17,6 +17,7 @@ dependencies = [
     "tomli_w>=1.0.0",
     "requests>=2.28.0",
     "paramiko>=3.0.0",
+    "tzdata",
 ]
 
 [project.optional-dependencies]

@@ -82,6 +82,10 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Update OpenSSL on macOS Intel
+        if: matrix.name == 'macos-x86_64'
+        run: brew reinstall openssl@3
+
       - name: Install dependencies and PyInstaller
         run: |
           python -m pip install --upgrade pip
@@ -97,6 +101,7 @@ jobs:
             --name "vcf-telegraf-helper-${{ matrix.name }}" \
             --copy-metadata vcf-ops-telegraf-helper \
             --collect-all vcf_ops_telegraf_helper \
+            --collect-all tzdata \
             --hidden-import PySide6 \
             --hidden-import PySide6.QtCore \
             --hidden-import PySide6.QtGui \
