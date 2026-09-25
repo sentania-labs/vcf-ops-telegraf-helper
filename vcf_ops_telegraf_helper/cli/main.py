@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 import sys
 from typing import Optional
@@ -45,11 +46,41 @@ from vcf_ops_telegraf_helper.workflow.engine import ConfigureEndpointWorkflow
 console = Console()
 
 
+def _is_windows_double_click() -> bool:
+    """Check if process was launched directly from Windows Explorer (double click)."""
+    if sys.platform != "win32" or not sys.stdout.isatty():
+        return False
+    try:
+        import ctypes
+
+        process_list = (ctypes.c_uint * 4)()
+        count = ctypes.windll.kernel32.GetConsoleProcessList(process_list, 4)
+        return count <= 2
+    except Exception:
+        return False
+
+
 @click.group(invoke_without_command=True)
 @click.pass_context
 def cli(ctx: click.Context) -> None:
     """VCF Operations Open Telegraf Helper: Local onboarding utility."""
     if ctx.invoked_subcommand is None:
+        # If double-clicked in Windows Explorer, launch native GUI by default.
+        if _is_windows_double_click() and not os.environ.get("VCF_HELPER_NO_GUI"):
+            try:
+                from vcf_ops_telegraf_helper.gui.app import run_gui
+
+                sys.exit(run_gui())
+            except Exception as exc:
+                display_banner(console)
+                console.print(f"[bold red]Failed to launch GUI:[/bold red] {exc}")
+                click.echo(ctx.get_help())
+                try:
+                    input("\nPress Enter to exit...")
+                except (EOFError, KeyboardInterrupt):
+                    pass
+                sys.exit(1)
+
         display_banner(console)
         click.echo(ctx.get_help())
 
@@ -320,3 +351,8 @@ def env_add(name: str, url: str, collector: str, user: str) -> None:
     )
     store.save_environment(vcf_env)
     console.print(f"[bold green]✓[/bold green] Saved environment '{name}' ({url})")
+
+
+if __name__ == "__main__":
+    cli()
+

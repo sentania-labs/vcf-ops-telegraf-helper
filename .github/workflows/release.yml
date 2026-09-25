@@ -155,8 +155,15 @@ jobs:
           mkdir -p "$RUNNER_TEMP/smoke"
           cp "dist/vcf-telegraf-helper-${{ matrix.name }}${{ matrix.ext }}" "$RUNNER_TEMP/smoke/"
           cd "$RUNNER_TEMP/smoke"
-          "./vcf-telegraf-helper-${{ matrix.name }}${{ matrix.ext }}" --help
-          "./vcf-telegraf-helper-${{ matrix.name }}${{ matrix.ext }}" render --cpu --mem --disk --net
+          "./vcf-telegraf-helper-${{ matrix.name }}${{ matrix.ext }}" --help > help.txt
+          cat help.txt
+          grep -q "Usage:" help.txt
+          "./vcf-telegraf-helper-${{ matrix.name }}${{ matrix.ext }}" render --cpu --mem --disk --net > render.txt
+          cat render.txt
+          grep -q "inputs.cpu" render.txt
+          "./vcf-telegraf-helper-${{ matrix.name }}${{ matrix.ext }}" > default.txt
+          cat default.txt
+          grep -q "VCF Operations Open Telegraf Helper" default.txt
 
       - name: Upload binary artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
