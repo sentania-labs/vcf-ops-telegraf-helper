@@ -15,15 +15,16 @@ import pytest
 # Ensure Qt runs offscreen in headless test environments
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-pytest.importorskip(
-    "PySide6.QtWidgets",
-    reason="PySide6.QtWidgets is required to run native GUI tests",
-)
-
-from PySide6.QtWidgets import QApplication  # noqa: E402
-from vcf_ops_telegraf_helper.gui.main_window import MainWindow  # noqa: E402
-from vcf_ops_telegraf_helper.gui.theme import build_stylesheet  # noqa: E402
-from vcf_ops_telegraf_helper.storage.state import StateStore  # noqa: E402
+try:
+    from PySide6.QtWidgets import QApplication
+    from vcf_ops_telegraf_helper.gui.main_window import MainWindow
+    from vcf_ops_telegraf_helper.gui.theme import build_stylesheet
+    from vcf_ops_telegraf_helper.storage.state import StateStore
+except (ImportError, OSError) as exc:
+    pytest.skip(
+        f"PySide6 GUI tests skipped (missing library or display dependency: {exc})",
+        allow_module_level=True,
+    )
 
 
 @pytest.fixture(scope="session")

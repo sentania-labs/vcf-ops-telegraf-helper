@@ -39,6 +39,9 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Install system graphics libraries for offscreen Qt
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libegl1 libgl1
+
       - name: Run test and lint suite
         env:
           QT_QPA_PLATFORM: offscreen

@@ -35,6 +35,9 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
 
+      - name: Install system graphics libraries for offscreen Qt
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libegl1 libgl1
+
       - name: Install package and test dependencies
         run: |
           python -m pip install --upgrade pip "ruff~=0.16.0"
