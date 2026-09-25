@@ -37,14 +37,14 @@ jobs:
 
       - name: Install package and test dependencies
         run: |
-          python -m pip install --upgrade pip ruff
+          python -m pip install --upgrade pip "ruff~=0.16.0"
           python -m pip install -e '.[gui]' pytest pytest-asyncio respx hypothesis
 
       - name: Lint with ruff
-        run: ruff check vcf_ops_telegraf_helper tests
+        run: make lint
 
       - name: Run test suite
-        run: pytest -v tests
+        run: make test
 
       - name: Smoke CLI entry points
         run: |
