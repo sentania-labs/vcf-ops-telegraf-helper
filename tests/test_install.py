@@ -186,6 +186,8 @@ def test_apply_executes_windows_bootstrap_install():
     res = wf.apply()
     assert res.status == StageStatus.PASS
     assert wf.discovery.telegraf_installed is True
+    assert wf.discovery.telegraf_bin_path == "C:\\telegraf\\telegraf.exe"
+    assert wf.discovery.main_config_path == "C:\\telegraf\\telegraf.conf"
 
     executed_cmds = [call[0][0] for call in mock_exec.execute.call_args_list]
     win_cmd = next(cmd for cmd in executed_cmds if "telegraf.exe" in cmd)
@@ -195,6 +197,9 @@ def test_apply_executes_windows_bootstrap_install():
     assert "$hadConf" in win_cmd
     assert "UTF8Encoding" in win_cmd
     assert "Get-Service -Name telegraf" in win_cmd
+    assert "HKLM:\\SYSTEM\\CurrentControlSet\\Services\\telegraf" in win_cmd
+    assert "Set-ItemProperty" in win_cmd
+    assert "sc.exe config telegraf binPath=" in win_cmd
 
 
 def test_windows_detect_architecture_arm64():

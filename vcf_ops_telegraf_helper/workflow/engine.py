@@ -476,7 +476,20 @@ class ConfigureEndpointWorkflow:
                         "}; "
                         "Remove-Item -Path \"$env:TEMP\\telegraf_extract\" -Recurse -Force -ErrorAction SilentlyContinue; "
                         "Remove-Item -Path $destZip -Force -ErrorAction SilentlyContinue; "
-                        "if (Get-Service -Name telegraf -ErrorAction SilentlyContinue) { Write-Output 'Service already registered' } else { & \"$destDir\\telegraf.exe\" --service install --config \"$destDir\\telegraf.conf\" --config-directory \"$destDir\\telegraf.d\" }"
+                        "$svc = Get-Service -Name telegraf -ErrorAction SilentlyContinue; "
+                        "if ($svc) { "
+                        "$img = (Get-ItemProperty 'HKLM:\\SYSTEM\\CurrentControlSet\\Services\\telegraf' -ErrorAction SilentlyContinue).ImagePath; "
+                        "if (-not $img -or $img -notlike \"*$destDir\\telegraf.exe*\" -or $img -notlike '*--config-directory*') { "
+                        "$binArgs = \"`\"$destDir\\telegraf.exe`\" --config `\"$destDir\\telegraf.conf`\" --config-directory `\"$destDir\\telegraf.d`\"\"; "
+                        "Set-ItemProperty -Path 'HKLM:\\SYSTEM\\CurrentControlSet\\Services\\telegraf' -Name ImagePath -Value $binArgs -Force; "
+                        "& sc.exe config telegraf binPath= $binArgs | Out-Null; "
+                        "Write-Output 'Service image path updated to managed directory' "
+                        "} else { "
+                        "Write-Output 'Service already registered' "
+                        "} "
+                        "} else { "
+                        "& \"$destDir\\telegraf.exe\" --service install --config \"$destDir\\telegraf.conf\" --config-directory \"$destDir\\telegraf.d\" "
+                        "}"
                     )
                 else:
                     linux_arch = "arm64" if is_arm else "amd64"
@@ -525,6 +538,14 @@ class ConfigureEndpointWorkflow:
                     self.reporter.on_stage_complete(res)
                     return res
                 self.discovery.telegraf_installed = True
+                if is_win:
+                    self.discovery.telegraf_bin_path = "C:\\telegraf\\telegraf.exe"
+                    self.discovery.main_config_path = "C:\\telegraf\\telegraf.conf"
+                    self.discovery.config_dir = "C:\\telegraf\\telegraf.d"
+                else:
+                    self.discovery.telegraf_bin_path = "/usr/bin/telegraf"
+                    self.discovery.main_config_path = "/etc/telegraf/telegraf.conf"
+                    self.discovery.config_dir = "/etc/telegraf/telegraf.d"
 
             # Create destination directory
             if is_win:
