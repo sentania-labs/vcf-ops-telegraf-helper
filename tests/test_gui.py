@@ -147,6 +147,26 @@ def test_main_window_endpoint_detection_windows(qapp, tmp_path):
     assert not window.ep_missing_banner.isHidden()
 
 
+def test_main_window_endpoint_detection_preserves_auto_install_opt_out(qapp, tmp_path):
+    """Verify endpoint detection does not re-enable auto-install if admin unchecked it."""
+    state_file = tmp_path / "state.json"
+    store = StateStore(state_file=state_file)
+    window = MainWindow(state_store=store)
+
+    window.ep_auto_install_check.setChecked(False)
+
+    from unittest.mock import MagicMock
+    mock_exec = MagicMock()
+    mock_exec.test_connection.return_value = True
+    mock_exec.file_exists.return_value = False
+    mock_exec.execute.return_value = MagicMock(success=False, stdout="")
+    window._create_executor = lambda target: mock_exec
+
+    window._detect_endpoint()
+    assert not window.ep_missing_banner.isHidden()
+    assert not window.ep_auto_install_check.isChecked()
+
+
 def test_main_window_vcf_connection(qapp, tmp_path):
     """Verify VCF connection test with adapter updates UI status."""
     from unittest.mock import MagicMock, patch

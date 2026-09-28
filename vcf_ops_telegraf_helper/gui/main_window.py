@@ -579,8 +579,6 @@ class MainWindow(QMainWindow):
                             os_version = caption_res.stdout.strip().splitlines()[0]
 
                 self.ep_missing_banner.setVisible(not installed)
-                if not installed:
-                    self.ep_auto_install_check.setChecked(True)
 
                 self.ep_status_label.setText("Connected & Discovered (Windows)")
                 self.ep_status_label.setStyleSheet("color: #199e70; font-weight: 600;")
@@ -627,8 +625,6 @@ class MainWindow(QMainWindow):
             running = svc_res.success and svc_res.stdout.strip() == "active"
 
             self.ep_missing_banner.setVisible(not installed)
-            if not installed:
-                self.ep_auto_install_check.setChecked(True)
 
             self.ep_status_label.setText("Connected & Discovered")
             self.ep_status_label.setStyleSheet("color: #199e70; font-weight: 600;")
