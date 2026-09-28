@@ -136,6 +136,7 @@ def test_apply_executes_linux_bootstrap_install():
     assert "sudo -n bash -c" in install_cmd
     assert "linux_arm64.tar.gz" in install_cmd
     assert "outputs.influxdb" in install_cmd
+    assert 'sed -i "s|' in install_cmd
     assert "systemctl daemon-reload" in install_cmd
 
 
@@ -190,5 +191,83 @@ def test_apply_executes_windows_bootstrap_install():
     assert "$ErrorActionPreference = 'Stop'" in win_cmd
     assert "windows_arm64.zip" in win_cmd
     assert "outputs.influxdb" in win_cmd
+    assert "UTF8Encoding" in win_cmd
     assert "Get-Service -Name telegraf" in win_cmd
+
+
+def test_windows_detect_architecture_arm64():
+    """Verify detect_telegraf queries and sets ARM64 architecture on Windows."""
+    env = VCFEnvironment(name="test", url="https://vcf.local", username="admin", collector=CollectorInfo(address="10.10.10.50"))
+    target = EndpointTarget(
+        hostname="win-arm.local",
+        os_family=OSFamily.WINDOWS,
+        connection_method=ConnectionMethod.WINRM,
+        install_telegraf=True,
+    )
+    mon = MonitoringConfig()
+
+    mock_exec = MagicMock()
+
+    def _exec_side_effect(cmd, **kw):
+        if "PROCESSOR_ARCH" in cmd:
+            return CommandResult(exit_code=0, stdout="ARM64", command=cmd)
+        if "Test-Path" in cmd:
+            return CommandResult(exit_code=0, stdout="False", command=cmd)
+        return CommandResult(exit_code=0, stdout="", command=cmd)
+
+    mock_exec.execute.side_effect = _exec_side_effect
+    mock_adapter = MagicMock()
+
+    wf = ConfigureEndpointWorkflow(
+        environment=env,
+        target=target,
+        monitoring=mon,
+        executor=mock_exec,
+        adapter=mock_adapter,
+        options=WorkflowOptions(mode=DeploymentMode.PUSH, install_telegraf=True),
+    )
+
+    res = wf.detect_telegraf()
+    assert res.status == StageStatus.WARNING
+    assert wf.discovery.arch == "arm64"
+    assert wf.discovery.architecture == "arm64"
+
+
+def test_windows_detect_architecture_x86_64():
+    """Verify detect_telegraf sets x86_64 architecture on standard Windows."""
+    env = VCFEnvironment(name="test", url="https://vcf.local", username="admin", collector=CollectorInfo(address="10.10.10.50"))
+    target = EndpointTarget(
+        hostname="win-x64.local",
+        os_family=OSFamily.WINDOWS,
+        connection_method=ConnectionMethod.WINRM,
+        install_telegraf=True,
+    )
+    mon = MonitoringConfig()
+
+    mock_exec = MagicMock()
+
+    def _exec_side_effect(cmd, **kw):
+        if "PROCESSOR_ARCH" in cmd:
+            return CommandResult(exit_code=0, stdout="AMD64", command=cmd)
+        if "Test-Path" in cmd:
+            return CommandResult(exit_code=0, stdout="False", command=cmd)
+        return CommandResult(exit_code=0, stdout="", command=cmd)
+
+    mock_exec.execute.side_effect = _exec_side_effect
+    mock_adapter = MagicMock()
+
+    wf = ConfigureEndpointWorkflow(
+        environment=env,
+        target=target,
+        monitoring=mon,
+        executor=mock_exec,
+        adapter=mock_adapter,
+        options=WorkflowOptions(mode=DeploymentMode.PUSH, install_telegraf=True),
+    )
+
+    res = wf.detect_telegraf()
+    assert res.status == StageStatus.WARNING
+    assert wf.discovery.arch == "x86_64"
+    assert wf.discovery.architecture == "x86_64"
+
 

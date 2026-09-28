@@ -116,7 +116,14 @@ class ConfigureEndpointWorkflow:
             is_win = (self.target.os_family == OSFamily.WINDOWS) or (type(self.executor).__name__ == "WinRMExecutor")
             if is_win:
                 os_name = "Windows"
-                arch = "x86_64"
+                arch_res = self.executor.execute(
+                    "if ($env:PROCESSOR_ARCHITEW6432) { $env:PROCESSOR_ARCHITEW6432 } else { $env:PROCESSOR_ARCHITECTURE }",
+                    timeout=10,
+                )
+                if arch_res.success and "ARM" in arch_res.stdout.upper():
+                    arch = "arm64"
+                else:
+                    arch = "x86_64"
                 ver_res = self.executor.execute("(Get-CimInstance Win32_OperatingSystem).Caption", timeout=10)
                 os_version = ver_res.stdout.strip() if ver_res.success and ver_res.stdout.strip() else "Microsoft Windows"
 
@@ -460,8 +467,11 @@ class ConfigureEndpointWorkflow:
                         "Copy-Item -Path $bin.FullName -Destination \"$destDir\\telegraf.exe\" -Force; "
                         "$cfg = Get-ChildItem -Path \"$env:TEMP\\telegraf_extract\" -Filter 'telegraf.conf' -Recurse | Select-Object -First 1; "
                         "if ($cfg -and -not (Test-Path \"$destDir\\telegraf.conf\")) { Copy-Item -Path $cfg.FullName -Destination \"$destDir\\telegraf.conf\" -Force }; "
-                        "if (Test-Path \"$destDir\\telegraf.conf\") { "
-                        "(Get-Content \"$destDir\\telegraf.conf\") -replace '^\\[\\[outputs\\.influxdb\\]\\]', '# [[outputs.influxdb]]' -replace '^\\s*urls\\s*=\\s*\\[\"http://127\\.0\\.0\\.1:8086\"\\]', '  # urls = [\"http://127.0.0.1:8086\"]' | Set-Content \"$destDir\\telegraf.conf\" "
+                        "$cfgPath = \"$destDir\\telegraf.conf\"; "
+                        "if (Test-Path $cfgPath) { "
+                        "$c = [System.IO.File]::ReadAllText($cfgPath); "
+                        "$c = $c -replace '(?m)^\\[\\[outputs\\.influxdb\\]\\]', '# [[outputs.influxdb]]' -replace '(?m)^\\s*urls\\s*=\\s*\\[\"http://127\\.0\\.0\\.1:8086\"\\]', '  # urls = [\"http://127.0.0.1:8086\"]'; "
+                        "[System.IO.File]::WriteAllText($cfgPath, $c, (New-Object System.Text.UTF8Encoding $false)) "
                         "}; "
                         "Remove-Item -Path \"$env:TEMP\\telegraf_extract\" -Recurse -Force -ErrorAction SilentlyContinue; "
                         "Remove-Item -Path $destZip -Force -ErrorAction SilentlyContinue; "
@@ -492,8 +502,8 @@ class ConfigureEndpointWorkflow:
                         "fi && "
                         "mkdir -p /etc/telegraf/telegraf.d && "
                         "if [ -f /etc/telegraf/telegraf.conf ]; then "
-                        "sed -i \"s/^\\[\\[outputs\\.influxdb\\]\\]/# [[outputs.influxdb]]/\" /etc/telegraf/telegraf.conf; "
-                        "sed -i \"s/^[[:space:]]*urls = \\[\"http:\\/\\/127\\.0\\.0\\.1:8086\"\\]/  # urls = [\\\"http:\\/\\/127.0.0.1:8086\\\"]/\" /etc/telegraf/telegraf.conf; "
+                        "sed -i \"s|^\\[\\[outputs\\.influxdb\\]\\]|# [[outputs.influxdb]]|\" /etc/telegraf/telegraf.conf; "
+                        "sed -i \"s|^[[:space:]]*urls = \\[\\\"http://127\\.0\\.0\\.1:8086\\\"\\]|  # urls = [\\\"http://127.0.0.1:8086\\\"]|\" /etc/telegraf/telegraf.conf; "
                         "fi && "
                         "if command -v systemctl >/dev/null 2>&1; then "
                         "systemctl daemon-reload || true; "
