@@ -137,6 +137,7 @@ def test_apply_executes_linux_bootstrap_install():
     assert "linux_arm64.tar.gz" in install_cmd
     assert "outputs.influxdb" in install_cmd
     assert 'sed -i "s|' in install_cmd
+    assert "had_conf" in install_cmd
     assert "systemctl daemon-reload" in install_cmd
 
 
@@ -191,6 +192,7 @@ def test_apply_executes_windows_bootstrap_install():
     assert "$ErrorActionPreference = 'Stop'" in win_cmd
     assert "windows_arm64.zip" in win_cmd
     assert "outputs.influxdb" in win_cmd
+    assert "$hadConf" in win_cmd
     assert "UTF8Encoding" in win_cmd
     assert "Get-Service -Name telegraf" in win_cmd
 
