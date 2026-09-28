@@ -137,12 +137,71 @@ def test_main_window_endpoint_detection_windows(qapp, tmp_path):
     from unittest.mock import MagicMock
     mock_exec = MagicMock()
     mock_exec.test_connection.return_value = True
+    mock_exec.file_exists.return_value = False
     window._create_executor = lambda target: mock_exec
 
     window._detect_endpoint()
     assert "Connected & Discovered (Windows)" in window.ep_status_label.text()
     assert "C:\\telegraf\\telegraf.d" in window.ep_details_box.toPlainText()
-    assert "telegraf-utils.ps1" in window.ep_details_box.toPlainText()
+    assert "InfluxData" in window.ep_details_box.toPlainText()
+    assert not window.ep_missing_banner.isHidden()
+
+
+def test_main_window_endpoint_detection_preserves_auto_install_opt_out(qapp, tmp_path):
+    """Verify endpoint detection does not re-enable auto-install if admin unchecked it."""
+    state_file = tmp_path / "state.json"
+    store = StateStore(state_file=state_file)
+    window = MainWindow(state_store=store)
+
+    window.ep_auto_install_check.setChecked(False)
+
+    from unittest.mock import MagicMock
+    mock_exec = MagicMock()
+    mock_exec.test_connection.return_value = True
+    mock_exec.file_exists.return_value = False
+    mock_exec.execute.return_value = MagicMock(success=False, stdout="")
+    window._create_executor = lambda target: mock_exec
+
+    window._detect_endpoint()
+    assert not window.ep_missing_banner.isHidden()
+    assert not window.ep_auto_install_check.isChecked()
+    assert "NO (auto-install disabled)" in window.ep_details_box.toPlainText()
+
+
+def test_main_window_endpoint_detection_resets_missing_banner_on_failure(qapp, tmp_path):
+    """Verify endpoint detection hides missing banner when connection fails or raises exception."""
+    state_file = tmp_path / "state.json"
+    store = StateStore(state_file=state_file)
+    window = MainWindow(state_store=store)
+
+    window.ep_missing_banner.setVisible(True)
+    assert not window.ep_missing_banner.isHidden()
+
+    from unittest.mock import MagicMock
+    mock_exec = MagicMock()
+    mock_exec.test_connection.return_value = False
+    window._create_executor = lambda target: mock_exec
+
+    window._detect_endpoint()
+    assert window.ep_missing_banner.isHidden()
+    assert "Connection failed" in window.ep_status_label.text()
+
+
+def test_main_window_docker_endpoint_os_adaptation(qapp, tmp_path):
+    """Verify Docker endpoint defaults adapt between Windows named pipe and Linux Unix socket."""
+    state_file = tmp_path / "state.json"
+    store = StateStore(state_file=state_file)
+    window = MainWindow(state_store=store)
+
+    window.ep_os_combo.setCurrentText("Linux")
+    assert window.docker_endpoint_input.text() == "unix:///var/run/docker.sock"
+    mon_linux = window._get_monitoring_config()
+    assert mon_linux.docker.endpoint == "unix:///var/run/docker.sock"
+
+    window.ep_os_combo.setCurrentText("Windows")
+    assert window.docker_endpoint_input.text() == "npipe:////./pipe/docker_engine"
+    mon_win = window._get_monitoring_config()
+    assert mon_win.docker.endpoint == "npipe:////./pipe/docker_engine"
 
 
 def test_main_window_vcf_connection(qapp, tmp_path):
@@ -162,16 +221,17 @@ def test_main_window_vcf_connection(qapp, tmp_path):
 
 
 def test_main_window_step3_plugins_and_preview(qapp, tmp_path):
-    """Verify plugin tabs, selection, and preview updates."""
+    """Verify plugin catalog, selection, and preview updates."""
     state_file = tmp_path / "state.json"
     store = StateStore(state_file=state_file)
     window = MainWindow(state_store=store)
 
-    assert window.plugin_tabs.count() == 4
-    assert window.plugin_tabs.tabText(0) == "Host OS Telemetry"
-    assert window.plugin_tabs.tabText(1) == "Windows Metrics"
-    assert window.plugin_tabs.tabText(2) == "Applications & Workloads"
-    assert window.plugin_tabs.tabText(3) == "Custom TOML"
+    assert window.plugin_catalog_list.count() == 18
+    assert window.plugin_config_stack.count() == 18
+
+    # Test catalog item selection switches stack
+    window.plugin_catalog_list.setCurrentRow(10)  # NGINX
+    assert window.plugin_config_stack.currentIndex() == 10
 
     window.nginx_check.setChecked(True)
     window.nginx_url_input.setText("http://127.0.0.1/status")
@@ -182,11 +242,24 @@ def test_main_window_step3_plugins_and_preview(qapp, tmp_path):
     assert mon.nginx.urls == ["http://127.0.0.1/status"]
     assert "[[inputs.ping]]" in mon.custom_toml
 
+    window.ep_auto_install_check.setChecked(True)
     window._update_preview()
     preview_txt = window.preview_system_box.toPlainText()
     assert "[[inputs.nginx]]" in preview_txt
     assert "[[inputs.ping]]" in preview_txt
-    assert "Auto-Install Telegraf: YES" in window.review_summary_box.toPlainText()
+    summary_linux = window.review_summary_box.toPlainText()
+    assert "Auto-Install Telegraf: YES (Source: InfluxData Repository" in summary_linux
+    assert "downloads/salt" not in summary_linux
+
+    window.ep_os_combo.setCurrentText("Windows")
+    window._update_preview()
+    summary_win = window.review_summary_box.toPlainText()
+    assert "Auto-Install Telegraf: YES (Source: InfluxData Official Release" in summary_win
+    assert "downloads/salt" not in summary_win
+
+    window.ep_auto_install_check.setChecked(False)
+    window._update_preview()
+    assert "Auto-Install Telegraf: NO (assumes pre-installed agent)" in window.review_summary_box.toPlainText()
 
 
 def test_main_window_workflow_worker(qapp):
@@ -237,4 +310,109 @@ def test_main_window_workflow_worker(qapp):
     assert len(stages_seen) == 8
     assert len(results_summary) == 1
     assert isinstance(results_summary[0], RunSummary)
+
+
+def test_main_window_plugin_catalog_two_pane_and_presets(qapp, tmp_path):
+    """Verify Approach A two-pane catalog presets and two-way synchronization."""
+    from PySide6.QtCore import Qt
+
+    state_file = tmp_path / "state.json"
+    store = StateStore(state_file=state_file)
+    window = MainWindow(state_store=store)
+
+    # 1. Verify preset: Clear Workloads
+    window.nginx_check.setChecked(True)
+    window.mysql_check.setChecked(True)
+    assert window.nginx_check.isChecked() is True
+
+    window._clear_workload_plugins()
+    assert window.nginx_check.isChecked() is False
+    assert window.mysql_check.isChecked() is False
+    assert window.cpu_check.isChecked() is True
+
+    # 2. Verify preset: Select All respects target OS
+    window.ep_os_combo.setCurrentText("Linux")
+    window._select_all_plugins()
+    assert window.nginx_check.isChecked() is True
+    assert window.docker_check.isChecked() is True
+    assert window.mssql_check.isChecked() is True
+    assert window.sys_check.isChecked() is True
+    assert window.swap_check.isChecked() is True
+    assert window.win_perf_check.isChecked() is False
+    assert window.win_svc_check.isChecked() is False
+
+    window.ep_os_combo.setCurrentText("Windows")
+    window._select_all_plugins()
+    assert window.win_perf_check.isChecked() is True
+    assert window.win_svc_check.isChecked() is True
+    assert window.sys_check.isChecked() is False
+    assert window.swap_check.isChecked() is False
+
+    # 3. Verify preset: Baseline
+    window.ep_os_combo.setCurrentText("Linux")
+    window._apply_baseline_preset()
+    assert window.cpu_check.isChecked() is True
+    assert window.mem_check.isChecked() is True
+    assert window.disk_check.isChecked() is True
+    assert window.net_check.isChecked() is True
+    assert window.sys_check.isChecked() is True
+    assert window.swap_check.isChecked() is True
+    assert window.win_perf_check.isChecked() is False
+    assert window.nginx_check.isChecked() is False
+
+    # 4. Baseline on Windows enables win_perf and win_svc while excluding Linux-only system/swap
+    window.ep_os_combo.setCurrentText("Windows")
+    window._apply_baseline_preset()
+    assert window.win_perf_check.isChecked() is True
+    assert window.win_svc_check.isChecked() is True
+    assert window.sys_check.isChecked() is False
+    assert window.swap_check.isChecked() is False
+
+    # 5. List check state syncs to checkbox
+    # Index 10 is NGINX
+    nginx_item = window.plugin_catalog_list.item(10)
+    assert nginx_item is not None
+    nginx_item.setCheckState(Qt.Checked)
+    assert window.nginx_check.isChecked() is True
+
+    nginx_item.setCheckState(Qt.Unchecked)
+    assert window.nginx_check.isChecked() is False
+
+    # 6. Custom TOML auto-check respects manual disable
+    window.custom_toml_input.setPlainText("[[inputs.mem]]")
+    assert window.custom_toml_check.isChecked() is True
+
+    window.custom_toml_check.setChecked(False)
+    assert getattr(window, "_custom_toml_manually_unchecked", False) is True
+
+    window.custom_toml_input.setPlainText("[[inputs.mem]]\n  fielddrop = [\"active\"]")
+    assert window.custom_toml_check.isChecked() is False
+
+    window.custom_toml_input.setPlainText("")
+    assert window.custom_toml_check.isChecked() is False
+    assert getattr(window, "_custom_toml_manually_unchecked", False) is False
+
+
+def test_main_window_endpoint_detection_installed_hides_banner(qapp, tmp_path):
+    """Verify missing agent banner is hidden when Telegraf is already installed."""
+    from unittest.mock import MagicMock
+    from vcf_ops_telegraf_helper.executors.base import CommandResult
+
+    state_file = tmp_path / "state.json"
+    store = StateStore(state_file=state_file)
+    window = MainWindow(state_store=store)
+
+    mock_exec = MagicMock()
+    mock_exec.test_connection.return_value = True
+    mock_exec.execute.side_effect = lambda cmd, **kw: CommandResult(
+        exit_code=0,
+        stdout="/usr/bin/telegraf" if "which telegraf" in cmd else "active",
+        command=cmd,
+    )
+    window._create_executor = lambda target: mock_exec
+
+    window._detect_endpoint()
+    assert "Connected & Discovered" in window.ep_status_label.text()
+    assert window.ep_missing_banner.isHidden() is True
+
 

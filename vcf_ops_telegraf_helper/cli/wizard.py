@@ -104,12 +104,12 @@ def run_wizard(console: Optional[Console] = None) -> None:
             ssh_key = Prompt.ask("SSH Key Path", default=default_key, console=con)
         else:
             ssh_pass = Prompt.ask("SSH Password", password=True, console=con)
-        auto_install = Confirm.ask("Install Telegraf agent if missing via Cloud Proxy bootstrap?", default=True, console=con)
+        auto_install = Confirm.ask("Install open-source Telegraf agent if missing (InfluxData official distribution)?", default=True, console=con)
     elif conn_method == ConnectionMethod.WINRM:
         ssh_user = Prompt.ask("WinRM Username", default="Administrator", console=con)
         ssh_pass = Prompt.ask("WinRM Password", password=True, console=con)
         winrm_ssl = Confirm.ask("Use HTTPS for WinRM (port 5986)?", default=False, console=con)
-        auto_install = Confirm.ask("Install Telegraf agent if missing via Cloud Proxy bootstrap?", default=True, console=con)
+        auto_install = Confirm.ask("Install open-source Telegraf agent if missing (InfluxData official distribution)?", default=True, console=con)
 
     target = EndpointTarget(
         hostname=target_host,
