@@ -122,15 +122,21 @@ def test_apply_executes_linux_bootstrap_install():
         os_name="Linux",
         os_version="Ubuntu",
         telegraf_installed=False,
+        architecture="aarch64",
     )
+    mock_exec.use_sudo = True
 
     res = wf.apply()
     assert res.status == StageStatus.PASS
     assert wf.discovery.telegraf_installed is True
 
-    # Check that bootstrap script command was executed
+    # Check that InfluxData install commands were executed with sudo, arm64, and config drift fix
     executed_cmds = [call[0][0] for call in mock_exec.execute.call_args_list]
-    assert any("telegraf-utils.sh" in cmd for cmd in executed_cmds)
+    install_cmd = next(cmd for cmd in executed_cmds if "influxdata" in cmd.lower())
+    assert "sudo -n bash -c" in install_cmd
+    assert "linux_arm64.tar.gz" in install_cmd
+    assert "outputs.influxdb" in install_cmd
+    assert "systemctl daemon-reload" in install_cmd
 
 
 def test_apply_executes_windows_bootstrap_install():
@@ -171,6 +177,7 @@ def test_apply_executes_windows_bootstrap_install():
         os_name="Windows",
         os_version="Microsoft Windows Server 2022",
         telegraf_installed=False,
+        architecture="ARM64",
         config_dir="C:\\telegraf\\telegraf.d",
     )
 
@@ -179,4 +186,9 @@ def test_apply_executes_windows_bootstrap_install():
     assert wf.discovery.telegraf_installed is True
 
     executed_cmds = [call[0][0] for call in mock_exec.execute.call_args_list]
-    assert any("telegraf-utils.ps1" in cmd for cmd in executed_cmds)
+    win_cmd = next(cmd for cmd in executed_cmds if "telegraf.exe" in cmd)
+    assert "$ErrorActionPreference = 'Stop'" in win_cmd
+    assert "windows_arm64.zip" in win_cmd
+    assert "outputs.influxdb" in win_cmd
+    assert "Get-Service -Name telegraf" in win_cmd
+

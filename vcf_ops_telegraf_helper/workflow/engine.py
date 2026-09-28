@@ -217,7 +217,7 @@ class ConfigureEndpointWorkflow:
                 )
             else:
                 status = StageStatus.PASS if installed else StageStatus.WARNING
-                msg_suffix = " (will auto-install via collector bootstrap)" if (not installed and auto_install) else ""
+                msg_suffix = " (will auto-install official InfluxData agent)" if (not installed and auto_install) else ""
                 msg = f"{os_version} ({arch}), Telegraf: {version_str or 'Not installed'}{msg_suffix}"
                 res = StageResult(
                     stage=WorkflowStage.DETECT,
@@ -440,38 +440,79 @@ class ConfigureEndpointWorkflow:
             # Auto-install Telegraf if missing and requested
             auto_install = self.target.install_telegraf or self.options.install_telegraf
             if self.discovery and not self.discovery.telegraf_installed and auto_install:
-                if self.artifacts and self.artifacts.script_url:
-                    token_val = self.artifacts.token or ""
-                    coll_addr = self.artifacts.collector_address
-                    vcf_url = self.env.url
-                    if is_win:
-                        install_cmd = (
-                            "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; "
-                            "[System.Net.ServicePointManager]::ServerCertificateValidationCallback = {$true}; "
-                            f"$tmp = \"$env:TEMP\\telegraf-utils.ps1\"; "
-                            f"Invoke-WebRequest -Uri '{self.artifacts.script_url}' -OutFile $tmp -UseBasicParsing; "
-                            f"Unblock-File -Path $tmp -ErrorAction SilentlyContinue; "
-                            f"& powershell.exe -ExecutionPolicy Bypass -File $tmp -c '{coll_addr}' -t '{token_val}' -v '{vcf_url}'"
-                        )
-                    else:
-                        install_cmd = (
-                            f"curl -k -sSL '{self.artifacts.script_url}' -o /tmp/telegraf-utils.sh && "
-                            f"chmod +x /tmp/telegraf-utils.sh && "
-                            f"/tmp/telegraf-utils.sh -c '{coll_addr}' -t '{token_val}' -v '{vcf_url}'"
-                        )
-                    inst_res = self.executor.execute(install_cmd, timeout=180)
-                    if not inst_res.success:
-                        dur = int((time.monotonic() - start) * 1000)
-                        res = StageResult(
-                            stage=WorkflowStage.APPLY,
-                            status=StageStatus.FAIL,
-                            message=f"Failed to auto-install Telegraf agent: {inst_res.stderr or inst_res.stdout or 'Installation script failed'}",
-                            details=self._sanitize(inst_res.stderr or inst_res.stdout),
-                            duration_ms=dur,
-                        )
-                        self.reporter.on_stage_complete(res)
-                        return res
-                    self.discovery.telegraf_installed = True
+                arch_str = (getattr(self.discovery, "arch", "") or getattr(self.discovery, "architecture", "") or "").lower()
+                is_arm = "arm" in arch_str or "aarch" in arch_str
+                if is_win:
+                    win_arch = "arm64" if is_arm else "amd64"
+                    zip_url = f"https://dl.influxdata.com/telegraf/releases/telegraf-1.32.1_windows_{win_arch}.zip"
+                    install_cmd = (
+                        "$ErrorActionPreference = 'Stop'; "
+                        "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; "
+                        f"$zipUrl = '{zip_url}'; "
+                        "$destZip = \"$env:TEMP\\telegraf.zip\"; "
+                        "$destDir = 'C:\\telegraf'; "
+                        "if (-not (Test-Path $destDir)) { New-Item -ItemType Directory -Path $destDir -Force | Out-Null }; "
+                        "if (-not (Test-Path \"$destDir\\telegraf.d\")) { New-Item -ItemType Directory -Path \"$destDir\\telegraf.d\" -Force | Out-Null }; "
+                        "Invoke-WebRequest -Uri $zipUrl -OutFile $destZip -UseBasicParsing; "
+                        "Expand-Archive -Path $destZip -DestinationPath \"$env:TEMP\\telegraf_extract\" -Force; "
+                        "$bin = Get-ChildItem -Path \"$env:TEMP\\telegraf_extract\" -Filter 'telegraf.exe' -Recurse | Select-Object -First 1; "
+                        "if (-not $bin) { throw 'telegraf.exe binary not found in extracted archive' }; "
+                        "Copy-Item -Path $bin.FullName -Destination \"$destDir\\telegraf.exe\" -Force; "
+                        "$cfg = Get-ChildItem -Path \"$env:TEMP\\telegraf_extract\" -Filter 'telegraf.conf' -Recurse | Select-Object -First 1; "
+                        "if ($cfg -and -not (Test-Path \"$destDir\\telegraf.conf\")) { Copy-Item -Path $cfg.FullName -Destination \"$destDir\\telegraf.conf\" -Force }; "
+                        "if (Test-Path \"$destDir\\telegraf.conf\") { "
+                        "(Get-Content \"$destDir\\telegraf.conf\") -replace '^\\[\\[outputs\\.influxdb\\]\\]', '# [[outputs.influxdb]]' -replace '^\\s*urls\\s*=\\s*\\[\"http://127\\.0\\.0\\.1:8086\"\\]', '  # urls = [\"http://127.0.0.1:8086\"]' | Set-Content \"$destDir\\telegraf.conf\" "
+                        "}; "
+                        "Remove-Item -Path \"$env:TEMP\\telegraf_extract\" -Recurse -Force -ErrorAction SilentlyContinue; "
+                        "Remove-Item -Path $destZip -Force -ErrorAction SilentlyContinue; "
+                        "if (Get-Service -Name telegraf -ErrorAction SilentlyContinue) { Write-Output 'Service already registered' } else { & \"$destDir\\telegraf.exe\" --service install --config \"$destDir\\telegraf.conf\" --config-directory \"$destDir\\telegraf.d\" }"
+                    )
+                else:
+                    linux_arch = "arm64" if is_arm else "amd64"
+                    tar_url = f"https://dl.influxdata.com/telegraf/releases/telegraf-1.32.1_linux_{linux_arch}.tar.gz"
+                    sudo_pfx = "sudo -n " if getattr(self.executor, "use_sudo", False) else ""
+                    install_cmd = (
+                        f"{sudo_pfx}bash -c '"
+                        "if command -v apt-get >/dev/null 2>&1; then "
+                        "curl -fsSL https://repos.influxdata.com/influxdata-archive_compat.key -o /etc/apt/trusted.gpg.d/influxdata.asc 2>/dev/null && "
+                        "echo \"deb [signed-by=/etc/apt/trusted.gpg.d/influxdata.asc] https://repos.influxdata.com/debian stable main\" > /etc/apt/sources.list.d/influxdata.list && "
+                        "apt-get update -qq && apt-get install -y -qq telegraf || true; "
+                        "elif command -v dnf >/dev/null 2>&1 || command -v yum >/dev/null 2>&1; then "
+                        "(echo \"[influxdata]\"; echo \"name = InfluxData Repository\"; echo \"baseurl = https://repos.influxdata.com/rhel/\\$releasever/\\$basearch/stable\"; echo \"enabled = 1\"; echo \"gpgcheck = 1\"; echo \"gpgkey = https://repos.influxdata.com/influxdata-archive_compat.key\") > /etc/yum.repos.d/influxdata.repo && "
+                        "(dnf install -y -q telegraf 2>/dev/null || yum install -y -q telegraf 2>/dev/null) || true; "
+                        "fi; "
+                        "if ! command -v telegraf >/dev/null 2>&1; then "
+                        f"curl -fsSL \"{tar_url}\" | tar -xz -C /tmp && "
+                        "cp /tmp/telegraf-*/usr/bin/telegraf /usr/bin/telegraf && "
+                        "mkdir -p /etc/telegraf/telegraf.d && "
+                        "if [ ! -f /etc/telegraf/telegraf.conf ]; then cp /tmp/telegraf-*/etc/telegraf/telegraf.conf /etc/telegraf/telegraf.conf; fi && "
+                        "mkdir -p /lib/systemd/system && "
+                        "if [ -f /tmp/telegraf-*/usr/lib/telegraf/scripts/telegraf.service ]; then cp /tmp/telegraf-*/usr/lib/telegraf/scripts/telegraf.service /lib/systemd/system/telegraf.service; fi && "
+                        "rm -rf /tmp/telegraf-*; "
+                        "fi && "
+                        "mkdir -p /etc/telegraf/telegraf.d && "
+                        "if [ -f /etc/telegraf/telegraf.conf ]; then "
+                        "sed -i \"s/^\\[\\[outputs\\.influxdb\\]\\]/# [[outputs.influxdb]]/\" /etc/telegraf/telegraf.conf; "
+                        "sed -i \"s/^[[:space:]]*urls = \\[\"http:\\/\\/127\\.0\\.0\\.1:8086\"\\]/  # urls = [\\\"http:\\/\\/127.0.0.1:8086\\\"]/\" /etc/telegraf/telegraf.conf; "
+                        "fi && "
+                        "if command -v systemctl >/dev/null 2>&1; then "
+                        "systemctl daemon-reload || true; "
+                        "systemctl enable telegraf || true; "
+                        "fi'"
+                    )
+                inst_res = self.executor.execute(install_cmd, timeout=180)
+                if not inst_res.success:
+                    dur = int((time.monotonic() - start) * 1000)
+                    res = StageResult(
+                        stage=WorkflowStage.APPLY,
+                        status=StageStatus.FAIL,
+                        message=f"Failed to auto-install Telegraf agent: {inst_res.stderr or inst_res.stdout or 'Installation script failed'}",
+                        details=self._sanitize(inst_res.stderr or inst_res.stdout),
+                        duration_ms=dur,
+                    )
+                    self.reporter.on_stage_complete(res)
+                    return res
+                self.discovery.telegraf_installed = True
 
             # Create destination directory
             if is_win:

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from enum import Enum
-from typing import Optional
+from typing import Any, Optional
 from pydantic import BaseModel, Field, model_validator
 
 
@@ -55,6 +55,13 @@ class EndpointDiscoveryResult(BaseModel):
     os_name: str = Field(default="Linux")
     os_version: str = Field(default="")
     arch: str = Field(default="x86_64")
+    architecture: str = Field(default="", description="Target architecture e.g. x86_64, aarch64, amd64")
+
+    def model_post_init(self, __context: Any) -> None:
+        if self.architecture and (not self.arch or self.arch == "x86_64"):
+            self.arch = self.architecture
+        elif self.arch and not self.architecture:
+            self.architecture = self.arch
     telegraf_installed: bool = Field(default=False)
     telegraf_version: Optional[str] = Field(default=None)
     service_state: Optional[str] = Field(default=None, description="Service status e.g. active, inactive")

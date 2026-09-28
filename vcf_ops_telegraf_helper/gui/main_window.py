@@ -14,7 +14,7 @@ from pathlib import Path
 import sys
 from typing import Any, Optional
 
-from PySide6.QtCore import QObject, QThread, Signal
+from PySide6.QtCore import QObject, QThread, Signal, Qt
 from PySide6.QtWidgets import (
     QButtonGroup,
     QCheckBox,
@@ -34,7 +34,6 @@ from PySide6.QtWidgets import (
     QRadioButton,
     QScrollArea,
     QStackedWidget,
-    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -148,6 +147,7 @@ class MainWindow(QMainWindow):
         self.last_summary: Optional[RunSummary] = None
         self.worker_thread: Optional[QThread] = None
         self.logger = get_logger("gui")
+        self._updating_catalog = False
 
         self.setWindowTitle("VCF Operations Open Telegraf Helper")
         self.resize(1020, 720)
@@ -458,11 +458,34 @@ class MainWindow(QMainWindow):
         self.ep_key_input = QLineEdit("~/.ssh/id_rsa")
         grid.addWidget(self.ep_key_input, 6, 1)
 
-        self.ep_auto_install_check = QCheckBox("Install Telegraf agent if missing (via Cloud Proxy bootstrap script)")
+        self.ep_auto_install_check = QCheckBox("Install open-source Telegraf agent if missing (InfluxData official distribution)")
         self.ep_auto_install_check.setChecked(True)
         grid.addWidget(self.ep_auto_install_check, 7, 0, 1, 2)
 
         c_layout.addLayout(grid)
+
+        # Missing agent guidance banner
+        self.ep_missing_banner = QFrame()
+        self.ep_missing_banner.setProperty("class", "lattice-card")
+        self.ep_missing_banner.setStyleSheet(
+            "border-left: 4px solid #d97706; background-color: rgba(217, 119, 6, 0.12); padding: 10px; border-radius: 6px;"
+        )
+        mb_layout = QVBoxLayout(self.ep_missing_banner)
+        mb_layout.setContentsMargins(10, 8, 10, 8)
+        mb_layout.setSpacing(4)
+        mb_title = QLabel("Telegraf Agent Not Detected on Host")
+        mb_title.setStyleSheet("font-weight: 600; color: #d97706; font-size: 13px;")
+        mb_desc = QLabel(
+            "This endpoint does not currently have Telegraf installed. "
+            "Keep 'Install open-source Telegraf agent' enabled to automatically download and register "
+            "the official InfluxData agent before applying VCF Operations monitoring."
+        )
+        mb_desc.setProperty("class", "lattice-muted")
+        mb_desc.setWordWrap(True)
+        mb_layout.addWidget(mb_title)
+        mb_layout.addWidget(mb_desc)
+        self.ep_missing_banner.setVisible(False)
+        c_layout.addWidget(self.ep_missing_banner)
 
         det_row = QHBoxLayout()
         self.detect_ep_btn = QPushButton("Detect Endpoint")
@@ -511,6 +534,8 @@ class MainWindow(QMainWindow):
                 self.ep_user_input.setText("Administrator")
             self.ep_key_input.setEnabled(False)
             self.ep_key_label.setEnabled(False)
+            if hasattr(self, "win_perf_check"):
+                self.win_perf_check.setChecked(True)
         else:
             self.ep_method_combo.setCurrentText("SSH (Linux Remote)")
             self.ep_port_input.setText("22")
@@ -518,6 +543,8 @@ class MainWindow(QMainWindow):
                 self.ep_user_input.setText("root")
             self.ep_key_input.setEnabled(True)
             self.ep_key_label.setEnabled(True)
+            if hasattr(self, "win_perf_check"):
+                self.win_perf_check.setChecked(False)
 
     def _detect_endpoint(self) -> None:
         self.ep_status_label.setText("Detecting...")
@@ -551,17 +578,20 @@ class MainWindow(QMainWindow):
                         if caption_res.success and caption_res.stdout.strip():
                             os_version = caption_res.stdout.strip().splitlines()[0]
 
+                self.ep_missing_banner.setVisible(not installed)
+                if not installed:
+                    self.ep_auto_install_check.setChecked(True)
+
                 self.ep_status_label.setText("Connected & Discovered (Windows)")
                 self.ep_status_label.setStyleSheet("color: #199e70; font-weight: 600;")
-                collector_addr = self._get_vcf_env().collector.address
                 details = [
                     f"OS: {os_version}",
                     f"Architecture: {arch}",
-                    f"Telegraf Installed: {'YES' if installed else 'NO'}",
+                    f"Telegraf Installed: {'YES' if installed else 'NO (auto-install will download InfluxData agent)'}",
                     f"Telegraf Version: {version_str}",
                     f"Service Running: {'YES' if running else 'NO'}",
                     "Config Directory: C:\\telegraf\\telegraf.d",
-                    f"Helper Script: https://{collector_addr}/downloads/salt/telegraf-utils.ps1",
+                    "Agent Distribution: InfluxData Official Open-Source",
                 ]
                 self.ep_details_box.setPlainText("\n".join(details))
                 self.state_store.record_endpoint(target.hostname)
@@ -596,18 +626,21 @@ class MainWindow(QMainWindow):
             svc_res = executor.execute("systemctl is-active telegraf", timeout=5)
             running = svc_res.success and svc_res.stdout.strip() == "active"
 
+            self.ep_missing_banner.setVisible(not installed)
+            if not installed:
+                self.ep_auto_install_check.setChecked(True)
+
             self.ep_status_label.setText("Connected & Discovered")
             self.ep_status_label.setStyleSheet("color: #199e70; font-weight: 600;")
 
-            collector_addr = self._get_vcf_env().collector.address
             details = [
                 f"OS: {os_version}",
                 f"Architecture: {arch}",
-                f"Telegraf Installed: {'YES' if installed else 'NO'}",
+                f"Telegraf Installed: {'YES' if installed else 'NO (auto-install will download InfluxData agent)'}",
                 f"Telegraf Version: {version_str}",
                 f"Service Running: {'YES' if running else 'NO'}",
                 "Config Directory: /etc/telegraf/telegraf.d",
-                f"Helper Script: https://{collector_addr}/downloads/salt/telegraf-utils.sh",
+                "Agent Distribution: InfluxData Official Open-Source",
             ]
             self.ep_details_box.setPlainText("\n".join(details))
             self.state_store.record_endpoint(target.hostname)
@@ -652,148 +685,336 @@ class MainWindow(QMainWindow):
         sec_in.setProperty("class", "lattice-section-label")
         c_layout.addWidget(sec_in)
 
-        self.plugin_tabs = QTabWidget()
+        # Preset buttons toolbar
+        preset_row = QHBoxLayout()
+        preset_lbl = QLabel("PRESETS:")
+        preset_lbl.setProperty("class", "lattice-caption")
+        preset_row.addWidget(preset_lbl)
 
-        # Tab 1: Host OS Telemetry
-        tab_host = QWidget()
-        th_layout = QVBoxLayout(tab_host)
-        th_layout.setContentsMargins(12, 12, 12, 12)
-        th_layout.setSpacing(8)
+        self.btn_preset_baseline = QPushButton("Recommended OS Baseline")
+        self.btn_preset_baseline.clicked.connect(self._apply_baseline_preset)
+        preset_row.addWidget(self.btn_preset_baseline)
 
-        self.cpu_check = QCheckBox("CPU Metrics (inputs.cpu: percpu, totalcpu, collect_cpu_time, report_active)")
+        self.btn_preset_all = QPushButton("Select All")
+        self.btn_preset_all.clicked.connect(self._select_all_plugins)
+        preset_row.addWidget(self.btn_preset_all)
+
+        self.btn_preset_clear = QPushButton("Clear Workloads")
+        self.btn_preset_clear.clicked.connect(self._clear_workload_plugins)
+        preset_row.addWidget(self.btn_preset_clear)
+
+        preset_row.addStretch()
+        c_layout.addLayout(preset_row)
+
+        # Checkboxes for each plugin
+        self.cpu_check = QCheckBox("Enable CPU Metrics")
         self.cpu_check.setChecked(True)
-        th_layout.addWidget(self.cpu_check)
 
-        self.mem_check = QCheckBox("Memory Metrics (inputs.mem: system memory usage and percentages)")
+        self.mem_check = QCheckBox("Enable Memory Metrics")
         self.mem_check.setChecked(True)
-        th_layout.addWidget(self.mem_check)
 
-        self.disk_check = QCheckBox("Disk Usage (inputs.disk: mount points, excluding pseudo/virtual fs)")
+        self.disk_check = QCheckBox("Enable Disk Usage")
         self.disk_check.setChecked(True)
-        th_layout.addWidget(self.disk_check)
 
-        self.net_check = QCheckBox("Network Interface Metrics (inputs.net: bandwidth and error counts)")
+        self.net_check = QCheckBox("Enable Network Interfaces")
         self.net_check.setChecked(True)
-        th_layout.addWidget(self.net_check)
 
-        self.sys_check = QCheckBox("System Load & Uptime (inputs.system: 1m/5m/15m load averages)")
+        self.sys_check = QCheckBox("Enable System Load & Uptime")
         self.sys_check.setChecked(True)
-        th_layout.addWidget(self.sys_check)
 
-        self.swap_check = QCheckBox("Swap Usage (inputs.swap: swap in/out and space utilization)")
+        self.swap_check = QCheckBox("Enable Swap Usage")
         self.swap_check.setChecked(True)
-        th_layout.addWidget(self.swap_check)
 
-        self.diskio_check = QCheckBox("Disk I/O (inputs.diskio: read/write byte rates and operations)")
+        self.diskio_check = QCheckBox("Enable Disk I/O")
         self.diskio_check.setChecked(False)
-        th_layout.addWidget(self.diskio_check)
 
-        self.proc_check = QCheckBox("Process Counts (inputs.processes: total, running, sleeping, blocked)")
+        self.proc_check = QCheckBox("Enable Process Counts")
         self.proc_check.setChecked(False)
-        th_layout.addWidget(self.proc_check)
 
-        th_layout.addStretch()
-        self.plugin_tabs.addTab(tab_host, "Host OS Telemetry")
-
-        # Tab 2: Windows Telemetry
-        tab_win = QWidget()
-        tw_layout = QVBoxLayout(tab_win)
-        tw_layout.setContentsMargins(12, 12, 12, 12)
-        tw_layout.setSpacing(10)
-
-        self.win_perf_check = QCheckBox("Windows Performance Counters (inputs.win_perf_counters)")
+        self.win_perf_check = QCheckBox("Enable Windows Performance Counters")
         self.win_perf_check.setChecked(False)
-        tw_layout.addWidget(self.win_perf_check)
-        lbl_wp = QLabel("  Collects Processor, Memory, LogicalDisk, Network Interface, and System counters.")
-        lbl_wp.setProperty("class", "lattice-muted")
-        tw_layout.addWidget(lbl_wp)
 
-        self.win_svc_check = QCheckBox("Windows Services Status (inputs.win_services)")
+        self.win_svc_check = QCheckBox("Enable Windows Services")
         self.win_svc_check.setChecked(False)
-        tw_layout.addWidget(self.win_svc_check)
-
-        svc_row = QHBoxLayout()
-        svc_row.addWidget(QLabel("  Service Names Filter (comma-separated, * for all):"))
         self.win_svc_names_input = QLineEdit("*")
-        svc_row.addWidget(self.win_svc_names_input)
-        tw_layout.addLayout(svc_row)
 
-        tw_layout.addStretch()
-        self.plugin_tabs.addTab(tab_win, "Windows Metrics")
-
-        # Tab 3: Applications & Workloads
-        tab_apps = QWidget()
-        ta_layout = QVBoxLayout(tab_apps)
-        ta_layout.setContentsMargins(12, 12, 12, 12)
-        ta_layout.setSpacing(8)
-
-        app_grid = QGridLayout()
-        app_grid.setSpacing(8)
-
-        # NGINX
-        self.nginx_check = QCheckBox("NGINX (inputs.nginx)")
-        app_grid.addWidget(self.nginx_check, 0, 0)
+        self.nginx_check = QCheckBox("Enable NGINX Monitoring")
+        self.nginx_check.setChecked(False)
         self.nginx_url_input = QLineEdit("http://localhost/status")
-        app_grid.addWidget(self.nginx_url_input, 0, 1)
 
-        # Apache
-        self.apache_check = QCheckBox("Apache (inputs.apache)")
-        app_grid.addWidget(self.apache_check, 1, 0)
+        self.apache_check = QCheckBox("Enable Apache Monitoring")
+        self.apache_check.setChecked(False)
         self.apache_url_input = QLineEdit("http://localhost/server-status?auto")
-        app_grid.addWidget(self.apache_url_input, 1, 1)
 
-        # MySQL
-        self.mysql_check = QCheckBox("MySQL / MariaDB (inputs.mysql)")
-        app_grid.addWidget(self.mysql_check, 2, 0)
+        self.mysql_check = QCheckBox("Enable MySQL / MariaDB Monitoring")
+        self.mysql_check.setChecked(False)
         self.mysql_server_input = QLineEdit("tcp(127.0.0.1:3306)/")
-        app_grid.addWidget(self.mysql_server_input, 2, 1)
 
-        # PostgreSQL
-        self.postgres_check = QCheckBox("PostgreSQL (inputs.postgresql)")
-        app_grid.addWidget(self.postgres_check, 3, 0)
+        self.postgres_check = QCheckBox("Enable PostgreSQL Monitoring")
+        self.postgres_check.setChecked(False)
         self.postgres_addr_input = QLineEdit("host=localhost user=postgres sslmode=disable")
-        app_grid.addWidget(self.postgres_addr_input, 3, 1)
 
-        # MSSQL
-        self.mssql_check = QCheckBox("Microsoft SQL Server (inputs.sqlserver)")
-        app_grid.addWidget(self.mssql_check, 4, 0)
+        self.mssql_check = QCheckBox("Enable Microsoft SQL Server Monitoring")
+        self.mssql_check.setChecked(False)
         self.mssql_server_input = QLineEdit("Server=127.0.0.1;Port=1433;User Id=sa;Password=;app name=telegraf;log=1;")
-        app_grid.addWidget(self.mssql_server_input, 4, 1)
 
-        # Docker
-        self.docker_check = QCheckBox("Docker Containers (inputs.docker)")
-        app_grid.addWidget(self.docker_check, 5, 0)
+        self.docker_check = QCheckBox("Enable Docker Container Monitoring")
+        self.docker_check.setChecked(False)
         self.docker_endpoint_input = QLineEdit("unix:///var/run/docker.sock")
-        app_grid.addWidget(self.docker_endpoint_input, 5, 1)
 
-        # Ping
-        self.ping_check = QCheckBox("ICMP Ping / Reachability (inputs.ping)")
-        app_grid.addWidget(self.ping_check, 6, 0)
+        self.ping_check = QCheckBox("Enable ICMP Ping Reachability")
+        self.ping_check.setChecked(False)
         self.ping_url_input = QLineEdit("10.10.10.1")
-        app_grid.addWidget(self.ping_url_input, 6, 1)
 
-        ta_layout.addLayout(app_grid)
-        ta_layout.addStretch()
-        self.plugin_tabs.addTab(tab_apps, "Applications & Workloads")
-
-        # Tab 4: Custom TOML Fragment
-        tab_custom = QWidget()
-        tc_layout = QVBoxLayout(tab_custom)
-        tc_layout.setContentsMargins(12, 12, 12, 12)
-        tc_layout.setSpacing(6)
-
-        tc_desc = QLabel("Inject custom Telegraf input plugin configurations directly into the managed configuration:")
-        tc_desc.setProperty("class", "lattice-muted")
-        tc_layout.addWidget(tc_desc)
-
+        self.custom_toml_check = QCheckBox("Enable Custom TOML Injection")
+        self.custom_toml_check.setChecked(False)
         self.custom_toml_input = QPlainTextEdit()
         self.custom_toml_input.setProperty("class", "code-block")
         self.custom_toml_input.setPlaceholderText("# Paste custom [[inputs.xyz]] plugin stanzas here...")
-        tc_layout.addWidget(self.custom_toml_input)
+        self.custom_toml_input.textChanged.connect(self._on_custom_toml_changed)
+        self.custom_toml_check.toggled.connect(
+            lambda checked: setattr(self, "_custom_toml_manually_unchecked", not checked if self.custom_toml_input.toPlainText().strip() else False)
+        )
 
-        self.plugin_tabs.addTab(tab_custom, "Custom TOML")
+        # Catalog definitions
+        self.catalog_items = [
+            ("cpu", "CPU Metrics", "Core OS", self.cpu_check),
+            ("mem", "Memory Metrics", "Core OS", self.mem_check),
+            ("disk", "Disk Usage", "Core OS", self.disk_check),
+            ("net", "Network Interfaces", "Core OS", self.net_check),
+            ("system", "System Load & Uptime", "Core OS", self.sys_check),
+            ("swap", "Swap Usage", "Core OS", self.swap_check),
+            ("diskio", "Disk I/O", "Core OS", self.diskio_check),
+            ("processes", "Process Counts", "Core OS", self.proc_check),
+            ("win_perf", "Windows Performance Counters", "Windows", self.win_perf_check),
+            ("win_svc", "Windows Services", "Windows", self.win_svc_check),
+            ("nginx", "NGINX Web Server", "Workloads", self.nginx_check),
+            ("apache", "Apache HTTP Server", "Workloads", self.apache_check),
+            ("mysql", "MySQL / MariaDB", "Workloads", self.mysql_check),
+            ("postgres", "PostgreSQL Server", "Workloads", self.postgres_check),
+            ("mssql", "Microsoft SQL Server", "Workloads", self.mssql_check),
+            ("docker", "Docker Containers", "Workloads", self.docker_check),
+            ("ping", "ICMP Ping Reachability", "Workloads", self.ping_check),
+            ("custom", "Custom TOML Fragment", "Custom", self.custom_toml_check),
+        ]
 
-        c_layout.addWidget(self.plugin_tabs)
+        # Two-pane container
+        pane_layout = QHBoxLayout()
+        pane_layout.setSpacing(12)
+
+        # Left pane: Catalog list
+        left_box = QFrame()
+        left_box.setFixedWidth(290)
+        left_box.setProperty("class", "lattice-card")
+        left_layout = QVBoxLayout(left_box)
+        left_layout.setContentsMargins(10, 10, 10, 10)
+        left_layout.setSpacing(6)
+
+        catalog_title = QLabel("AVAILABLE PLUGINS")
+        catalog_title.setProperty("class", "lattice-section-label")
+        left_layout.addWidget(catalog_title)
+
+        self.plugin_catalog_list = QListWidget()
+        self.plugin_catalog_list.setProperty("class", "step-list")
+        self.plugin_catalog_list.setMinimumHeight(360)
+        left_layout.addWidget(self.plugin_catalog_list)
+        pane_layout.addWidget(left_box)
+
+        # Right pane: Config card stack
+        right_box = QFrame()
+        right_box.setProperty("class", "lattice-card")
+        right_layout = QVBoxLayout(right_box)
+        right_layout.setContentsMargins(14, 12, 14, 12)
+        right_layout.setSpacing(10)
+
+        self.plugin_config_stack = QStackedWidget()
+        right_layout.addWidget(self.plugin_config_stack)
+        pane_layout.addWidget(right_box, 1)
+
+        # Build cards for each plugin
+        self.plugin_config_stack.addWidget(self._create_plugin_card(
+            "CPU Metrics (inputs.cpu)", "Core OS",
+            "Collects total and per-cpu usage percentages, system time, and active reporting.",
+            self.cpu_check,
+            notes="Broadcom standard options applied: percpu = true, totalcpu = true, collect_cpu_time = true, report_active = true"
+        ))
+        self.plugin_config_stack.addWidget(self._create_plugin_card(
+            "Memory Metrics (inputs.mem)", "Core OS",
+            "Collects system memory usage, free, used, buffered, and cached memory.",
+            self.mem_check,
+            notes="Standard Broadcom Linux and Windows memory metric model."
+        ))
+        self.plugin_config_stack.addWidget(self._create_plugin_card(
+            "Disk Usage (inputs.disk)", "Core OS",
+            "Monitors disk space utilization across storage mount points, ignoring pseudo filesystems.",
+            self.disk_check,
+            notes="Auto-ignores: tmpfs, devtmpfs, devfs, iso9660, overlay, aufs, squashfs"
+        ))
+        self.plugin_config_stack.addWidget(self._create_plugin_card(
+            "Network Interface Metrics (inputs.net)", "Core OS",
+            "Collects network interface bandwidth, packet counts, drop rates, and errors.",
+            self.net_check,
+            notes="Collects stats across all active network adapters."
+        ))
+        self.plugin_config_stack.addWidget(self._create_plugin_card(
+            "System Load & Uptime (inputs.system)", "Core OS",
+            "Collects 1m, 5m, and 15m load averages and system uptime.",
+            self.sys_check,
+            notes="Standard system health telemetry."
+        ))
+        self.plugin_config_stack.addWidget(self._create_plugin_card(
+            "Swap Usage (inputs.swap)", "Core OS",
+            "Monitors system swap space utilization and in/out paging activity.",
+            self.swap_check,
+            notes="Tracks swap memory consumption."
+        ))
+        self.plugin_config_stack.addWidget(self._create_plugin_card(
+            "Disk I/O (inputs.diskio)", "Core OS",
+            "Tracks read and write byte rates, I/O operations, and queue lengths per storage device.",
+            self.diskio_check
+        ))
+        self.plugin_config_stack.addWidget(self._create_plugin_card(
+            "Process Counts (inputs.processes)", "Core OS",
+            "Summarizes total processes grouped by status (running, sleeping, stopped, zombie).",
+            self.proc_check
+        ))
+        self.plugin_config_stack.addWidget(self._create_plugin_card(
+            "Windows Performance Counters (inputs.win_perf_counters)", "Windows",
+            "Collects native Windows Processor, Memory, LogicalDisk, Network Interface, and System counters matching VCF Operations Windows guest OS dashboards.",
+            self.win_perf_check,
+            notes="Captures Processor (*), Memory, LogicalDisk (*), Network Interface (*), and System objects."
+        ))
+
+        # Windows Services Card
+        win_svc_widget = QWidget()
+        wsw_layout = QVBoxLayout(win_svc_widget)
+        wsw_layout.setContentsMargins(0, 0, 0, 0)
+        wsw_layout.addWidget(QLabel("Service Names Filter (comma-separated, * for all):"))
+        wsw_layout.addWidget(self.win_svc_names_input)
+        self.plugin_config_stack.addWidget(self._create_plugin_card(
+            "Windows Services Status (inputs.win_services)", "Windows",
+            "Monitors status and startup types of Windows services.",
+            self.win_svc_check,
+            inputs_widget=win_svc_widget
+        ))
+
+        # NGINX Card
+        nginx_widget = QWidget()
+        ng_layout = QVBoxLayout(nginx_widget)
+        ng_layout.setContentsMargins(0, 0, 0, 0)
+        ng_layout.addWidget(QLabel("NGINX Status URL (stub_status module):"))
+        ng_layout.addWidget(self.nginx_url_input)
+        self.plugin_config_stack.addWidget(self._create_plugin_card(
+            "NGINX Web Server (inputs.nginx)", "Workloads",
+            "Scrapes active connections, reading, writing, waiting, and request rates.",
+            self.nginx_check,
+            inputs_widget=nginx_widget
+        ))
+
+        # Apache Card
+        apache_widget = QWidget()
+        ap_layout = QVBoxLayout(apache_widget)
+        ap_layout.setContentsMargins(0, 0, 0, 0)
+        ap_layout.addWidget(QLabel("Apache server-status URL:"))
+        ap_layout.addWidget(self.apache_url_input)
+        self.plugin_config_stack.addWidget(self._create_plugin_card(
+            "Apache HTTP Server (inputs.apache)", "Workloads",
+            "Collects worker status and request rates from the server-status?auto endpoint.",
+            self.apache_check,
+            inputs_widget=apache_widget
+        ))
+
+        # MySQL Card
+        mysql_widget = QWidget()
+        my_layout = QVBoxLayout(mysql_widget)
+        my_layout.setContentsMargins(0, 0, 0, 0)
+        my_layout.addWidget(QLabel("MySQL / MariaDB Connection String:"))
+        my_layout.addWidget(self.mysql_server_input)
+        self.plugin_config_stack.addWidget(self._create_plugin_card(
+            "MySQL / MariaDB (inputs.mysql)", "Workloads",
+            "Collects database performance metrics, query counts, and connection pool statistics.",
+            self.mysql_check,
+            inputs_widget=mysql_widget
+        ))
+
+        # PostgreSQL Card
+        pg_widget = QWidget()
+        pg_layout = QVBoxLayout(pg_widget)
+        pg_layout.setContentsMargins(0, 0, 0, 0)
+        pg_layout.addWidget(QLabel("PostgreSQL Connection Address:"))
+        pg_layout.addWidget(self.postgres_addr_input)
+        self.plugin_config_stack.addWidget(self._create_plugin_card(
+            "PostgreSQL Server (inputs.postgresql)", "Workloads",
+            "Monitors PostgreSQL database statistics, buffer hits, transaction rates, and deadlocks.",
+            self.postgres_check,
+            inputs_widget=pg_widget
+        ))
+
+        # MSSQL Card
+        mssql_widget = QWidget()
+        ms_layout = QVBoxLayout(mssql_widget)
+        ms_layout.setContentsMargins(0, 0, 0, 0)
+        ms_layout.addWidget(QLabel("Microsoft SQL Server Connection String:"))
+        ms_layout.addWidget(self.mssql_server_input)
+        self.plugin_config_stack.addWidget(self._create_plugin_card(
+            "Microsoft SQL Server (inputs.sqlserver)", "Workloads",
+            "Collects SQL Server engine metrics, batch requests, buffer cache hit ratios, and memory.",
+            self.mssql_check,
+            inputs_widget=mssql_widget
+        ))
+
+        # Docker Card
+        docker_widget = QWidget()
+        dk_layout = QVBoxLayout(docker_widget)
+        dk_layout.setContentsMargins(0, 0, 0, 0)
+        dk_layout.addWidget(QLabel("Docker Daemon Socket Endpoint:"))
+        dk_layout.addWidget(self.docker_endpoint_input)
+        self.plugin_config_stack.addWidget(self._create_plugin_card(
+            "Docker Containers (inputs.docker)", "Workloads",
+            "Collects container CPU, memory, network, and block I/O statistics.",
+            self.docker_check,
+            inputs_widget=docker_widget
+        ))
+
+        # Ping Card
+        ping_widget = QWidget()
+        p_layout = QVBoxLayout(ping_widget)
+        p_layout.setContentsMargins(0, 0, 0, 0)
+        p_layout.addWidget(QLabel("Target URL or IP Address to Ping:"))
+        p_layout.addWidget(self.ping_url_input)
+        self.plugin_config_stack.addWidget(self._create_plugin_card(
+            "ICMP Ping Reachability (inputs.ping)", "Workloads",
+            "Measures network reachability, latency, and packet loss to critical gateway or remote endpoints.",
+            self.ping_check,
+            inputs_widget=ping_widget
+        ))
+
+        # Custom TOML Card
+        custom_widget = QWidget()
+        ct_layout = QVBoxLayout(custom_widget)
+        ct_layout.setContentsMargins(0, 0, 0, 0)
+        ct_layout.addWidget(QLabel("Custom [[inputs.xyz]] TOML Stanzas:"))
+        ct_layout.addWidget(self.custom_toml_input)
+        self.plugin_config_stack.addWidget(self._create_plugin_card(
+            "Custom TOML Fragment", "Custom",
+            "Inject arbitrary input plugin configurations directly into vcf-helper-system.conf.",
+            self.custom_toml_check,
+            inputs_widget=custom_widget
+        ))
+
+        # Populate Left Catalog List and bind synchronization
+        for idx, (_, name, cat, chk) in enumerate(self.catalog_items):
+            item = QListWidgetItem(f"[{cat}] {name}")
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            item.setCheckState(Qt.Checked if chk.isChecked() else Qt.Unchecked)
+            self.plugin_catalog_list.addItem(item)
+            chk.toggled.connect(lambda checked, i=idx: self._sync_checkbox_to_catalog(i, checked))
+
+        self.plugin_catalog_list.itemChanged.connect(self._on_catalog_item_changed)
+        self.plugin_catalog_list.currentRowChanged.connect(self._on_catalog_row_changed)
+        self.plugin_catalog_list.setCurrentRow(0)
+
+        c_layout.addLayout(pane_layout)
 
         sec_mode = QLabel("DEPLOYMENT MODE")
         sec_mode.setProperty("class", "lattice-section-label")
@@ -834,7 +1055,143 @@ class MainWindow(QMainWindow):
         v.addWidget(scroll)
         return page
 
-    # --------------------------------------------------------------------------
+    def _create_plugin_card(
+        self,
+        title: str,
+        category: str,
+        description: str,
+        checkbox: QCheckBox,
+        inputs_widget: Optional[QWidget] = None,
+        notes: Optional[str] = None,
+    ) -> QWidget:
+        card = QWidget()
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(12, 10, 12, 10)
+        layout.setSpacing(10)
+
+        header_row = QHBoxLayout()
+        cat_badge = QLabel(f"[{category.upper()}]")
+        cat_badge.setProperty("class", "lattice-caption")
+        cat_badge.setStyleSheet("color: #3987e5; font-weight: 600;")
+        header_row.addWidget(cat_badge)
+
+        card_title = QLabel(title)
+        card_title.setProperty("class", "lattice-title")
+        header_row.addWidget(card_title)
+        header_row.addStretch()
+        layout.addLayout(header_row)
+
+        layout.addWidget(checkbox)
+
+        desc_lbl = QLabel(description)
+        desc_lbl.setProperty("class", "lattice-muted")
+        desc_lbl.setWordWrap(True)
+        layout.addWidget(desc_lbl)
+
+        if notes:
+            notes_lbl = QLabel(notes)
+            notes_lbl.setProperty("class", "lattice-caption")
+            notes_lbl.setStyleSheet("background: rgba(54, 61, 71, 0.3); padding: 6px; border-radius: 4px;")
+            notes_lbl.setWordWrap(True)
+            layout.addWidget(notes_lbl)
+
+        if inputs_widget:
+            form_group = QFrame()
+            form_group.setProperty("class", "lattice-card")
+            form_layout = QVBoxLayout(form_group)
+            form_layout.setContentsMargins(8, 8, 8, 8)
+            form_layout.addWidget(inputs_widget)
+            layout.addWidget(form_group)
+
+            inputs_widget.setEnabled(checkbox.isChecked())
+            checkbox.toggled.connect(inputs_widget.setEnabled)
+
+        layout.addStretch()
+        return card
+
+    def _sync_checkbox_to_catalog(self, row: int, checked: bool) -> None:
+        if self._updating_catalog:
+            return
+        if hasattr(self, "plugin_catalog_list") and 0 <= row < self.plugin_catalog_list.count():
+            item = self.plugin_catalog_list.item(row)
+            if item:
+                new_state = Qt.Checked if checked else Qt.Unchecked
+                if item.checkState() != new_state:
+                    self._updating_catalog = True
+                    try:
+                        item.setCheckState(new_state)
+                    finally:
+                        self._updating_catalog = False
+
+    def _on_catalog_item_changed(self, item: QListWidgetItem) -> None:
+        if self._updating_catalog:
+            return
+        row = self.plugin_catalog_list.row(item)
+        if hasattr(self, "catalog_items") and 0 <= row < len(self.catalog_items):
+            _, _, _, chk = self.catalog_items[row]
+            is_checked = (item.checkState() == Qt.Checked)
+            if chk.isChecked() != is_checked:
+                self._updating_catalog = True
+                try:
+                    chk.setChecked(is_checked)
+                finally:
+                    self._updating_catalog = False
+
+    def _on_catalog_row_changed(self, row: int) -> None:
+        if hasattr(self, "plugin_config_stack") and 0 <= row < self.plugin_config_stack.count():
+            self.plugin_config_stack.setCurrentIndex(row)
+
+    def _on_custom_toml_changed(self) -> None:
+        if hasattr(self, "custom_toml_input") and hasattr(self, "custom_toml_check"):
+            has_content = bool(self.custom_toml_input.toPlainText().strip())
+            if not has_content:
+                self._custom_toml_manually_unchecked = False
+                if self.custom_toml_check.isChecked() and not self._updating_catalog:
+                    self.custom_toml_check.setChecked(False)
+            elif not self.custom_toml_check.isChecked() and not getattr(self, "_custom_toml_manually_unchecked", False) and not self._updating_catalog:
+                self.custom_toml_check.setChecked(True)
+
+    def _apply_baseline_preset(self) -> None:
+        is_win = (getattr(self, "ep_os_combo", None) and self.ep_os_combo.currentText().lower() == "windows")
+        baseline_keys = (
+            {"cpu", "mem", "disk", "net", "win_perf", "win_svc"}
+            if is_win
+            else {"cpu", "mem", "disk", "net", "system", "swap"}
+        )
+        self._updating_catalog = True
+        try:
+            for idx, (key, _, _, chk) in enumerate(self.catalog_items):
+                want_checked = key in baseline_keys
+                chk.setChecked(want_checked)
+                item = self.plugin_catalog_list.item(idx)
+                if item:
+                    item.setCheckState(Qt.Checked if want_checked else Qt.Unchecked)
+        finally:
+            self._updating_catalog = False
+
+    def _select_all_plugins(self) -> None:
+        self._updating_catalog = True
+        try:
+            for idx, (_, _, _, chk) in enumerate(self.catalog_items):
+                chk.setChecked(True)
+                item = self.plugin_catalog_list.item(idx)
+                if item:
+                    item.setCheckState(Qt.Checked)
+        finally:
+            self._updating_catalog = False
+
+    def _clear_workload_plugins(self) -> None:
+        workload_keys = {"nginx", "apache", "mysql", "postgres", "mssql", "docker", "ping", "custom"}
+        self._updating_catalog = True
+        try:
+            for idx, (key, _, _, chk) in enumerate(self.catalog_items):
+                if key in workload_keys:
+                    chk.setChecked(False)
+                    item = self.plugin_catalog_list.item(idx)
+                    if item:
+                        item.setCheckState(Qt.Unchecked)
+        finally:
+            self._updating_catalog = False
     # Step 4: Review & Preview
     # --------------------------------------------------------------------------
     def _build_step4_page(self) -> QWidget:
@@ -1214,7 +1571,12 @@ class MainWindow(QMainWindow):
         mssql_srv = self.mssql_server_input.text().strip() if hasattr(self, "mssql_server_input") else "Server=127.0.0.1;Port=1433;User Id=sa;Password=;app name=telegraf;log=1;"
         docker_ep = self.docker_endpoint_input.text().strip() if hasattr(self, "docker_endpoint_input") else "unix:///var/run/docker.sock"
         ping_url = self.ping_url_input.text().strip() if hasattr(self, "ping_url_input") else "10.10.10.1"
-        custom_txt = self.custom_toml_input.toPlainText().strip() if hasattr(self, "custom_toml_input") else ""
+        custom_txt = (
+            self.custom_toml_input.toPlainText().strip()
+            if hasattr(self, "custom_toml_input")
+            and (not hasattr(self, "custom_toml_check") or self.custom_toml_check.isChecked())
+            else ""
+        )
 
         return MonitoringConfig(
             cpu=CpuInputConfig(enabled=self.cpu_check.isChecked()),
