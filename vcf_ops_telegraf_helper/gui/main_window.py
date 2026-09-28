@@ -1346,7 +1346,6 @@ class MainWindow(QMainWindow):
         mode = self._get_deployment_mode()
 
         is_win = target.os_family == OSFamily.WINDOWS
-        script_file = "telegraf-utils.ps1" if is_win else "telegraf-utils.sh"
         conf_dir = "C:\\telegraf\\telegraf.d" if is_win else "/etc/telegraf/telegraf.d"
         default_ca = f"{conf_dir}\\ca.pem" if is_win else f"{conf_dir}/ca.pem"
         default_cert = f"{conf_dir}\\cert.pem" if is_win else f"{conf_dir}/cert.pem"
@@ -1401,11 +1400,19 @@ class MainWindow(QMainWindow):
         if mon.custom_toml:
             active_plugins.append("custom_toml")
 
+        if target.install_telegraf:
+            install_desc = (
+                "YES (Source: InfluxData Official Release (https://dl.influxdata.com/telegraf/releases/))"
+                if is_win
+                else "YES (Source: InfluxData Repository (https://repos.influxdata.com) / Official Archive)"
+            )
+        else:
+            install_desc = "NO (assumes pre-installed agent)"
+
         summary_lines = [
             f"Target: {target.hostname} ({target.connection_method.value}, OS: {target.os_family.value})",
             f"VCF Collector: {env.collector.address} (SSL Verify: {env.verify_ssl})",
-            f"Helper Script: https://{env.collector.address}/downloads/salt/{script_file}",
-            f"Auto-Install Telegraf: {'YES' if target.install_telegraf else 'NO'}",
+            f"Auto-Install Telegraf: {install_desc}",
             f"Deployment Mode: {mode.value}",
             f"Config Directory: {conf_dir}",
             f"Active Plugins ({len(active_plugins)}): {', '.join(active_plugins)}",

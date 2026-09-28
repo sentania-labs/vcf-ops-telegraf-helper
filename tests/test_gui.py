@@ -242,11 +242,24 @@ def test_main_window_step3_plugins_and_preview(qapp, tmp_path):
     assert mon.nginx.urls == ["http://127.0.0.1/status"]
     assert "[[inputs.ping]]" in mon.custom_toml
 
+    window.ep_auto_install_check.setChecked(True)
     window._update_preview()
     preview_txt = window.preview_system_box.toPlainText()
     assert "[[inputs.nginx]]" in preview_txt
     assert "[[inputs.ping]]" in preview_txt
-    assert "Auto-Install Telegraf: YES" in window.review_summary_box.toPlainText()
+    summary_linux = window.review_summary_box.toPlainText()
+    assert "Auto-Install Telegraf: YES (Source: InfluxData Repository" in summary_linux
+    assert "downloads/salt" not in summary_linux
+
+    window.ep_os_combo.setCurrentText("Windows")
+    window._update_preview()
+    summary_win = window.review_summary_box.toPlainText()
+    assert "Auto-Install Telegraf: YES (Source: InfluxData Official Release" in summary_win
+    assert "downloads/salt" not in summary_win
+
+    window.ep_auto_install_check.setChecked(False)
+    window._update_preview()
+    assert "Auto-Install Telegraf: NO (assumes pre-installed agent)" in window.review_summary_box.toPlainText()
 
 
 def test_main_window_workflow_worker(qapp):
