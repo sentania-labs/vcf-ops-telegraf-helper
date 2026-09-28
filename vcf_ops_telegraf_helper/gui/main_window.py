@@ -582,10 +582,18 @@ class MainWindow(QMainWindow):
 
                 self.ep_status_label.setText("Connected & Discovered (Windows)")
                 self.ep_status_label.setStyleSheet("color: #199e70; font-weight: 600;")
+                auto_install = self.ep_auto_install_check.isChecked() if hasattr(self, "ep_auto_install_check") else False
+                if installed:
+                    inst_str = "YES"
+                elif auto_install:
+                    inst_str = "NO (auto-install will download InfluxData agent)"
+                else:
+                    inst_str = "NO (auto-install disabled)"
+
                 details = [
                     f"OS: {os_version}",
                     f"Architecture: {arch}",
-                    f"Telegraf Installed: {'YES' if installed else 'NO (auto-install will download InfluxData agent)'}",
+                    f"Telegraf Installed: {inst_str}",
                     f"Telegraf Version: {version_str}",
                     f"Service Running: {'YES' if running else 'NO'}",
                     "Config Directory: C:\\telegraf\\telegraf.d",
@@ -629,10 +637,18 @@ class MainWindow(QMainWindow):
             self.ep_status_label.setText("Connected & Discovered")
             self.ep_status_label.setStyleSheet("color: #199e70; font-weight: 600;")
 
+            auto_install = self.ep_auto_install_check.isChecked() if hasattr(self, "ep_auto_install_check") else False
+            if installed:
+                inst_str = "YES"
+            elif auto_install:
+                inst_str = "NO (auto-install will download InfluxData agent)"
+            else:
+                inst_str = "NO (auto-install disabled)"
+
             details = [
                 f"OS: {os_version}",
                 f"Architecture: {arch}",
-                f"Telegraf Installed: {'YES' if installed else 'NO (auto-install will download InfluxData agent)'}",
+                f"Telegraf Installed: {inst_str}",
                 f"Telegraf Version: {version_str}",
                 f"Service Running: {'YES' if running else 'NO'}",
                 "Config Directory: /etc/telegraf/telegraf.d",

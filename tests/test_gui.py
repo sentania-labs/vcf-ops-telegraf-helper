@@ -165,6 +165,7 @@ def test_main_window_endpoint_detection_preserves_auto_install_opt_out(qapp, tmp
     window._detect_endpoint()
     assert not window.ep_missing_banner.isHidden()
     assert not window.ep_auto_install_check.isChecked()
+    assert "NO (auto-install disabled)" in window.ep_details_box.toPlainText()
 
 
 def test_main_window_vcf_connection(qapp, tmp_path):
