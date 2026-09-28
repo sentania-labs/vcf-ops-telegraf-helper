@@ -168,6 +168,42 @@ def test_main_window_endpoint_detection_preserves_auto_install_opt_out(qapp, tmp
     assert "NO (auto-install disabled)" in window.ep_details_box.toPlainText()
 
 
+def test_main_window_endpoint_detection_resets_missing_banner_on_failure(qapp, tmp_path):
+    """Verify endpoint detection hides missing banner when connection fails or raises exception."""
+    state_file = tmp_path / "state.json"
+    store = StateStore(state_file=state_file)
+    window = MainWindow(state_store=store)
+
+    window.ep_missing_banner.setVisible(True)
+    assert not window.ep_missing_banner.isHidden()
+
+    from unittest.mock import MagicMock
+    mock_exec = MagicMock()
+    mock_exec.test_connection.return_value = False
+    window._create_executor = lambda target: mock_exec
+
+    window._detect_endpoint()
+    assert window.ep_missing_banner.isHidden()
+    assert "Connection failed" in window.ep_status_label.text()
+
+
+def test_main_window_docker_endpoint_os_adaptation(qapp, tmp_path):
+    """Verify Docker endpoint defaults adapt between Windows named pipe and Linux Unix socket."""
+    state_file = tmp_path / "state.json"
+    store = StateStore(state_file=state_file)
+    window = MainWindow(state_store=store)
+
+    window.ep_os_combo.setCurrentText("Linux")
+    assert window.docker_endpoint_input.text() == "unix:///var/run/docker.sock"
+    mon_linux = window._get_monitoring_config()
+    assert mon_linux.docker.endpoint == "unix:///var/run/docker.sock"
+
+    window.ep_os_combo.setCurrentText("Windows")
+    assert window.docker_endpoint_input.text() == "npipe:////./pipe/docker_engine"
+    mon_win = window._get_monitoring_config()
+    assert mon_win.docker.endpoint == "npipe:////./pipe/docker_engine"
+
+
 def test_main_window_vcf_connection(qapp, tmp_path):
     """Verify VCF connection test with adapter updates UI status."""
     from unittest.mock import MagicMock, patch

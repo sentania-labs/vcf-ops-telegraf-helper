@@ -535,6 +535,8 @@ class MainWindow(QMainWindow):
                 self.ep_user_input.setText("Administrator")
             self.ep_key_input.setEnabled(False)
             self.ep_key_label.setEnabled(False)
+            if hasattr(self, "docker_endpoint_input") and self.docker_endpoint_input.text().strip() in ("", "unix:///var/run/docker.sock"):
+                self.docker_endpoint_input.setText("npipe:////./pipe/docker_engine")
         else:
             self.ep_method_combo.setCurrentText("SSH (Linux Remote)")
             self.ep_port_input.setText("22")
@@ -542,12 +544,16 @@ class MainWindow(QMainWindow):
                 self.ep_user_input.setText("root")
             self.ep_key_input.setEnabled(True)
             self.ep_key_label.setEnabled(True)
+            if hasattr(self, "docker_endpoint_input") and self.docker_endpoint_input.text().strip() in ("", "npipe:////./pipe/docker_engine"):
+                self.docker_endpoint_input.setText("unix:///var/run/docker.sock")
 
         if hasattr(self, "catalog_items"):
             self._update_catalog_os_compatibility(is_win)
 
     def _detect_endpoint(self) -> None:
         self.ep_status_label.setText("Detecting...")
+        if hasattr(self, "ep_missing_banner"):
+            self.ep_missing_banner.setVisible(False)
         try:
             target = self._get_endpoint_target()
             self.logger.info("Detecting endpoint %s (%s, OS: %s)", target.hostname, target.connection_method.value, target.os_family.value)
@@ -557,6 +563,8 @@ class MainWindow(QMainWindow):
                 self.logger.warning("Endpoint connection test failed for %s", target.hostname)
                 self.ep_status_label.setText("Connection failed: unable to connect")
                 self.ep_status_label.setStyleSheet("color: #d95926;")
+                if hasattr(self, "ep_missing_banner"):
+                    self.ep_missing_banner.setVisible(False)
                 return
 
             if target.os_family == OSFamily.WINDOWS:
@@ -661,6 +669,8 @@ class MainWindow(QMainWindow):
             self.logger.exception("Endpoint detection exception for %s", self.ep_host_input.text().strip())
             self.ep_status_label.setText(f"Detection error: {exc}")
             self.ep_status_label.setStyleSheet("color: #d95926;")
+            if hasattr(self, "ep_missing_banner"):
+                self.ep_missing_banner.setVisible(False)
 
     # --------------------------------------------------------------------------
     # Step 3: Monitoring Inputs
@@ -1032,6 +1042,8 @@ class MainWindow(QMainWindow):
             else False
         )
         self._update_catalog_os_compatibility(is_win)
+        if is_win and self.docker_endpoint_input.text().strip() in ("", "unix:///var/run/docker.sock"):
+            self.docker_endpoint_input.setText("npipe:////./pipe/docker_engine")
 
         c_layout.addLayout(pane_layout)
 
@@ -1623,19 +1635,26 @@ class MainWindow(QMainWindow):
         mysql_srv = self.mysql_server_input.text().strip() if hasattr(self, "mysql_server_input") else "tcp(127.0.0.1:3306)/"
         pg_addr = self.postgres_addr_input.text().strip() if hasattr(self, "postgres_addr_input") else "host=localhost user=postgres sslmode=disable"
         mssql_srv = self.mssql_server_input.text().strip() if hasattr(self, "mssql_server_input") else "Server=127.0.0.1;Port=1433;User Id=sa;Password=;app name=telegraf;log=1;"
-        docker_ep = self.docker_endpoint_input.text().strip() if hasattr(self, "docker_endpoint_input") else "unix:///var/run/docker.sock"
+        is_win = (
+            self.ep_os_combo.currentText().strip().lower().startswith("win")
+            if hasattr(self, "ep_os_combo")
+            else False
+        )
+        default_docker = "npipe:////./pipe/docker_engine" if is_win else "unix:///var/run/docker.sock"
+        docker_raw = self.docker_endpoint_input.text().strip() if hasattr(self, "docker_endpoint_input") else default_docker
+        if is_win and docker_raw == "unix:///var/run/docker.sock":
+            docker_ep = "npipe:////./pipe/docker_engine"
+        elif not is_win and docker_raw == "npipe:////./pipe/docker_engine":
+            docker_ep = "unix:///var/run/docker.sock"
+        else:
+            docker_ep = docker_raw or default_docker
+
         ping_url = self.ping_url_input.text().strip() if hasattr(self, "ping_url_input") else "10.10.10.1"
         custom_txt = (
             self.custom_toml_input.toPlainText().strip()
             if hasattr(self, "custom_toml_input")
             and (not hasattr(self, "custom_toml_check") or self.custom_toml_check.isChecked())
             else ""
-        )
-
-        is_win = (
-            self.ep_os_combo.currentText().strip().lower().startswith("win")
-            if hasattr(self, "ep_os_combo")
-            else False
         )
 
         return MonitoringConfig(
