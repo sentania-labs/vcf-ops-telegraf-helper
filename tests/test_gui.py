@@ -281,11 +281,23 @@ def test_main_window_plugin_catalog_two_pane_and_presets(qapp, tmp_path):
     assert window.mysql_check.isChecked() is False
     assert window.cpu_check.isChecked() is True
 
-    # 2. Verify preset: Select All
+    # 2. Verify preset: Select All respects target OS
+    window.ep_os_combo.setCurrentText("Linux")
     window._select_all_plugins()
     assert window.nginx_check.isChecked() is True
     assert window.docker_check.isChecked() is True
     assert window.mssql_check.isChecked() is True
+    assert window.sys_check.isChecked() is True
+    assert window.swap_check.isChecked() is True
+    assert window.win_perf_check.isChecked() is False
+    assert window.win_svc_check.isChecked() is False
+
+    window.ep_os_combo.setCurrentText("Windows")
+    window._select_all_plugins()
+    assert window.win_perf_check.isChecked() is True
+    assert window.win_svc_check.isChecked() is True
+    assert window.sys_check.isChecked() is False
+    assert window.swap_check.isChecked() is False
 
     # 3. Verify preset: Baseline
     window.ep_os_combo.setCurrentText("Linux")

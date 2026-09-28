@@ -527,15 +527,14 @@ class MainWindow(QMainWindow):
         return page
 
     def _on_os_changed(self, os_name: str) -> None:
-        if os_name.lower() == "windows":
+        is_win = os_name.lower().startswith("win")
+        if is_win:
             self.ep_method_combo.setCurrentText("WinRM (Windows Remote)")
             self.ep_port_input.setText("5985")
             if self.ep_user_input.text() == "root":
                 self.ep_user_input.setText("Administrator")
             self.ep_key_input.setEnabled(False)
             self.ep_key_label.setEnabled(False)
-            if hasattr(self, "win_perf_check"):
-                self.win_perf_check.setChecked(True)
         else:
             self.ep_method_combo.setCurrentText("SSH (Linux Remote)")
             self.ep_port_input.setText("22")
@@ -543,8 +542,9 @@ class MainWindow(QMainWindow):
                 self.ep_user_input.setText("root")
             self.ep_key_input.setEnabled(True)
             self.ep_key_label.setEnabled(True)
-            if hasattr(self, "win_perf_check"):
-                self.win_perf_check.setChecked(False)
+
+        if hasattr(self, "catalog_items"):
+            self._update_catalog_os_compatibility(is_win)
 
     def _detect_endpoint(self) -> None:
         self.ep_status_label.setText("Detecting...")
@@ -1026,6 +1026,13 @@ class MainWindow(QMainWindow):
         self.plugin_catalog_list.currentRowChanged.connect(self._on_catalog_row_changed)
         self.plugin_catalog_list.setCurrentRow(0)
 
+        is_win = (
+            self.ep_os_combo.currentText().strip().lower().startswith("win")
+            if hasattr(self, "ep_os_combo")
+            else False
+        )
+        self._update_catalog_os_compatibility(is_win)
+
         c_layout.addLayout(pane_layout)
 
         sec_mode = QLabel("DEPLOYMENT MODE")
@@ -1181,14 +1188,49 @@ class MainWindow(QMainWindow):
         finally:
             self._updating_catalog = False
 
-    def _select_all_plugins(self) -> None:
+    def _update_catalog_os_compatibility(self, is_win: bool) -> None:
         self._updating_catalog = True
         try:
-            for idx, (_, _, _, chk) in enumerate(self.catalog_items):
-                chk.setChecked(True)
+            for idx, (key, _, _, chk) in enumerate(self.catalog_items):
+                item = self.plugin_catalog_list.item(idx)
+                if is_win and key in ("system", "swap"):
+                    chk.setChecked(False)
+                    chk.setEnabled(False)
+                    if item:
+                        item.setCheckState(Qt.Unchecked)
+                        item.setFlags(item.flags() & ~Qt.ItemIsEnabled)
+                elif not is_win and key in ("win_perf", "win_svc"):
+                    chk.setChecked(False)
+                    chk.setEnabled(False)
+                    if item:
+                        item.setCheckState(Qt.Unchecked)
+                        item.setFlags(item.flags() & ~Qt.ItemIsEnabled)
+                else:
+                    chk.setEnabled(True)
+                    if item:
+                        item.setFlags(item.flags() | Qt.ItemIsEnabled | Qt.ItemIsUserCheckable)
+        finally:
+            self._updating_catalog = False
+
+    def _select_all_plugins(self) -> None:
+        is_win = (
+            self.ep_os_combo.currentText().strip().lower().startswith("win")
+            if hasattr(self, "ep_os_combo")
+            else False
+        )
+        self._updating_catalog = True
+        try:
+            for idx, (key, _, _, chk) in enumerate(self.catalog_items):
+                if is_win and key in ("system", "swap"):
+                    want = False
+                elif not is_win and key in ("win_perf", "win_svc"):
+                    want = False
+                else:
+                    want = True
+                chk.setChecked(want)
                 item = self.plugin_catalog_list.item(idx)
                 if item:
-                    item.setCheckState(Qt.Checked)
+                    item.setCheckState(Qt.Checked if want else Qt.Unchecked)
         finally:
             self._updating_catalog = False
 
@@ -1590,17 +1632,28 @@ class MainWindow(QMainWindow):
             else ""
         )
 
+        is_win = (
+            self.ep_os_combo.currentText().strip().lower().startswith("win")
+            if hasattr(self, "ep_os_combo")
+            else False
+        )
+
         return MonitoringConfig(
             cpu=CpuInputConfig(enabled=self.cpu_check.isChecked()),
             mem=MemInputConfig(enabled=self.mem_check.isChecked()),
             disk=DiskInputConfig(enabled=self.disk_check.isChecked()),
             net=NetInputConfig(enabled=self.net_check.isChecked()),
-            system=SystemInputConfig(enabled=self.sys_check.isChecked()),
-            swap=SwapInputConfig(enabled=self.swap_check.isChecked()),
+            system=SystemInputConfig(enabled=bool(not is_win and self.sys_check.isChecked())),
+            swap=SwapInputConfig(enabled=bool(not is_win and self.swap_check.isChecked())),
             diskio=DiskIoInputConfig(enabled=bool(getattr(self, "diskio_check", None) and self.diskio_check.isChecked())),
             processes=ProcessesInputConfig(enabled=bool(getattr(self, "proc_check", None) and self.proc_check.isChecked())),
-            win_perf_counters=WinPerfCountersInputConfig(enabled=bool(getattr(self, "win_perf_check", None) and self.win_perf_check.isChecked())),
-            win_services=WinServicesInputConfig(enabled=bool(getattr(self, "win_svc_check", None) and self.win_svc_check.isChecked()), service_names=svc_list),
+            win_perf_counters=WinPerfCountersInputConfig(
+                enabled=bool(is_win and getattr(self, "win_perf_check", None) and self.win_perf_check.isChecked())
+            ),
+            win_services=WinServicesInputConfig(
+                enabled=bool(is_win and getattr(self, "win_svc_check", None) and self.win_svc_check.isChecked()),
+                service_names=svc_list,
+            ),
             nginx=NginxInputConfig(enabled=bool(getattr(self, "nginx_check", None) and self.nginx_check.isChecked()), urls=[nginx_url]),
             apache=ApacheInputConfig(enabled=bool(getattr(self, "apache_check", None) and self.apache_check.isChecked()), urls=[apache_url]),
             mysql=MysqlInputConfig(enabled=bool(getattr(self, "mysql_check", None) and self.mysql_check.isChecked()), servers=[mysql_srv]),
