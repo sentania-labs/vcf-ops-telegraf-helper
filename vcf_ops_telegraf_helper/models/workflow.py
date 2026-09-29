@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 from pydantic import BaseModel, Field
 
 from vcf_ops_telegraf_helper.utils import local_now_formatted
@@ -31,6 +31,16 @@ class WorkflowStage(str, Enum):
     VERIFY = "8/8 Verifying"
 
 
+class UninstallStage(str, Enum):
+    """Explicit sequential stages for endpoint uninstallation."""
+
+    CONNECT = "1/5 Connecting"
+    STOP_SERVICE = "2/5 Stopping Telegraf service"
+    REMOVE_CONFIG = "3/5 Removing configuration and certificates"
+    REMOVE_PACKAGE = "4/5 Purging agent package and repositories"
+    VERIFY = "5/5 Verifying clean endpoint state"
+
+
 class StageStatus(str, Enum):
     """Status outcome for a workflow stage."""
 
@@ -43,12 +53,29 @@ class StageStatus(str, Enum):
 class StageResult(BaseModel):
     """Result of a single workflow stage."""
 
-    stage: WorkflowStage
+    stage: Union[WorkflowStage, UninstallStage, str]
     status: StageStatus
     message: str
     details: Optional[str] = None
     command_output: Optional[str] = None
     duration_ms: int = 0
+
+
+class UninstallOptions(BaseModel):
+    """Operational parameters for endpoint uninstallation."""
+
+    purge_packages: bool = True
+    purge_repositories: bool = True
+
+
+class UninstallSummary(BaseModel):
+    """Execution summary of uninstallation workflow."""
+
+    target_hostname: str
+    success: bool
+    stages: List[StageResult] = Field(default_factory=list)
+    verifications: Dict[str, str] = Field(default_factory=dict)
+    purged_paths: List[str] = Field(default_factory=list)
 
 
 class WorkflowOptions(BaseModel):

@@ -434,6 +434,97 @@ def env_add(name: str, url: str, collector: str, user: str) -> None:
     console.print(f"[bold green]✓[/bold green] Saved environment '{name}' ({url})")
 
 
+@cli.command("uninstall")
+@click.option("--target", "-t", default=None, help="Target hostname or IP address")
+@click.option("--os", "os_type", type=click.Choice(["linux", "windows"], case_sensitive=False), default="linux", help="Target OS family")
+@click.option("--method", type=click.Choice(["ssh", "winrm", "local"], case_sensitive=False), default="ssh", help="Connection method")
+@click.option("--user", "-u", default=None, help="Remote username")
+@click.option("--key-path", "-k", default=None, help="SSH private key path")
+@click.option("--password", "-p", default=None, help="Remote password")
+@click.option("--port", type=int, default=None, help="Remote connection port")
+@click.option("--purge-repo/--no-purge-repo", default=True, help="Remove InfluxData repository configuration")
+@click.option("--yes", "-y", is_flag=True, default=False, help="Confirm uninstall without prompting")
+def uninstall_cmd(
+    target: Optional[str],
+    os_type: str,
+    method: str,
+    user: Optional[str],
+    key_path: Optional[str],
+    password: Optional[str],
+    port: Optional[int],
+    purge_repo: bool,
+    yes: bool,
+) -> None:
+    """Safely stop, disable, and purge Telegraf agent from an endpoint."""
+    display_banner(console)
+    target_host = target or click.prompt("Target hostname or IP address")
+    os_fam = OSFamily.WINDOWS if os_type.lower() == "windows" else OSFamily.LINUX
+    conn_method = ConnectionMethod(method.lower())
+
+    if not yes:
+        confirm = click.confirm(
+            f"Are you sure you want to stop, disable, and completely uninstall Telegraf from {target_host}?",
+            default=False,
+        )
+        if not confirm:
+            console.print("[yellow]Uninstallation cancelled by user.[/yellow]")
+            return
+
+    actual_port = port or (5985 if os_fam == OSFamily.WINDOWS else 22)
+    ep_target = EndpointTarget(
+        hostname=target_host,
+        os_family=os_fam,
+        connection_method=conn_method,
+        port=actual_port,
+        username=user or ("Administrator" if os_fam == OSFamily.WINDOWS else "root"),
+        password=password,
+        key_filename=key_path,
+    )
+
+    if conn_method == ConnectionMethod.SSH:
+        executor = SSHExecutor(
+            hostname=target_host,
+            port=actual_port,
+            username=user,
+            password=password,
+            key_filename=key_path,
+        )
+    elif conn_method == ConnectionMethod.WINRM:
+        executor = WinRMExecutor(
+            hostname=target_host,
+            port=actual_port,
+            username=user or "Administrator",
+            password=password or "",
+        )
+    else:
+        executor = LocalExecutor()
+
+    from vcf_ops_telegraf_helper.models.workflow import UninstallOptions
+    from vcf_ops_telegraf_helper.workflow.uninstall import UninstallEndpointWorkflow
+
+    reporter = RichTerminalProgressReporter(console)
+    workflow = UninstallEndpointWorkflow(
+        target=ep_target,
+        executor=executor,
+        reporter=reporter,
+        options=UninstallOptions(purge_packages=True, purge_repositories=purge_repo),
+    )
+
+    console.print(f"\n[bold]Initiating uninstallation on {target_host}...[/bold]\n")
+    summary = workflow.run()
+
+    if summary.success:
+        console.print(f"\n[bold green]✓ Telegraf uninstalled successfully from {target_host}[/bold green]")
+        for item, status in summary.verifications.items():
+            console.print(f"  * {item}: [green]{status}[/green]")
+    else:
+        console.print(f"\n[bold red]✗ Uninstallation failed or left artifacts on {target_host}[/bold red]")
+        for item, status in summary.verifications.items():
+            color = "green" if status == "PASS" else "red"
+            console.print(f"  * {item}: [{color}]{status}[/{color}]")
+        sys.exit(1)
+
+
 if __name__ == "__main__":
     cli()
 

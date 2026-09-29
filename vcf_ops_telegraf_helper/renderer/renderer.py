@@ -6,15 +6,18 @@ fragments aligned with Broadcom VCF Operations 9.1 recommendations.
 
 from __future__ import annotations
 
+import ipaddress
 import json
-from typing import List, Optional
+from typing import Any, List, Optional
 
 from vcf_ops_telegraf_helper.models.monitoring import MonitoringConfig
 
 
-def _escape_toml_str(val: str) -> str:
-    """Format a string safely for TOML, properly escaping backslashes and quotes."""
-    return json.dumps(val)
+def _escape_toml_str(val: Any) -> str:
+    """Format a value safely for TOML, properly escaping backslashes and quotes."""
+    if val is None:
+        return '""'
+    return json.dumps(str(val))
 
 
 MANAGED_HEADER = """# ------------------------------------------------------------------------------
@@ -261,6 +264,9 @@ class TelegrafRenderer:
         key_path: str = "/etc/telegraf/telegraf.d/key.pem",
         vm_mor: Optional[str] = None,
         vc_id: Optional[str] = None,
+        mandatory_tags_path: Optional[str] = None,
+        telegraf_bin_path: Optional[str] = None,
+        is_windows: bool = False,
     ) -> str:
         """Render the Broadcom VCF Operations Cloud Proxy Wavefront HTTP output.
 
@@ -278,10 +284,19 @@ class TelegrafRenderer:
             key_path: Path to client private key.
             vm_mor: Optional vCenter VM MOR if managed.
             vc_id: Optional vCenter Instance ID if managed.
+            mandatory_tags_path: Optional path to mandatory_tags script.
+            telegraf_bin_path: Optional path to telegraf binary.
+            is_windows: True if target OS is Windows.
 
         Returns:
             Formatted TOML string for telegraf.d/cloudproxy-http.conf.
         """
+        try:
+            ipaddress.ip_address(hostname)
+            short_hostname = hostname
+        except ValueError:
+            short_hostname = hostname.split(".")[0]
+
         lines: List[str] = [
             MANAGED_HEADER,
             "# Global agent configuration for VCF Operations ingestion",
@@ -297,8 +312,8 @@ class TelegrafRenderer:
             "  debug = false",
             "  quiet = false",
             '  logfile = ""',
-            f'  hostname = "{hostname}"',
-            "  omit_hostname = false",
+            f'  hostname = "{short_hostname}"',
+            "  omit_hostname = true",
             "",
             "# Output configuration for VCF Operations Cloud Proxy",
             "[[outputs.http]]",
@@ -308,13 +323,12 @@ class TelegrafRenderer:
             f"  insecure_skip_verify = {str(not verify_ssl).lower()}",
         ]
 
-        if verify_ssl:
-            lines.extend([
-                f"  tls_ca = {_escape_toml_str(ca_cert_path)}",
-                f"  tls_cert = {_escape_toml_str(cert_path)}",
-                f"  tls_key = {_escape_toml_str(key_path)}",
-                '  tls_min_version = "TLS13"',
-            ])
+        if ca_cert_path:
+            lines.append(f"  tls_ca = {_escape_toml_str(ca_cert_path)}")
+        if cert_path and key_path:
+            lines.append(f"  tls_cert = {_escape_toml_str(cert_path)}")
+            lines.append(f"  tls_key = {_escape_toml_str(key_path)}")
+            lines.append('  tls_min_version = "TLS13"')
 
         lines.extend([
             '  data_format = "wavefront"',
@@ -327,15 +341,61 @@ class TelegrafRenderer:
             lines.extend([
                 f"    vmId = {_escape_toml_str(vm_mor)}",
                 f"    vcid = {_escape_toml_str(vc_id)}",
-                f"    hostname = {_escape_toml_str(hostname)}",
+                f"    hostname = {_escape_toml_str(short_hostname)}",
                 '    uuid = ""',
             ])
         else:
             lines.extend([
                 f"    uuid = {_escape_toml_str(uuid)}",
                 f"    ip = {_escape_toml_str(ip)}",
-                f"    hostname = {_escape_toml_str(hostname)}",
+                f"    hostname = {_escape_toml_str(short_hostname)}",
+            ])
+
+        if mandatory_tags_path:
+            if is_windows:
+                cmd_pfx = "cmd.exe /c"
+                bin_path = telegraf_bin_path or ("C:\\telegraf\\telegraf.exe" if is_windows else "/usr/bin/telegraf")
+                cmd_str = f'{cmd_pfx} ""{mandatory_tags_path}" "{bin_path}""'
+            else:
+                cmd_pfx = "/bin/bash"
+                bin_path = telegraf_bin_path or "/usr/bin/telegraf"
+                cmd_str = f'{cmd_pfx} "{mandatory_tags_path}" "{bin_path}"'
+            lines.extend([
+                "",
+                "# Mandatory tag telemetry required for VCF Operations agent status",
+                "[[inputs.exec]]",
+                f"  commands = [{_escape_toml_str(cmd_str)}]",
+                '  timeout = "5s"',
+                '  data_format = "influx"',
             ])
 
         lines.append("")
+        return "\n".join(lines).strip() + "\n"
+
+    @staticmethod
+    def render_base_stub() -> str:
+        """Render a clean minimal base telegraf.conf stub without active inputs.
+
+        Prevents duplicate metric collection alongside telegraf.d fragments.
+        """
+        lines = [
+            MANAGED_HEADER,
+            "# Base Telegraf agent configuration stub",
+            "# Default inputs have been disabled to prevent duplicate metric collection.",
+            "# All active input and output plugins are configured in telegraf.d/",
+            "[agent]",
+            '  interval = "300s"',
+            "  round_interval = true",
+            "  metric_batch_size = 1000",
+            "  metric_buffer_limit = 10000",
+            '  collection_jitter = "0s"',
+            '  flush_interval = "60s"',
+            '  flush_jitter = "0s"',
+            '  precision = ""',
+            "  debug = false",
+            "  quiet = false",
+            '  logfile = ""',
+            "  omit_hostname = true",
+            "",
+        ]
         return "\n".join(lines).strip() + "\n"

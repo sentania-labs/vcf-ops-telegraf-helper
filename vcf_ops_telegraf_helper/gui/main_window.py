@@ -77,6 +77,7 @@ from vcf_ops_telegraf_helper.models.workflow import (
     DeploymentMode,
     RunSummary,
     StageResult,
+    UninstallOptions,
     WorkflowOptions,
     WorkflowStage,
 )
@@ -84,6 +85,7 @@ from vcf_ops_telegraf_helper import __version__
 from vcf_ops_telegraf_helper.renderer.renderer import TelegrafRenderer
 from vcf_ops_telegraf_helper.storage.state import StateStore
 from vcf_ops_telegraf_helper.workflow.engine import ConfigureEndpointWorkflow
+from vcf_ops_telegraf_helper.workflow.uninstall import UninstallEndpointWorkflow
 
 
 class QtProgressReporter:
@@ -138,6 +140,36 @@ class WorkflowWorker(QObject):
             self.failed.emit(str(exc))
 
 
+class UninstallWorker(QObject):
+    """Background worker executing the UninstallEndpointWorkflow to keep Qt event loop responsive."""
+
+    stage_updated = Signal(object)  # StageResult
+    finished = Signal(object)  # UninstallSummary
+    failed = Signal(str)
+
+    def __init__(
+        self,
+        target: EndpointTarget,
+        executor: EndpointExecutor,
+        options: Optional[UninstallOptions] = None,
+    ) -> None:
+        super().__init__()
+        self.reporter = QtProgressReporter(self.stage_updated.emit)
+        self.workflow = UninstallEndpointWorkflow(
+            target=target,
+            executor=executor,
+            reporter=self.reporter,
+            options=options,
+        )
+
+    def run(self) -> None:
+        try:
+            summary = self.workflow.run()
+            self.finished.emit(summary)
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
 class MainWindow(QMainWindow):
     """Main window for the native Lattice-styled administrator helper."""
 
@@ -147,6 +179,8 @@ class MainWindow(QMainWindow):
         self.current_theme = "dark"
         self.last_summary: Optional[RunSummary] = None
         self.worker_thread: Optional[QThread] = None
+        self.uninstall_worker_thread: Optional[QThread] = None
+        self.uninstall_worker: Optional[UninstallWorker] = None
         self.logger = get_logger("gui")
         self._updating_catalog = False
 
@@ -516,6 +550,11 @@ class MainWindow(QMainWindow):
         self.detect_ep_btn.clicked.connect(self._detect_endpoint)
         det_row.addWidget(self.detect_ep_btn)
 
+        self.ep_uninstall_btn = QPushButton("Uninstall Agent...")
+        self.ep_uninstall_btn.setProperty("class", "secondary")
+        self.ep_uninstall_btn.clicked.connect(self._on_uninstall_agent_clicked)
+        det_row.addWidget(self.ep_uninstall_btn)
+
         self.ep_status_label = QLabel("Not detected yet")
         self.ep_status_label.setProperty("class", "lattice-caption")
         det_row.addWidget(self.ep_status_label)
@@ -651,6 +690,86 @@ class MainWindow(QMainWindow):
     def _on_advanced_toggled(self, checked: bool) -> None:
         self.ep_port_label.setVisible(checked)
         self.ep_port_input.setVisible(checked)
+
+    def _on_uninstall_agent_clicked(self) -> None:
+        if self.uninstall_worker_thread and self.uninstall_worker_thread.isRunning():
+            return
+
+        target = self._get_endpoint_target()
+        reply = QMessageBox.question(
+            self,
+            "Confirm Telegraf Uninstallation",
+            f"Are you sure you want to completely uninstall Telegraf from {target.hostname}?\n\n"
+            "This will:\n"
+            "* Stop and disable the Telegraf service\n"
+            "* Remove /etc/telegraf configuration fragments and certificates\n"
+            "* Purge Telegraf package binaries and InfluxData repositories\n\n"
+            "This action cannot be undone.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        self.ep_uninstall_btn.setEnabled(False)
+        self.ep_status_label.setText("Uninstalling Telegraf...")
+        self.ep_details_box.setPlainText("Initiating uninstallation workflow...")
+
+        try:
+            executor = self._create_executor(target)
+            opts = UninstallOptions(purge_packages=True, purge_repositories=True)
+            self.uninstall_worker_thread = QThread()
+            self.uninstall_worker = UninstallWorker(
+                target=target,
+                executor=executor,
+                options=opts,
+            )
+            self.uninstall_worker.moveToThread(self.uninstall_worker_thread)
+            self.uninstall_worker_thread.started.connect(self.uninstall_worker.run)
+            self.uninstall_worker.stage_updated.connect(self._on_uninstall_stage_updated)
+            self.uninstall_worker.finished.connect(self._on_uninstall_finished)
+            self.uninstall_worker.failed.connect(self._on_uninstall_failed)
+            self.uninstall_worker.finished.connect(self.uninstall_worker_thread.quit)
+            self.uninstall_worker.failed.connect(self.uninstall_worker_thread.quit)
+            self.uninstall_worker_thread.start()
+        except Exception as exc:
+            self.ep_uninstall_btn.setEnabled(True)
+            self.ep_status_label.setText(f"Uninstall error: {exc}")
+            self.ep_details_box.appendPlainText(f"ERROR: {exc}")
+            QMessageBox.critical(self, "Uninstall Failed", f"Failed to execute uninstallation: {exc}")
+
+    def _on_uninstall_stage_updated(self, stage_or_res: Any) -> None:
+        if isinstance(stage_or_res, StageResult):
+            st_name = stage_or_res.stage.value if hasattr(stage_or_res.stage, "value") else str(stage_or_res.stage)
+            self.ep_details_box.appendPlainText(f"[{st_name}] {stage_or_res.status.value}: {stage_or_res.message}")
+        elif hasattr(stage_or_res, "value"):
+            self.ep_status_label.setText(f"Uninstalling: {stage_or_res.value}")
+
+    def _on_uninstall_finished(self, summary: Any) -> None:
+        self.ep_uninstall_btn.setEnabled(True)
+        target = self._get_endpoint_target()
+        if summary.success:
+            self.ep_status_label.setText("Telegraf completely uninstalled")
+            if hasattr(self, "ep_missing_banner"):
+                self.ep_missing_banner.setVisible(True)
+            QMessageBox.information(
+                self,
+                "Uninstall Complete",
+                f"Telegraf has been cleanly removed from {target.hostname}.",
+            )
+        else:
+            self.ep_status_label.setText("Uninstallation completed with warnings")
+            QMessageBox.warning(
+                self,
+                "Uninstall Warning",
+                "Uninstallation completed with warnings or leftover artifacts. Check details box.",
+            )
+
+    def _on_uninstall_failed(self, error_str: str) -> None:
+        self.ep_uninstall_btn.setEnabled(True)
+        self.ep_status_label.setText(f"Uninstall error: {error_str}")
+        self.ep_details_box.appendPlainText(f"ERROR: {error_str}")
+        QMessageBox.critical(self, "Uninstall Failed", f"Failed to execute uninstallation: {error_str}")
 
     def _detect_endpoint(self) -> None:
         self.ep_status_label.setText("Detecting...")

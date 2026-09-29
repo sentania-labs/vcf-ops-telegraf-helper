@@ -499,3 +499,34 @@ def test_main_window_vcf_auth_toggle(qapp, tmp_path):
     assert window2.vcf_pass_input.isHidden() is False
 
 
+def test_main_window_uninstall_agent_button(qapp, monkeypatch):
+    """Verify GUI uninstall button triggers confirmation and updates status."""
+    from PySide6.QtWidgets import QMessageBox
+    from vcf_ops_telegraf_helper.models.workflow import UninstallSummary
+
+    win = MainWindow()
+    assert hasattr(win, "ep_uninstall_btn")
+    assert win.ep_uninstall_btn.text() == "Uninstall Agent..."
+
+    # 1. User cancels prompt
+    monkeypatch.setattr(QMessageBox, "question", lambda *args, **kwargs: QMessageBox.StandardButton.No)
+    win._on_uninstall_agent_clicked()
+    assert "Uninstalling" not in win.ep_status_label.text()
+
+    # 2. User confirms prompt
+    monkeypatch.setattr(QMessageBox, "question", lambda *args, **kwargs: QMessageBox.StandardButton.Yes)
+    monkeypatch.setattr(QMessageBox, "information", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        "vcf_ops_telegraf_helper.workflow.uninstall.UninstallEndpointWorkflow.run",
+        lambda self: UninstallSummary(target_hostname="10.10.10.101", success=True),
+    )
+
+    win._on_uninstall_agent_clicked()
+    if win.uninstall_worker_thread:
+        win.uninstall_worker_thread.wait(2000)
+    qapp.processEvents()
+    assert win.ep_status_label.text() == "Telegraf completely uninstalled"
+    assert win.ep_missing_banner.isHidden() is False
+
+
+
