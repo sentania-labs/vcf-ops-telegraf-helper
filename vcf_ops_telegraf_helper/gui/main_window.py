@@ -80,6 +80,7 @@ from vcf_ops_telegraf_helper.models.workflow import (
     WorkflowOptions,
     WorkflowStage,
 )
+from vcf_ops_telegraf_helper import __version__
 from vcf_ops_telegraf_helper.renderer.renderer import TelegrafRenderer
 from vcf_ops_telegraf_helper.storage.state import StateStore
 from vcf_ops_telegraf_helper.workflow.engine import ConfigureEndpointWorkflow
@@ -196,17 +197,10 @@ class MainWindow(QMainWindow):
         header_layout = QHBoxLayout(header)
         header_layout.setContentsMargins(18, 12, 18, 12)
 
-        title_label = QLabel("VCF Operations Open Telegraf Helper")
+        title_label = QLabel(f"VCF Operations Open Telegraf Helper v{__version__}")
         title_label.setProperty("class", "lattice-title")
-        subtitle_label = QLabel("v0.2.0  |  Broadcom Supported Workflow  |  Local Utility")
-        subtitle_label.setProperty("class", "lattice-caption")
 
-        header_title_col = QVBoxLayout()
-        header_title_col.setSpacing(2)
-        header_title_col.addWidget(title_label)
-        header_title_col.addWidget(subtitle_label)
-
-        header_layout.addLayout(header_title_col)
+        header_layout.addWidget(title_label)
         header_layout.addStretch()
 
         self.log_btn = QPushButton("View Log")

@@ -16,7 +16,8 @@ import pytest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 try:
-    from PySide6.QtWidgets import QApplication
+    from PySide6.QtWidgets import QApplication, QLabel
+    from vcf_ops_telegraf_helper import __version__
     from vcf_ops_telegraf_helper.gui.main_window import MainWindow
     from vcf_ops_telegraf_helper.gui.theme import build_stylesheet
     from vcf_ops_telegraf_helper.storage.state import StateStore
@@ -58,6 +59,8 @@ def test_main_window_initialization(qapp, tmp_path):
 
     window = MainWindow(state_store=store)
     assert window.windowTitle() == "VCF Operations Open Telegraf Helper"
+    labels = [lbl.text() for lbl in window.findChildren(QLabel)]
+    assert f"VCF Operations Open Telegraf Helper v{__version__}" in labels
     assert window.step_list.count() == 5
     assert window.page_stack.count() == 5
     assert window.current_theme == "dark"
