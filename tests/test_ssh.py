@@ -25,6 +25,17 @@ def test_ssh_executor_privileged_path_logic():
     assert executor._is_privileged_path("/tmp/scratch.conf") is False
 
 
+def test_ssh_executor_posix_path_handling_under_windows_semantics():
+    """Verify remote POSIX paths are normalized with posixpath even on Windows hosts."""
+    import ntpath
+
+    executor = SSHExecutor(hostname="linux.local", username="scott")
+    with patch("os.path", ntpath):
+        assert executor._is_privileged_path("/etc/telegraf/telegraf.conf") is True
+        assert executor._is_privileged_path("/opt/telegraf/telegraf.conf") is True
+        assert executor._is_privileged_path("/home/scott/telegraf.conf") is False
+
+
 def test_ssh_executor_init_sudo_logic():
     """Verify use_sudo is enabled for non-root and ambient (None or empty) users, and disabled for root."""
     exec_ambient_none = SSHExecutor(hostname="linux.local", username=None)

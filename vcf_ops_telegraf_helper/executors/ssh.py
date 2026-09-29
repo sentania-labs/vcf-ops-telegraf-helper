@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import os
+import posixpath
 import shlex
 from typing import Optional, Union
 import paramiko
@@ -66,7 +66,7 @@ class SSHExecutor(EndpointExecutor):
             return False
 
     def _is_privileged_path(self, path: str) -> bool:
-        normalized = os.path.normpath(path)
+        normalized = posixpath.normpath(path)
         system_roots = ("/etc", "/usr", "/var", "/opt", "/root")
         return any(
             normalized == root or normalized.startswith(f"{root}/")
@@ -106,7 +106,7 @@ class SSHExecutor(EndpointExecutor):
             if self._client is None:
                 raise RuntimeError("SSH client not connected")
 
-            parent_dir = str(os.path.dirname(destination_path))
+            parent_dir = posixpath.dirname(destination_path)
             mkdir_res = self.execute(f"mkdir -p {shlex.quote(parent_dir)}")
             if not mkdir_res.success:
                 raise IOError(f"Failed to create directory {parent_dir} via sudo: {mkdir_res.stderr.strip()}")
