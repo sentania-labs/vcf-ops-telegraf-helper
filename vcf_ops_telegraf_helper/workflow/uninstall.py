@@ -229,8 +229,11 @@ class UninstallEndpointWorkflow:
             is_win = (self.target.os_family == OSFamily.WINDOWS) or (type(self.executor).__name__ == "WinRMExecutor")
 
             if is_win:
-                svc_res = self.executor.execute("Get-Service -Name telegraf -ErrorAction SilentlyContinue", timeout=5)
-                svc_absent = not svc_res.success or ("Running" not in svc_res.stdout)
+                svc_res = self.executor.execute(
+                    "if (Get-Service -Name telegraf -ErrorAction SilentlyContinue) { 'PRESENT' } else { 'ABSENT' }",
+                    timeout=5,
+                )
+                svc_absent = (svc_res.stdout.strip() == "ABSENT") or (not svc_res.success)
                 bin_absent = not self.executor.file_exists("C:\\telegraf\\telegraf.exe")
                 cfg_absent = not self.executor.file_exists("C:\\telegraf")
             else:

@@ -82,12 +82,28 @@ class MockExecutor(EndpointExecutor):
                 command=command,
             )
 
+        if "get-service" in cmd_lower:
+            if "present" in cmd_lower and "absent" in cmd_lower:
+                out = "PRESENT\n" if self.telegraf_installed else "ABSENT\n"
+                return CommandResult(exit_code=0, stdout=out, command=command)
+            if self.telegraf_installed:
+                st = "Running" if self.service_active else "Stopped"
+                return CommandResult(exit_code=0, stdout=f"{st} telegraf\n", command=command)
+            return CommandResult(exit_code=1, stderr="Cannot find service\n", command=command)
+
         if "systemctl stop telegraf" in cmd_lower or "stop-service" in cmd_lower:
             self.service_active = False
             return CommandResult(exit_code=0, stdout="", command=command)
 
-        if "apt-get purge" in cmd_lower or "dnf remove" in cmd_lower or "service uninstall" in cmd_lower:
+        if (
+            "apt-get purge" in cmd_lower
+            or "dnf remove" in cmd_lower
+            or "service uninstall" in cmd_lower
+            or "sc.exe delete" in cmd_lower
+            or "sc delete" in cmd_lower
+        ):
             self.telegraf_installed = False
+            self.service_active = False
             return CommandResult(exit_code=0, stdout="", command=command)
 
         if "rm -rf /etc/telegraf" in cmd_lower or "remove-item" in cmd_lower:
