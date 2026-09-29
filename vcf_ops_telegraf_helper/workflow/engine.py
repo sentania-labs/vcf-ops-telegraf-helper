@@ -54,6 +54,7 @@ class ConfigureEndpointWorkflow:
         self.artifacts: Optional[IntegrationArtifacts] = None
         self.system_conf_content: str = ""
         self.vcf_conf_content: str = ""
+        self.base_stub_content: str = ""
         self.stage_results: List[StageResult] = []
         self.verifications: Dict[str, str] = {}
         self.managed_files: List[str] = []
@@ -264,15 +265,26 @@ class ConfigureEndpointWorkflow:
                 self.reporter.on_stage_complete(res)
                 return res
 
-            self.artifacts = self.adapter.prepare_telegraf_integration(os_family=self.target.os_family.value)
+            target_ip = self.discovery.host_ip if self.discovery else self.target.hostname
+            target_uuid = self.discovery.host_uuid if self.discovery else None
+            self.artifacts = self.adapter.prepare_telegraf_integration(
+                os_family=self.target.os_family.value,
+                target_ip=target_ip,
+                target_hostname=self.target.hostname,
+                target_uuid=target_uuid,
+            )
             if self.artifacts.token and self.artifacts.token not in self._secrets:
                 self._secrets.append(self.artifacts.token)
+            if self.artifacts.client_key_content and self.artifacts.client_key_content not in self._secrets:
+                self._secrets.append(self.artifacts.client_key_content)
 
             dur = int((time.monotonic() - start) * 1000)
+            id_desc = f"managed VM: {self.artifacts.vm_mor}" if self.artifacts.is_managed_vm else "unmanaged host"
+            cert_desc = "mTLS certs ready" if self.artifacts.client_cert_content else "no client cert"
             res = StageResult(
                 stage=WorkflowStage.PREPARE_VCF,
                 status=StageStatus.PASS,
-                message=f"VCF Ops validated, collector: {self.artifacts.collector_address}",
+                message=f"VCF Ops validated, collector: {self.artifacts.collector_address} ({id_desc}, {cert_desc})",
                 duration_ms=dur,
             )
         except Exception as e:
@@ -309,6 +321,23 @@ class ConfigureEndpointWorkflow:
             default_ca = "C:\\telegraf\\telegraf.d\\ca.pem" if is_win else "/etc/telegraf/telegraf.d/ca.pem"
             default_cert = "C:\\telegraf\\telegraf.d\\cert.pem" if is_win else "/etc/telegraf/telegraf.d/cert.pem"
             default_key = "C:\\telegraf\\telegraf.d\\key.pem" if is_win else "/etc/telegraf/telegraf.d/key.pem"
+            mandatory_script = (
+                "C:\\telegraf\\telegraf.d\\mandatory_tags.bat" if is_win else "/etc/telegraf/telegraf.d/mandatory_tags.sh"
+            )
+            telegraf_bin = (
+                self.discovery.telegraf_bin_path
+                if self.discovery
+                else ("C:\\telegraf\\telegraf.exe" if is_win else "/usr/bin/telegraf")
+            )
+            vm_mor_val = self.artifacts.vm_mor if self.artifacts else None
+            vc_id_val = self.artifacts.vc_id if self.artifacts else None
+
+            has_ca = bool(self.artifacts and (self.artifacts.ca_cert_content or self.env.ca_cert_path))
+            has_cert = bool(self.artifacts and self.artifacts.client_cert_content)
+            has_key = bool(self.artifacts and self.artifacts.client_key_content)
+            ca_path = (self.env.ca_cert_path or default_ca) if has_ca else None
+            cert_path = default_cert if has_cert else None
+            key_path = default_key if has_key else None
 
             self.vcf_conf_content = TelegrafRenderer.render_vcf_output(
                 collector_address=collector_addr,
@@ -316,17 +345,26 @@ class ConfigureEndpointWorkflow:
                 uuid=uuid_val,
                 ip=ip_val,
                 verify_ssl=self.env.verify_ssl,
-                ca_cert_path=self.env.ca_cert_path or default_ca,
-                cert_path=default_cert,
-                key_path=default_key,
+                ca_cert_path=ca_path,
+                cert_path=cert_path,
+                key_path=key_path,
+                vm_mor=vm_mor_val,
+                vc_id=vc_id_val,
+                mandatory_tags_path=mandatory_script,
+                telegraf_bin_path=telegraf_bin,
+                is_windows=is_win,
             )
+
+            # 3. Render clean base stub to prevent duplicate metric collection
+            self.base_stub_content = TelegrafRenderer.render_base_stub()
 
             # Validate syntax locally
             v1 = Validator.validate_toml_syntax(self.system_conf_content, "System Inputs")
             v2 = Validator.validate_toml_syntax(self.vcf_conf_content, "VCF Output")
+            v3 = Validator.validate_toml_syntax(self.base_stub_content, "Base Config Stub")
 
             dur = int((time.monotonic() - start) * 1000)
-            if v1.is_valid and v2.is_valid:
+            if v1.is_valid and v2.is_valid and v3.is_valid:
                 res = StageResult(
                     stage=WorkflowStage.RENDER_INPUTS,
                     status=StageStatus.PASS,
@@ -334,7 +372,7 @@ class ConfigureEndpointWorkflow:
                     duration_ms=dur,
                 )
             else:
-                err_msg = v1.message if not v1.is_valid else v2.message
+                err_msg = v1.message if not v1.is_valid else (v2.message if not v2.is_valid else v3.message)
                 res = StageResult(
                     stage=WorkflowStage.RENDER_INPUTS,
                     status=StageStatus.FAIL,
@@ -579,8 +617,54 @@ class ConfigureEndpointWorkflow:
             # Upload managed fragments
             self.executor.upload(self.system_conf_content, system_file)
             self.executor.upload(self.vcf_conf_content, vcf_file)
-
             self.managed_files = [system_file, vcf_file]
+
+            # Upload mTLS certificates if acquired
+            if self.artifacts and self.artifacts.ca_cert_content:
+                ca_dest = f"{config_dir}\\ca.pem" if is_win else f"{config_dir}/ca.pem"
+                self.executor.upload(self.artifacts.ca_cert_content, ca_dest, mode=0o644)
+                self.managed_files.append(ca_dest)
+            if self.artifacts and self.artifacts.client_cert_content:
+                cert_dest = f"{config_dir}\\cert.pem" if is_win else f"{config_dir}/cert.pem"
+                self.executor.upload(self.artifacts.client_cert_content, cert_dest, mode=0o644)
+                self.managed_files.append(cert_dest)
+            if self.artifacts and self.artifacts.client_key_content:
+                key_dest = f"{config_dir}\\key.pem" if is_win else f"{config_dir}/key.pem"
+                self.executor.upload(self.artifacts.client_key_content, key_dest, mode=0o640)
+                self.managed_files.append(key_dest)
+
+            # Upload mandatory_tags script if present
+            if self.artifacts and self.artifacts.mandatory_tags_content:
+                tags_dest = f"{config_dir}\\mandatory_tags.bat" if is_win else f"{config_dir}/mandatory_tags.sh"
+                self.executor.upload(self.artifacts.mandatory_tags_content, tags_dest, mode=0o755)
+                self.managed_files.append(tags_dest)
+
+            # Deploy clean base stub to main telegraf.conf when freshly installed to prevent duplicate inputs,
+            # while preserving pre-existing customer configuration files if present
+            main_cfg = (
+                self.discovery.main_config_path
+                if self.discovery
+                else ("C:\\telegraf\\telegraf.conf" if is_win else "/etc/telegraf/telegraf.conf")
+            )
+            should_replace_base = (
+                not self.executor.file_exists(main_cfg)
+                or (self.discovery and not self.discovery.telegraf_installed)
+            )
+            if should_replace_base and self.base_stub_content:
+                if self.executor.file_exists(main_cfg) and not self.executor.file_exists(f"{main_cfg}.orig"):
+                    if is_win:
+                        self.executor.execute(f"Copy-Item -Path '{main_cfg}' -Destination '{main_cfg}.orig' -Force")
+                    else:
+                        self.executor.execute(f"cp {main_cfg} {main_cfg}.orig")
+                self.executor.upload(self.base_stub_content, main_cfg, mode=0o644)
+
+            # Enforce remote Linux permissions
+            if not is_win:
+                self.executor.execute("chown -R root:telegraf /etc/telegraf 2>/dev/null || true")
+                self.executor.execute("chmod 755 /etc/telegraf /etc/telegraf/telegraf.d 2>/dev/null || true")
+                if self.artifacts and self.artifacts.client_key_content:
+                    self.executor.execute(f"chown root:telegraf {config_dir}/key.pem 2>/dev/null || true")
+                    self.executor.execute(f"chmod 640 {config_dir}/key.pem 2>/dev/null || true")
 
             if hasattr(self.executor, "generate_deploy_script"):
                 telegraf_bin = (
@@ -749,12 +833,22 @@ class ConfigureEndpointWorkflow:
                     "PASS" if test_val.is_valid else "FAIL"
                 )
 
-                # 5. Ingestion in VCF Ops
+                # 5. Output transmission check (verify no 403 Forbidden or network rejection in recent log)
+                transmission_status = "PASS"
+                if not is_win:
+                    journal_res = self.executor.execute('journalctl -u telegraf --since "-2 minutes" --no-pager 2>/dev/null', timeout=5)
+                    if journal_res.success and journal_res.stdout:
+                        if "received status code: 403" in journal_res.stdout or "Error writing to outputs.http" in journal_res.stdout:
+                            transmission_status = "FAIL (HTTP 403 Forbidden: collector rejected request)"
+                self.verifications["Metrics transmission"] = transmission_status
+
+                # 6. Ingestion in VCF Ops
                 ingestion_status = self.adapter.verify_ingestion(self.target.hostname)
                 self.verifications["VCF Ops ingestion"] = ingestion_status
             else:
                 self.verifications["Service running"] = "SKIPPED"
                 self.verifications["Local metrics generated"] = "SKIPPED"
+                self.verifications["Metrics transmission"] = "SKIPPED"
                 self.verifications["VCF Ops ingestion"] = "SKIPPED"
 
             dur = int((time.monotonic() - start) * 1000)

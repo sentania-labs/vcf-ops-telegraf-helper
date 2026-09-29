@@ -82,6 +82,18 @@ class MockExecutor(EndpointExecutor):
                 command=command,
             )
 
+        if "systemctl stop telegraf" in cmd_lower or "stop-service" in cmd_lower:
+            self.service_active = False
+            return CommandResult(exit_code=0, stdout="", command=command)
+
+        if "apt-get purge" in cmd_lower or "dnf remove" in cmd_lower or "service uninstall" in cmd_lower:
+            self.telegraf_installed = False
+            return CommandResult(exit_code=0, stdout="", command=command)
+
+        if "rm -rf /etc/telegraf" in cmd_lower or "remove-item" in cmd_lower:
+            self.uploaded_files = {k: v for k, v in self.uploaded_files.items() if not k.startswith(("/etc/telegraf", "C:\\telegraf"))}
+            return CommandResult(exit_code=0, stdout="", command=command)
+
         # Directory creation
         if "mkdir -p" in cmd_lower:
             return CommandResult(exit_code=0, stdout="", command=command)
@@ -107,7 +119,8 @@ class MockExecutor(EndpointExecutor):
         raise FileNotFoundError(f"File not found in mock store: {source_path}")
 
     def file_exists(self, path: str) -> bool:
-        return path in self.uploaded_files
+        norm = path.rstrip("/\\")
+        return any(k == norm or k.startswith(f"{norm}/") or k.startswith(f"{norm}\\") for k in self.uploaded_files)
 
     def close(self) -> None:
         pass

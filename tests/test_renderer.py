@@ -62,13 +62,14 @@ def test_render_vcf_output_valid_toml():
     assert "[[outputs.http]]" in rendered
     assert 'url = "https://192.168.1.100/opensource/default/metric"' in rendered
     assert 'data_format = "wavefront"' in rendered
-    assert 'hostname = "app01.corp.local"' in rendered
+    assert 'hostname = "app01"' in rendered
 
     parsed = tomllib.loads(rendered)
     assert parsed["agent"]["interval"] == "300s"
+    assert parsed["agent"]["omit_hostname"] is True
     assert parsed["outputs"]["http"][0]["data_format"] == "wavefront"
     headers = parsed["outputs"]["http"][0]["headers"]
-    assert headers["hostname"] == "app01.corp.local"
+    assert headers["hostname"] == "app01"
 
 
 def test_renderer_idempotency():
@@ -149,4 +150,95 @@ def test_render_system_inputs_windows_escaping():
     parsed = tomllib.loads(rendered)
     assert parsed["inputs"]["sqlserver"][0]["servers"][0] == "Server=10.0.0.5\\SQLEXPRESS;Port=1433;User Id=sa;Password=secret;"
     assert parsed["inputs"]["win_services"][0]["service_names"] == ["W32Time", "LanmanServer\\test"]
+
+
+def test_render_base_stub():
+    """Verify render_base_stub produces a valid minimal TOML configuration without inputs."""
+    stub = TelegrafRenderer.render_base_stub()
+    assert "[agent]" in stub
+    assert "omit_hostname = true" in stub
+    assert "[[inputs." not in stub
+
+    parsed = tomllib.loads(stub)
+    assert parsed["agent"]["interval"] == "300s"
+    assert parsed["agent"]["omit_hostname"] is True
+    assert "inputs" not in parsed
+
+
+def test_render_vcf_output_mtls_always_present_when_verify_ssl_false():
+    """Verify tls_ca, tls_cert, tls_key, and TLS13 are emitted even when verify_ssl is False (insecure_skip_verify=True)."""
+    rendered = TelegrafRenderer.render_vcf_output(
+        collector_address="172.27.8.54",
+        hostname="console.int.sentania.net",
+        ip="172.16.3.87",
+        verify_ssl=False,
+        ca_cert_path="/etc/telegraf/telegraf.d/ca.pem",
+        cert_path="/etc/telegraf/telegraf.d/cert.pem",
+        key_path="/etc/telegraf/telegraf.d/key.pem",
+    )
+    parsed = tomllib.loads(rendered)
+    http_out = parsed["outputs"]["http"][0]
+    assert http_out["insecure_skip_verify"] is True
+    assert http_out["tls_ca"] == "/etc/telegraf/telegraf.d/ca.pem"
+    assert http_out["tls_cert"] == "/etc/telegraf/telegraf.d/cert.pem"
+    assert http_out["tls_key"] == "/etc/telegraf/telegraf.d/key.pem"
+    assert http_out["tls_min_version"] == "TLS13"
+    assert http_out["headers"]["hostname"] == "console"
+
+
+def test_render_vcf_output_with_mandatory_tags():
+    """Verify mandatory_tags input is appended and command string is properly escaped."""
+    rendered = TelegrafRenderer.render_vcf_output(
+        collector_address="172.27.8.54",
+        hostname="worker",
+        mandatory_tags_path="/etc/telegraf/telegraf.d/mandatory_tags.sh",
+        telegraf_bin_path="/usr/bin/telegraf",
+        is_windows=False,
+    )
+    parsed = tomllib.loads(rendered)
+    exec_inputs = parsed["inputs"]["exec"]
+    assert len(exec_inputs) == 1
+    assert exec_inputs[0]["commands"] == ['/bin/bash "/etc/telegraf/telegraf.d/mandatory_tags.sh" "/usr/bin/telegraf"']
+    assert exec_inputs[0]["data_format"] == "influx"
+
+
+def test_render_vcf_output_ip_hostname_not_truncated():
+    """Verify IP address hostname is not truncated to first octet."""
+    rendered = TelegrafRenderer.render_vcf_output(
+        collector_address="172.27.8.54",
+        hostname="10.10.10.101",
+    )
+    parsed = tomllib.loads(rendered)
+    assert parsed["agent"]["hostname"] == "10.10.10.101"
+    assert parsed["outputs"]["http"][0]["headers"]["hostname"] == "10.10.10.101"
+
+
+def test_render_vcf_output_windows_cmd_quoting():
+    """Verify Windows mandatory_tags command uses outer quotes for cmd.exe /c argument protection."""
+    rendered = TelegrafRenderer.render_vcf_output(
+        collector_address="172.27.8.54",
+        hostname="win-node",
+        mandatory_tags_path=r"C:\telegraf\telegraf.d\mandatory_tags.bat",
+        telegraf_bin_path=r"C:\telegraf\telegraf.exe",
+        is_windows=True,
+    )
+    parsed = tomllib.loads(rendered)
+    exec_cmd = parsed["inputs"]["exec"][0]["commands"][0]
+    assert exec_cmd == 'cmd.exe /c ""C:\\telegraf\\telegraf.d\\mandatory_tags.bat" "C:\\telegraf\\telegraf.exe""'
+
+
+def test_render_vcf_output_omits_tls_cert_when_not_provided():
+    """Verify tls_cert and tls_key are omitted when certificates are not configured."""
+    rendered = TelegrafRenderer.render_vcf_output(
+        collector_address="172.27.8.54",
+        hostname="console",
+        cert_path=None,
+        key_path=None,
+    )
+    parsed = tomllib.loads(rendered)
+    http_out = parsed["outputs"]["http"][0]
+    assert "tls_cert" not in http_out
+    assert "tls_key" not in http_out
+
+
 

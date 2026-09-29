@@ -18,6 +18,15 @@ class IntegrationArtifacts(BaseModel):
     output_url: str = Field(description="Metrics ingestion endpoint URL")
     skip_certificate: bool = Field(default=False)
     ca_cert_path: Optional[str] = Field(default=None)
+    ca_cert_content: Optional[str] = Field(default=None, description="PEM content of intermediate CA cert")
+    client_cert_content: Optional[str] = Field(default=None, description="PEM content of client certificate")
+    client_key_content: Optional[str] = Field(default=None, description="PEM content of client private key")
+    mandatory_tags_content: Optional[str] = Field(default=None, description="Shell/batch script content for mandatory tags")
+    is_managed_vm: bool = Field(default=False, description="True if host is a registered vSphere VM in VCF Ops")
+    vm_mor: Optional[str] = Field(default=None, description="vCenter VM MOR (VMEntityObjectID), e.g. vm-31164")
+    vc_id: Optional[str] = Field(default=None, description="vCenter Instance UUID (VMEntityVCID)")
+    client_id: Optional[str] = Field(default=None, description="Client ID used in certificate request")
+    mutual_auth: bool = Field(default=True, description="Whether mutual TLS is enforced on Cloud Proxy")
 
 
 class VCFOpsIntegration(ABC):
@@ -44,7 +53,13 @@ class VCFOpsIntegration(ABC):
         pass
 
     @abstractmethod
-    def prepare_telegraf_integration(self, os_family: str = "linux") -> IntegrationArtifacts:
+    def prepare_telegraf_integration(
+        self,
+        os_family: str = "linux",
+        target_ip: Optional[str] = None,
+        target_hostname: Optional[str] = None,
+        target_uuid: Optional[str] = None,
+    ) -> IntegrationArtifacts:
         """Prepare tokens, URLs, and artifacts for the open-source Telegraf workflow."""
         pass
 
