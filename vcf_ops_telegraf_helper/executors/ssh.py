@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import shlex
 from typing import Optional, Union
 import paramiko
 
@@ -28,7 +29,7 @@ class SSHExecutor(EndpointExecutor):
         self.password = password
         self.key_filename = key_filename
         self.timeout = timeout
-        self.use_sudo = use_sudo and (username not in (None, "root"))
+        self.use_sudo = use_sudo and (username != "root")
         self._client: Optional[paramiko.SSHClient] = None
         self._sftp: Optional[paramiko.SFTPClient] = None
 
@@ -64,6 +65,14 @@ class SSHExecutor(EndpointExecutor):
         except Exception:
             return False
 
+    def _is_privileged_path(self, path: str) -> bool:
+        normalized = os.path.normpath(path)
+        system_roots = ("/etc", "/usr", "/var", "/opt", "/root")
+        return any(
+            normalized == root or normalized.startswith(f"{root}/")
+            for root in system_roots
+        )
+
     def execute(self, command: str, timeout: int = 30) -> CommandResult:
         self._ensure_connected()
         if self._client is None:
@@ -72,8 +81,9 @@ class SSHExecutor(EndpointExecutor):
         # Prepend sudo for privileged commands if running as non-root with sudo enabled
         effective_cmd = command
         if self.use_sudo and not command.strip().startswith("sudo"):
-            privileged_prefixes = ("mkdir", "systemctl", "cp", "rm", "chmod", "chown", "cat /sys/class")
-            if any(command.strip().startswith(p) for p in privileged_prefixes):
+            stripped = command.strip()
+            first_word = stripped.split()[0] if stripped else ""
+            if first_word in ("mkdir", "systemctl", "cp", "rm", "chmod", "chown", "test") or stripped.startswith("cat /sys/class"):
                 effective_cmd = f"sudo -n {command}"
 
         stdin, stdout, stderr = self._client.exec_command(effective_cmd, timeout=timeout)
@@ -89,22 +99,36 @@ class SSHExecutor(EndpointExecutor):
         )
 
     def upload(self, source_content: Union[str, bytes], destination_path: str, mode: int = 0o644) -> None:
-        sftp = self._get_sftp()
         data = source_content.encode("utf-8") if isinstance(source_content, str) else source_content
 
-        if self.use_sudo and destination_path.startswith(("/etc", "/usr", "/var")):
-            # Write to temporary file in /tmp, then move with sudo
-            tmp_remote = f"/tmp/.vcf_upload_{os.getpid()}_{hash(destination_path) % 10000}"
-            with sftp.open(tmp_remote, "wb") as remote_file:
-                remote_file.write(data)
+        if self.use_sudo and self._is_privileged_path(destination_path):
+            self._ensure_connected()
+            if self._client is None:
+                raise RuntimeError("SSH client not connected")
 
-            # Ensure destination directory and move
             parent_dir = str(os.path.dirname(destination_path))
-            self.execute(f"mkdir -p {parent_dir}")
-            self.execute(f"cp {tmp_remote} {destination_path}")
-            self.execute(f"chmod {oct(mode)[2:]} {destination_path}")
-            self.execute(f"rm -f {tmp_remote}")
+            mkdir_res = self.execute(f"mkdir -p {shlex.quote(parent_dir)}")
+            if not mkdir_res.success:
+                raise IOError(f"Failed to create directory {parent_dir} via sudo: {mkdir_res.stderr.strip()}")
+
+            cmd = f"sudo -n tee -- {shlex.quote(destination_path)} > /dev/null"
+            stdin, stdout, stderr = self._client.exec_command(cmd, timeout=self.timeout)
+            try:
+                stdin.write(data)
+                stdin.channel.shutdown_write()
+            except (BrokenPipeError, OSError, IOError):
+                pass
+
+            exit_code = stdout.channel.recv_exit_status()
+            if exit_code != 0:
+                err = stderr.read().decode("utf-8", errors="replace").strip()
+                raise IOError(f"Failed to write {destination_path} via sudo (exit {exit_code}): {err}")
+
+            chmod_res = self.execute(f"chmod {oct(mode)[2:]} {shlex.quote(destination_path)}")
+            if not chmod_res.success:
+                raise IOError(f"Failed to set permissions on {destination_path} via sudo: {chmod_res.stderr.strip()}")
         else:
+            sftp = self._get_sftp()
             # Ensure parent directory exists on remote target
             parts = destination_path.strip("/").split("/")
             cur = ""
@@ -127,6 +151,9 @@ class SSHExecutor(EndpointExecutor):
             return content.decode("utf-8", errors="replace")
 
     def file_exists(self, path: str) -> bool:
+        if self.use_sudo and self._is_privileged_path(path):
+            res = self.execute(f"test -e {shlex.quote(path)}", timeout=5)
+            return res.success
         sftp = self._get_sftp()
         try:
             sftp.stat(path)
