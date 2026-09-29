@@ -419,3 +419,73 @@ def test_main_window_endpoint_detection_installed_hides_banner(qapp, tmp_path):
     assert window.ep_missing_banner.isHidden() is True
 
 
+def test_main_window_endpoint_auth_and_advanced_options_visibility(qapp, tmp_path):
+    """Verify endpoint target UI toggles authentication modes and hides port by default."""
+    state_file = tmp_path / "state.json"
+    store = StateStore(state_file=state_file)
+    window = MainWindow(state_store=store)
+
+    # Linux default: SSH, port 22, SSH key path visible, password hidden, port hidden
+    assert window.ep_os_combo.currentText() == "Linux"
+    assert window.ep_method_combo.currentText() == "SSH (Linux Remote)"
+    assert window.ep_port_input.text() == "22"
+    assert window.ep_port_input.isHidden() is True
+    assert window.ep_key_input.isHidden() is False
+    assert window.ep_pass_input.isHidden() is True
+
+    # Toggle to Password for Linux: password visible, key path hidden
+    window.ep_auth_type_combo.setCurrentText("Username & Password")
+    assert window.ep_key_input.isHidden() is True
+    assert window.ep_pass_input.isHidden() is False
+
+    # Switch to Windows while advanced is unchecked: updates port to 5985
+    window.ep_os_combo.setCurrentText("Windows")
+    assert window.ep_method_combo.currentText() == "WinRM (Windows Remote)"
+    assert window.ep_port_input.text() == "5985"
+    assert window.ep_key_input.isHidden() is True
+    assert window.ep_pass_input.isHidden() is False
+    assert window.ep_auth_type_combo.isHidden() is True
+
+    # Expand advanced connection options: port input visible
+    window.ep_advanced_check.setChecked(True)
+    assert window.ep_port_input.isHidden() is False
+
+    # Custom port preservation when advanced options is open
+    window.ep_port_input.setText("5986")
+    window.ep_os_combo.setCurrentText("Linux")
+    assert window.ep_port_input.text() == "5986"
+    window.ep_method_combo.setCurrentText("WinRM (Windows Remote)")
+    assert window.ep_port_input.text() == "5986"
+
+
+def test_main_window_vcf_auth_toggle(qapp, tmp_path):
+    """Verify Step 1 VCF Operations authentication toggle between API Token/Key and Username/Password."""
+    state_file = tmp_path / "state.json"
+    store = StateStore(state_file=state_file)
+    window = MainWindow(state_store=store)
+
+    # Default is API Token / Key: token visible, user/pass hidden
+    assert window.vcf_auth_type_combo.currentText() == "API Token / Key"
+    assert window.vcf_token_input.isHidden() is False
+    assert window.vcf_user_input.isHidden() is True
+    assert window.vcf_pass_input.isHidden() is True
+
+    window.vcf_token_input.setText("test-secret-token")
+    env = window._get_vcf_env()
+    assert env.token == "test-secret-token"
+    assert env.password is None
+
+    # Switch to Username & Password: token hidden, user/pass visible
+    window.vcf_auth_type_combo.setCurrentText("Username & Password")
+    assert window.vcf_token_input.isHidden() is True
+    assert window.vcf_user_input.isHidden() is False
+    assert window.vcf_pass_input.isHidden() is False
+
+    window.vcf_user_input.setText("opsadmin")
+    window.vcf_pass_input.setText("secretpass123")
+    env = window._get_vcf_env()
+    assert env.token is None
+    assert env.username == "opsadmin"
+    assert env.password == "secretpass123"
+
+

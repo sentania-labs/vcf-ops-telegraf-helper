@@ -83,7 +83,13 @@ class SSHExecutor(EndpointExecutor):
         if self.use_sudo and not command.strip().startswith("sudo"):
             stripped = command.strip()
             first_word = stripped.split()[0] if stripped else ""
-            if first_word in ("mkdir", "systemctl", "cp", "rm", "chmod", "chown", "test") or stripped.startswith("cat /sys/class"):
+            first_base = posixpath.basename(first_word)
+            privileged_cmds = (
+                "mkdir", "systemctl", "cp", "rm", "chmod", "chown",
+                "test", "useradd", "adduser", "groupadd", "addgroup",
+                "telegraf", "apt-get", "yum", "dnf", "bash",
+            )
+            if first_base in privileged_cmds or stripped.startswith("cat /sys/class"):
                 effective_cmd = f"sudo -n {command}"
 
         stdin, stdout, stderr = self._client.exec_command(effective_cmd, timeout=timeout)

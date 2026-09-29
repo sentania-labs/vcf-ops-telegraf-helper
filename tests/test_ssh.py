@@ -186,6 +186,16 @@ def test_ssh_executor_execute_prepends_sudo():
     assert res.success is True
     mock_client.exec_command.assert_called_with("sudo -n systemctl is-active telegraf", timeout=30)
 
+    # Privileged binary with full path
+    res = executor.execute("/usr/bin/telegraf --test --config /etc/telegraf/telegraf.conf")
+    assert res.success is True
+    mock_client.exec_command.assert_called_with("sudo -n /usr/bin/telegraf --test --config /etc/telegraf/telegraf.conf", timeout=30)
+
+    # User/group provisioning command
+    res = executor.execute("groupadd -r telegraf")
+    assert res.success is True
+    mock_client.exec_command.assert_called_with("sudo -n groupadd -r telegraf", timeout=30)
+
     # test -e command
     res = executor.execute("test -e /etc/telegraf")
     assert res.success is True
