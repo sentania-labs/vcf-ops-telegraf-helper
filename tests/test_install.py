@@ -141,6 +141,10 @@ def test_apply_executes_linux_bootstrap_install():
     assert "systemctl daemon-reload" in install_cmd
     assert "mktemp -d" in install_cmd
     assert 'rm -rf "$td"' in install_cmd
+    assert "useradd" in install_cmd
+    assert "groupadd" in install_cmd
+    assert "gpg --dearmor --yes" in install_cmd
+    assert "chown -R root:telegraf" in install_cmd
 
 
 def test_apply_executes_windows_bootstrap_install():

@@ -320,22 +320,33 @@ class MainWindow(QMainWindow):
         self.vcf_collector_input = QLineEdit("10.10.10.50")
         grid.addWidget(self.vcf_collector_input, 1, 1)
 
-        grid.addWidget(QLabel("Authentication Token:"), 2, 0)
+        self.vcf_auth_type_label = QLabel("Authentication:")
+        self.vcf_auth_type_combo = QComboBox()
+        self.vcf_auth_type_combo.addItems(["API Token / Key", "Username & Password"])
+        self.vcf_auth_type_combo.currentTextChanged.connect(self._on_vcf_auth_type_changed)
+        grid.addWidget(self.vcf_auth_type_label, 2, 0)
+        grid.addWidget(self.vcf_auth_type_combo, 2, 1)
+
+        self.vcf_token_label = QLabel("API Token / Key:")
         self.vcf_token_input = QLineEdit()
-        self.vcf_token_input.setPlaceholderText("Paste token or enter username/password below")
+        self.vcf_token_input.setPlaceholderText("Paste VCF Operations API token or service key")
         self.vcf_token_input.setEchoMode(QLineEdit.Password)
-        grid.addWidget(self.vcf_token_input, 2, 1)
+        grid.addWidget(self.vcf_token_label, 3, 0)
+        grid.addWidget(self.vcf_token_input, 3, 1)
 
-        grid.addWidget(QLabel("Username (Optional):"), 3, 0)
-        self.vcf_user_input = QLineEdit()
-        grid.addWidget(self.vcf_user_input, 3, 1)
+        self.vcf_user_label = QLabel("Username:")
+        self.vcf_user_input = QLineEdit("admin")
+        grid.addWidget(self.vcf_user_label, 4, 0)
+        grid.addWidget(self.vcf_user_input, 4, 1)
 
-        grid.addWidget(QLabel("Password (Optional):"), 4, 0)
+        self.vcf_pass_label = QLabel("Password:")
         self.vcf_pass_input = QLineEdit()
         self.vcf_pass_input.setEchoMode(QLineEdit.Password)
-        grid.addWidget(self.vcf_pass_input, 4, 1)
+        grid.addWidget(self.vcf_pass_label, 5, 0)
+        grid.addWidget(self.vcf_pass_input, 5, 1)
 
         c_layout.addLayout(grid)
+        self._update_vcf_auth_visibility()
 
         self.vcf_ssl_check = QCheckBox("Verify TLS certificates (disable for self-signed lab certs)")
         c_layout.addWidget(self.vcf_ssl_check)
@@ -425,38 +436,57 @@ class MainWindow(QMainWindow):
         self.ep_os_combo.currentTextChanged.connect(self._on_os_changed)
         grid.addWidget(self.ep_os_combo, 0, 1)
 
-        grid.addWidget(QLabel("Hostname or IP Address:"), 1, 0)
-        self.ep_host_input = QLineEdit("10.10.10.101")
-        grid.addWidget(self.ep_host_input, 1, 1)
-
-        grid.addWidget(QLabel("Connection Method:"), 2, 0)
+        grid.addWidget(QLabel("Connection Method:"), 1, 0)
         self.ep_method_combo = QComboBox()
         self.ep_method_combo.addItems(["SSH (Linux Remote)", "WinRM (Windows Remote)", "Local Subprocess", "Package Script Bundle"])
-        grid.addWidget(self.ep_method_combo, 2, 1)
+        self.ep_method_combo.currentTextChanged.connect(self._on_method_changed)
+        grid.addWidget(self.ep_method_combo, 1, 1)
 
-        grid.addWidget(QLabel("Port:"), 3, 0)
-        self.ep_port_input = QLineEdit("22")
-        grid.addWidget(self.ep_port_input, 3, 1)
+        grid.addWidget(QLabel("Hostname or IP Address:"), 2, 0)
+        self.ep_host_input = QLineEdit("10.10.10.101")
+        grid.addWidget(self.ep_host_input, 2, 1)
 
-        grid.addWidget(QLabel("Username:"), 4, 0)
+        self.ep_auth_type_label = QLabel("Authentication:")
+        self.ep_auth_type_combo = QComboBox()
+        self.ep_auth_type_combo.addItems(["SSH Private Key", "Username & Password"])
+        self.ep_auth_type_combo.currentTextChanged.connect(self._on_auth_type_changed)
+        grid.addWidget(self.ep_auth_type_label, 3, 0)
+        grid.addWidget(self.ep_auth_type_combo, 3, 1)
+
+        self.ep_user_label = QLabel("Username:")
         self.ep_user_input = QLineEdit("root")
+        grid.addWidget(self.ep_user_label, 4, 0)
         grid.addWidget(self.ep_user_input, 4, 1)
 
-        grid.addWidget(QLabel("Password:"), 5, 0)
+        self.ep_pass_label = QLabel("Password:")
         self.ep_pass_input = QLineEdit()
         self.ep_pass_input.setEchoMode(QLineEdit.Password)
+        grid.addWidget(self.ep_pass_label, 5, 0)
         grid.addWidget(self.ep_pass_input, 5, 1)
 
         self.ep_key_label = QLabel("SSH Key Path:")
-        grid.addWidget(self.ep_key_label, 6, 0)
         self.ep_key_input = QLineEdit("~/.ssh/id_rsa")
+        grid.addWidget(self.ep_key_label, 6, 0)
         grid.addWidget(self.ep_key_input, 6, 1)
+
+        self.ep_advanced_check = QCheckBox("Show advanced connection options")
+        self.ep_advanced_check.setChecked(False)
+        self.ep_advanced_check.toggled.connect(self._on_advanced_toggled)
+        grid.addWidget(self.ep_advanced_check, 7, 0, 1, 2)
+
+        self.ep_port_label = QLabel("Port:")
+        self.ep_port_input = QLineEdit("22")
+        self.ep_port_label.setVisible(False)
+        self.ep_port_input.setVisible(False)
+        grid.addWidget(self.ep_port_label, 8, 0)
+        grid.addWidget(self.ep_port_input, 8, 1)
 
         self.ep_auto_install_check = QCheckBox("Install open-source Telegraf agent if missing (InfluxData official distribution)")
         self.ep_auto_install_check.setChecked(True)
-        grid.addWidget(self.ep_auto_install_check, 7, 0, 1, 2)
+        grid.addWidget(self.ep_auto_install_check, 9, 0, 1, 2)
 
         c_layout.addLayout(grid)
+        self._update_auth_and_endpoint_visibility()
 
         # Missing agent guidance banner
         self.ep_missing_banner = QFrame()
@@ -520,29 +550,107 @@ class MainWindow(QMainWindow):
         v.addWidget(scroll)
         return page
 
+    def _update_auth_and_endpoint_visibility(self) -> None:
+        if not hasattr(self, "ep_os_combo") or not hasattr(self, "ep_method_combo"):
+            return
+        is_win = self.ep_os_combo.currentText().lower().startswith("win")
+        method = self.ep_method_combo.currentText().lower()
+
+        if is_win or "winrm" in method:
+            self.ep_auth_type_label.setVisible(False)
+            self.ep_auth_type_combo.setVisible(False)
+            self.ep_key_label.setVisible(False)
+            self.ep_key_input.setVisible(False)
+            self.ep_key_label.setEnabled(False)
+            self.ep_key_input.setEnabled(False)
+            self.ep_pass_label.setVisible(True)
+            self.ep_pass_input.setVisible(True)
+            self.ep_user_label.setVisible(True)
+            self.ep_user_input.setVisible(True)
+        elif "ssh" in method:
+            self.ep_auth_type_label.setVisible(True)
+            self.ep_auth_type_combo.setVisible(True)
+            self.ep_user_label.setVisible(True)
+            self.ep_user_input.setVisible(True)
+            use_key = "key" in self.ep_auth_type_combo.currentText().lower()
+            self.ep_key_label.setVisible(use_key)
+            self.ep_key_input.setVisible(use_key)
+            self.ep_key_label.setEnabled(use_key)
+            self.ep_key_input.setEnabled(use_key)
+            self.ep_pass_label.setVisible(not use_key)
+            self.ep_pass_input.setVisible(not use_key)
+        else:
+            self.ep_auth_type_label.setVisible(False)
+            self.ep_auth_type_combo.setVisible(False)
+            self.ep_key_label.setVisible(False)
+            self.ep_key_input.setVisible(False)
+            self.ep_key_label.setEnabled(False)
+            self.ep_key_input.setEnabled(False)
+            self.ep_pass_label.setVisible(False)
+            self.ep_pass_input.setVisible(False)
+            self.ep_user_label.setVisible(False)
+            self.ep_user_input.setVisible(False)
+
+    def _update_vcf_auth_visibility(self) -> None:
+        if not hasattr(self, "vcf_auth_type_combo"):
+            return
+        use_key = "key" in self.vcf_auth_type_combo.currentText().lower() or "token" in self.vcf_auth_type_combo.currentText().lower()
+        self.vcf_token_label.setVisible(use_key)
+        self.vcf_token_input.setVisible(use_key)
+        self.vcf_user_label.setVisible(not use_key)
+        self.vcf_user_input.setVisible(not use_key)
+        self.vcf_pass_label.setVisible(not use_key)
+        self.vcf_pass_input.setVisible(not use_key)
+
+    def _on_vcf_auth_type_changed(self, text: str) -> None:
+        self._update_vcf_auth_visibility()
+        if hasattr(self, "state_store"):
+            self.state_store.save_preference("vcf_auth_mode", text)
+
     def _on_os_changed(self, os_name: str) -> None:
         is_win = os_name.lower().startswith("win")
         if is_win:
             self.ep_method_combo.setCurrentText("WinRM (Windows Remote)")
-            self.ep_port_input.setText("5985")
+            if not self.ep_advanced_check.isChecked():
+                self.ep_port_input.setText("5985")
             if self.ep_user_input.text() == "root":
                 self.ep_user_input.setText("Administrator")
-            self.ep_key_input.setEnabled(False)
-            self.ep_key_label.setEnabled(False)
             if hasattr(self, "docker_endpoint_input") and self.docker_endpoint_input.text().strip() in ("", "unix:///var/run/docker.sock"):
                 self.docker_endpoint_input.setText("npipe:////./pipe/docker_engine")
         else:
             self.ep_method_combo.setCurrentText("SSH (Linux Remote)")
-            self.ep_port_input.setText("22")
+            if not self.ep_advanced_check.isChecked():
+                self.ep_port_input.setText("22")
             if self.ep_user_input.text() == "Administrator":
                 self.ep_user_input.setText("root")
-            self.ep_key_input.setEnabled(True)
-            self.ep_key_label.setEnabled(True)
             if hasattr(self, "docker_endpoint_input") and self.docker_endpoint_input.text().strip() in ("", "npipe:////./pipe/docker_engine"):
                 self.docker_endpoint_input.setText("unix:///var/run/docker.sock")
 
+        self._update_auth_and_endpoint_visibility()
+
         if hasattr(self, "catalog_items"):
             self._update_catalog_os_compatibility(is_win)
+
+    def _on_method_changed(self, method_name: str) -> None:
+        m_lower = method_name.lower()
+        if "winrm" in m_lower:
+            if hasattr(self, "ep_os_combo") and self.ep_os_combo.currentText() != "Windows":
+                self.ep_os_combo.setCurrentText("Windows")
+            if hasattr(self, "ep_port_input") and not self.ep_advanced_check.isChecked():
+                self.ep_port_input.setText("5985")
+        elif "ssh" in m_lower:
+            if hasattr(self, "ep_os_combo") and self.ep_os_combo.currentText() != "Linux":
+                self.ep_os_combo.setCurrentText("Linux")
+            if hasattr(self, "ep_port_input") and not self.ep_advanced_check.isChecked():
+                self.ep_port_input.setText("22")
+        self._update_auth_and_endpoint_visibility()
+
+    def _on_auth_type_changed(self, text: str) -> None:
+        self._update_auth_and_endpoint_visibility()
+
+    def _on_advanced_toggled(self, checked: bool) -> None:
+        self.ep_port_label.setVisible(checked)
+        self.ep_port_input.setVisible(checked)
 
     def _detect_endpoint(self) -> None:
         self.ep_status_label.setText("Detecting...")
@@ -1593,11 +1701,24 @@ class MainWindow(QMainWindow):
     # --------------------------------------------------------------------------
     def _get_vcf_env(self) -> VCFEnvironment:
         collector_addr = self.vcf_collector_input.text().strip() or "10.10.10.50"
+        use_key = hasattr(self, "vcf_auth_type_combo") and (
+            "key" in self.vcf_auth_type_combo.currentText().lower()
+            or "token" in self.vcf_auth_type_combo.currentText().lower()
+        )
+        if use_key:
+            token = self.vcf_token_input.text().strip() or None
+            username = "admin"
+            password = None
+        else:
+            token = None
+            username = self.vcf_user_input.text().strip() or "admin"
+            password = self.vcf_pass_input.text().strip() or None
+
         return VCFEnvironment(
             url=self.vcf_url_input.text().strip() or "https://vcf-ops.local",
-            username=self.vcf_user_input.text().strip() or "admin",
-            password=self.vcf_pass_input.text().strip() or None,
-            token=self.vcf_token_input.text().strip() or None,
+            username=username,
+            password=password,
+            token=token,
             collector=CollectorInfo(address=collector_addr),
             verify_ssl=self.vcf_ssl_check.isChecked(),
         )
@@ -1615,14 +1736,27 @@ class MainWindow(QMainWindow):
             port_val = 5985 if os_family == OSFamily.WINDOWS else 22
         auto_install = self.ep_auto_install_check.isChecked() if hasattr(self, "ep_auto_install_check") else False
 
+        is_win = (os_family == OSFamily.WINDOWS)
+        if is_win or method_str == "winrm":
+            key_filename = None
+            password = self.ep_pass_input.text().strip() or None
+        else:
+            use_key = hasattr(self, "ep_auth_type_combo") and "key" in self.ep_auth_type_combo.currentText().lower()
+            if use_key:
+                key_filename = self.ep_key_input.text().strip() or None
+                password = None
+            else:
+                key_filename = None
+                password = self.ep_pass_input.text().strip() or None
+
         return EndpointTarget(
             hostname=self.ep_host_input.text().strip() or "10.10.10.101",
             os_family=os_family,
             connection_method=ConnectionMethod(method_str),
             port=port_val,
             username=self.ep_user_input.text().strip() or default_user,
-            password=self.ep_pass_input.text().strip() or None,
-            key_filename=self.ep_key_input.text().strip() or None,
+            password=password,
+            key_filename=key_filename,
             winrm_use_ssl=(port_val == 5986),
             install_telegraf=auto_install,
         )
@@ -1721,6 +1855,13 @@ class MainWindow(QMainWindow):
             self.vcf_collector_input.setText(latest.collector.address)
             self.vcf_user_input.setText(latest.username or "")
             self.vcf_ssl_check.setChecked(latest.verify_ssl)
+
+        saved_vcf_mode = self.state_store.get_preference("vcf_auth_mode")
+        if saved_vcf_mode and hasattr(self, "vcf_auth_type_combo"):
+            idx = self.vcf_auth_type_combo.findText(saved_vcf_mode)
+            if idx >= 0:
+                self.vcf_auth_type_combo.setCurrentIndex(idx)
+        self._update_vcf_auth_visibility()
 
         state = self.state_store.load()
         if state.recent_endpoints:

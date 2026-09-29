@@ -95,3 +95,14 @@ class StateStore:
         state.recent_endpoints.insert(0, hostname)
         state.recent_endpoints = state.recent_endpoints[:10]
         self.save(state)
+
+    def save_preference(self, key: str, value: str) -> None:
+        """Save a user interface preference key-value pair."""
+        state = self.load()
+        state.preferences[key] = value
+        self.save(state)
+
+    def get_preference(self, key: str, default: Optional[str] = None) -> Optional[str]:
+        """Retrieve a user interface preference."""
+        state = self.load()
+        return state.preferences.get(key, default)

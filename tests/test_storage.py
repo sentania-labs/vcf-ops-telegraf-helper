@@ -48,3 +48,18 @@ def test_state_store_recent_endpoints(tmp_path: Path):
 
     state = store.load()
     assert state.recent_endpoints == ["host1.local", "host2.local"]
+
+
+def test_state_store_preferences(tmp_path: Path):
+    """Verify storing and retrieving user interface preferences."""
+    state_file = tmp_path / "state.json"
+    store = StateStore(state_file=state_file)
+
+    assert store.get_preference("vcf_auth_mode") is None
+    assert store.get_preference("vcf_auth_mode", default="fallback") == "fallback"
+
+    store.save_preference("vcf_auth_mode", "API Token / Key")
+    assert store.get_preference("vcf_auth_mode") == "API Token / Key"
+
+    store.save_preference("vcf_auth_mode", "Username & Password")
+    assert store.get_preference("vcf_auth_mode") == "Username & Password"

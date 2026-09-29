@@ -80,6 +80,7 @@ def test_workflow_full_success_sequence():
     assert summary.verifications["Collector reachable"] == "PASS"
 
 
+
 def test_workflow_connection_failure_aborts_early():
     """Verify connection failure at stage 1 halts the pipeline before applying any changes."""
     wf = _create_test_workflow(connected=False)
