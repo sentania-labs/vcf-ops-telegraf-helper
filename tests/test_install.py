@@ -139,6 +139,8 @@ def test_apply_executes_linux_bootstrap_install():
     assert 'sed -i "s|' in install_cmd
     assert "had_conf" in install_cmd
     assert "systemctl daemon-reload" in install_cmd
+    assert "mktemp -d" in install_cmd
+    assert 'rm -rf "$td"' in install_cmd
 
 
 def test_apply_executes_windows_bootstrap_install():
