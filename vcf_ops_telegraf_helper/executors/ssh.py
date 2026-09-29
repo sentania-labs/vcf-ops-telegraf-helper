@@ -87,9 +87,19 @@ class SSHExecutor(EndpointExecutor):
             privileged_cmds = (
                 "mkdir", "systemctl", "cp", "rm", "chmod", "chown",
                 "test", "useradd", "adduser", "groupadd", "addgroup",
-                "telegraf", "apt-get", "yum", "dnf", "bash",
+                "apt-get", "yum", "dnf", "bash",
             )
-            if first_base in privileged_cmds or stripped.startswith("cat /sys/class"):
+            trusted_system_bins = (
+                "telegraf",
+                "/usr/bin/telegraf",
+                "/usr/local/bin/telegraf",
+                "/bin/telegraf",
+            )
+            if (
+                first_base in privileged_cmds
+                or first_word in trusted_system_bins
+                or stripped.startswith("cat /sys/class")
+            ):
                 effective_cmd = f"sudo -n {command}"
 
         stdin, stdout, stderr = self._client.exec_command(effective_cmd, timeout=timeout)

@@ -488,4 +488,14 @@ def test_main_window_vcf_auth_toggle(qapp, tmp_path):
     assert env.username == "opsadmin"
     assert env.password == "secretpass123"
 
+    # Verify preference was persisted to store
+    assert store.get_preference("vcf_auth_mode") == "Username & Password"
+
+    # Verify a new window reloads the saved preference correctly
+    window2 = MainWindow(state_store=store)
+    assert window2.vcf_auth_type_combo.currentText() == "Username & Password"
+    assert window2.vcf_token_input.isHidden() is True
+    assert window2.vcf_user_input.isHidden() is False
+    assert window2.vcf_pass_input.isHidden() is False
+
 

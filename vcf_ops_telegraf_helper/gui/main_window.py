@@ -604,6 +604,8 @@ class MainWindow(QMainWindow):
 
     def _on_vcf_auth_type_changed(self, text: str) -> None:
         self._update_vcf_auth_visibility()
+        if hasattr(self, "state_store"):
+            self.state_store.save_preference("vcf_auth_mode", text)
 
     def _on_os_changed(self, os_name: str) -> None:
         is_win = os_name.lower().startswith("win")
@@ -1851,16 +1853,15 @@ class MainWindow(QMainWindow):
             latest = recent_envs[0]
             self.vcf_url_input.setText(latest.url)
             self.vcf_collector_input.setText(latest.collector.address)
-            if latest.token:
-                if hasattr(self, "vcf_auth_type_combo"):
-                    self.vcf_auth_type_combo.setCurrentText("API Token / Key")
-                self.vcf_token_input.setText(latest.token)
-            else:
-                if hasattr(self, "vcf_auth_type_combo"):
-                    self.vcf_auth_type_combo.setCurrentText("Username & Password")
-                self.vcf_user_input.setText(latest.username or "")
+            self.vcf_user_input.setText(latest.username or "")
             self.vcf_ssl_check.setChecked(latest.verify_ssl)
-            self._update_vcf_auth_visibility()
+
+        saved_vcf_mode = self.state_store.get_preference("vcf_auth_mode")
+        if saved_vcf_mode and hasattr(self, "vcf_auth_type_combo"):
+            idx = self.vcf_auth_type_combo.findText(saved_vcf_mode)
+            if idx >= 0:
+                self.vcf_auth_type_combo.setCurrentIndex(idx)
+        self._update_vcf_auth_visibility()
 
         state = self.state_store.load()
         if state.recent_endpoints:
