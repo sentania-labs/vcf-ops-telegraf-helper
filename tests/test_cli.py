@@ -309,3 +309,32 @@ def test_wizard_windows_monitoring_flow():
         assert "[[inputs.cpu]]" not in sys_toml
         assert "Restart-Service telegraf -Force" in planned
 
+
+def test_cli_render_all_linux_baseline_cleared():
+    """Verify render with all Linux baseline negated produces no core plugins."""
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        ["render", "--no-cpu", "--no-mem", "--no-disk", "--no-net", "--no-system", "--no-swap"],
+    )
+    assert result.exit_code == 0
+    assert "[[inputs.cpu]]" not in result.output
+    assert "[[inputs.mem]]" not in result.output
+    assert "[[inputs.disk]]" not in result.output
+    assert "[[inputs.net]]" not in result.output
+    assert "[[inputs.system]]" not in result.output
+    assert "[[inputs.swap]]" not in result.output
+
+
+def test_cli_render_all_windows_baseline_cleared():
+    """Verify render with all Windows baseline negated produces no core plugins."""
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        ["render", "--os", "windows", "--no-win-perf", "--no-win-services"],
+    )
+    assert result.exit_code == 0
+    assert "[[inputs.win_perf_counters]]" not in result.output
+    assert "[[inputs.win_services]]" not in result.output
+
+

@@ -1844,27 +1844,52 @@ class MainWindow(QMainWindow):
         if reg_host and reg_host != target.hostname:
             parts.append(f"--hostname {shlex.quote(reg_host)}")
 
-        if mon.cpu.enabled:
-            parts.append("--cpu")
-        if mon.mem.enabled:
-            parts.append("--mem")
-        if mon.disk.enabled:
-            parts.append("--disk")
-        if mon.net.enabled:
-            parts.append("--net")
-        if mon.system.enabled:
-            parts.append("--system")
-        if mon.swap.enabled:
-            parts.append("--swap")
-        if mon.diskio.enabled:
-            parts.append("--diskio")
-        if mon.processes.enabled:
-            parts.append("--processes")
-        if mon.win_perf_counters.enabled:
-            parts.append("--win-perf")
-        if mon.win_services.enabled and mon.win_services.service_names:
-            svcs = ",".join(mon.win_services.service_names)
-            parts.append(f"--win-services {shlex.quote(svcs)}")
+        if target.os_family == OSFamily.WINDOWS:
+            has_win_core = mon.win_perf_counters.enabled or (mon.win_services.enabled and bool(mon.win_services.service_names))
+            if mon.win_perf_counters.enabled:
+                parts.append("--win-perf")
+            if mon.win_services.enabled and mon.win_services.service_names:
+                svcs = ",".join(mon.win_services.service_names)
+                parts.append(f"--win-services {shlex.quote(svcs)}")
+            if not has_win_core:
+                parts.append("--no-win-perf")
+                parts.append("--no-win-services")
+        else:
+            has_linux_core = any([
+                mon.cpu.enabled,
+                mon.mem.enabled,
+                mon.disk.enabled,
+                mon.net.enabled,
+                mon.system.enabled,
+                mon.swap.enabled,
+                mon.diskio.enabled,
+                mon.processes.enabled,
+            ])
+            if mon.cpu.enabled:
+                parts.append("--cpu")
+            if mon.mem.enabled:
+                parts.append("--mem")
+            if mon.disk.enabled:
+                parts.append("--disk")
+            if mon.net.enabled:
+                parts.append("--net")
+            if mon.system.enabled:
+                parts.append("--system")
+            if mon.swap.enabled:
+                parts.append("--swap")
+            if mon.diskio.enabled:
+                parts.append("--diskio")
+            if mon.processes.enabled:
+                parts.append("--processes")
+            if not has_linux_core:
+                parts.extend([
+                    "--no-cpu",
+                    "--no-mem",
+                    "--no-disk",
+                    "--no-net",
+                    "--no-system",
+                    "--no-swap",
+                ])
         if mon.nginx.enabled and mon.nginx.urls:
             parts.append(f"--nginx {shlex.quote(mon.nginx.urls[0])}")
         if mon.apache.enabled and mon.apache.urls:

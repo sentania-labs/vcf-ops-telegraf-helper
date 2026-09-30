@@ -605,4 +605,45 @@ def test_main_window_telegraf_version_selection(qapp, tmp_path):
     assert target_custom.telegraf_version == "1.39.2"
 
 
+def test_main_window_cli_command_cleared_linux_baseline(qapp, tmp_path):
+    """Verify GUI emits explicit negative flags when Linux core plugins are cleared."""
+    state_file = tmp_path / "state.json"
+    store = StateStore(state_file=state_file)
+    window = MainWindow(state_store=store)
+
+    window.ep_os_combo.setCurrentText("Linux")
+    window.cpu_check.setChecked(False)
+    window.mem_check.setChecked(False)
+    window.disk_check.setChecked(False)
+    window.net_check.setChecked(False)
+    window.sys_check.setChecked(False)
+    window.swap_check.setChecked(False)
+    window.diskio_check.setChecked(False)
+    window.proc_check.setChecked(False)
+
+    cmd = window._build_cli_command()
+    assert "--no-cpu" in cmd
+    assert "--no-mem" in cmd
+    assert "--no-disk" in cmd
+    assert "--no-net" in cmd
+    assert "--no-system" in cmd
+    assert "--no-swap" in cmd
+
+
+def test_main_window_cli_command_cleared_windows_baseline(qapp, tmp_path):
+    """Verify GUI emits explicit negative flags when Windows core plugins are cleared."""
+    state_file = tmp_path / "state.json"
+    store = StateStore(state_file=state_file)
+    window = MainWindow(state_store=store)
+
+    window.ep_os_combo.setCurrentText("Windows")
+    window.win_perf_check.setChecked(False)
+    window.win_svc_check.setChecked(False)
+
+    cmd = window._build_cli_command()
+    assert "--no-win-perf" in cmd
+    assert "--no-win-services" in cmd
+
+
+
 
