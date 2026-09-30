@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import posixpath
 import shlex
 from typing import Optional, Union
@@ -27,7 +28,7 @@ class SSHExecutor(EndpointExecutor):
         self.port = port
         self.username = username
         self.password = password
-        self.key_filename = key_filename
+        self.key_filename = os.path.expanduser(key_filename) if key_filename else None
         self.timeout = timeout
         self.use_sudo = use_sudo and (username != "root")
         self._client: Optional[paramiko.SSHClient] = None

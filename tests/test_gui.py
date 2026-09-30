@@ -20,6 +20,7 @@ try:
     from vcf_ops_telegraf_helper import __version__
     from vcf_ops_telegraf_helper.gui.main_window import MainWindow
     from vcf_ops_telegraf_helper.gui.theme import build_stylesheet
+    from vcf_ops_telegraf_helper.models.endpoint import ConnectionMethod
     from vcf_ops_telegraf_helper.storage.state import StateStore
 except (ImportError, OSError) as exc:
     pytest.skip(
@@ -45,11 +46,15 @@ def test_theme_generation():
     assert "#363d47" in dark_qss  # line
     assert "#199e70" in dark_qss  # ok
     assert "#d95926" in dark_qss  # bad
+    assert "QComboBox::down-arrow" in dark_qss
+    assert "chevron_down_dark.svg" in dark_qss
 
     light_qss = build_stylesheet("light")
     assert "#f6f7f9" in light_qss  # bg
     assert "#ffffff" in light_qss  # surface
     assert "#d9dee5" in light_qss  # line
+    assert "QComboBox::down-arrow" in light_qss
+    assert "chevron_down_light.svg" in light_qss
 
 
 def test_main_window_initialization(qapp, tmp_path):
@@ -133,7 +138,8 @@ def test_main_window_endpoint_detection_windows(qapp, tmp_path):
     window.ep_os_combo.setCurrentText("Windows")
     assert window.ep_user_input.text() == "Administrator"
     assert not window.ep_key_input.isEnabled()
-    assert window.ep_method_combo.currentText() == "WinRM (Windows Remote)"
+    target = window._get_endpoint_target()
+    assert target.connection_method == ConnectionMethod.WINRM
     assert window.ep_port_input.text() == "5985"
     assert window.ep_auto_install_check.isChecked()
 
@@ -251,18 +257,18 @@ def test_main_window_step3_plugins_and_preview(qapp, tmp_path):
     assert "[[inputs.nginx]]" in preview_txt
     assert "[[inputs.ping]]" in preview_txt
     summary_linux = window.review_summary_box.toPlainText()
-    assert "Auto-Install Telegraf: YES (Source: InfluxData Repository" in summary_linux
+    assert "Install official InfluxData agent via native package manager" in summary_linux
     assert "downloads/salt" not in summary_linux
 
     window.ep_os_combo.setCurrentText("Windows")
     window._update_preview()
     summary_win = window.review_summary_box.toPlainText()
-    assert "Auto-Install Telegraf: YES (Source: InfluxData Official Release" in summary_win
+    assert "Install official InfluxData agent release package" in summary_win
     assert "downloads/salt" not in summary_win
 
     window.ep_auto_install_check.setChecked(False)
     window._update_preview()
-    assert "Auto-Install Telegraf: NO (assumes pre-installed agent)" in window.review_summary_box.toPlainText()
+    assert "Verify existing pre-installed Telegraf agent" in window.review_summary_box.toPlainText()
 
 
 def test_main_window_workflow_worker(qapp):
@@ -427,7 +433,7 @@ def test_main_window_endpoint_auth_and_advanced_options_visibility(qapp, tmp_pat
 
     # Linux default: SSH, port 22, SSH key path visible, password hidden, port hidden
     assert window.ep_os_combo.currentText() == "Linux"
-    assert window.ep_method_combo.currentText() == "SSH (Linux Remote)"
+    assert window._get_endpoint_target().connection_method == ConnectionMethod.SSH
     assert window.ep_port_input.text() == "22"
     assert window.ep_port_input.isHidden() is True
     assert window.ep_key_input.isHidden() is False
@@ -438,9 +444,9 @@ def test_main_window_endpoint_auth_and_advanced_options_visibility(qapp, tmp_pat
     assert window.ep_key_input.isHidden() is True
     assert window.ep_pass_input.isHidden() is False
 
-    # Switch to Windows while advanced is unchecked: updates port to 5985
+    # Switch to Windows while advanced is unchecked: updates port to 5985 and locks WinRM
     window.ep_os_combo.setCurrentText("Windows")
-    assert window.ep_method_combo.currentText() == "WinRM (Windows Remote)"
+    assert window._get_endpoint_target().connection_method == ConnectionMethod.WINRM
     assert window.ep_port_input.text() == "5985"
     assert window.ep_key_input.isHidden() is True
     assert window.ep_pass_input.isHidden() is False
@@ -454,8 +460,43 @@ def test_main_window_endpoint_auth_and_advanced_options_visibility(qapp, tmp_pat
     window.ep_port_input.setText("5986")
     window.ep_os_combo.setCurrentText("Linux")
     assert window.ep_port_input.text() == "5986"
-    window.ep_method_combo.setCurrentText("WinRM (Windows Remote)")
-    assert window.ep_port_input.text() == "5986"
+
+
+def test_main_window_step5_cli_command_generation_and_copy(qapp, tmp_path):
+    """Verify Step 5 generates exact repeatable CLI command and supports copying to clipboard."""
+    state_file = tmp_path / "state.json"
+    store = StateStore(state_file=state_file)
+    window = MainWindow(state_store=store)
+
+    cmd = window.cli_command_box.toPlainText()
+    assert "vcf-telegraf-helper run" in cmd
+    assert "--target-host 10.10.10.101" in cmd or '--target-host "10.10.10.101"' in cmd
+    assert "--connection ssh" in cmd or '--connection "ssh"' in cmd
+    assert "--install-telegraf" in cmd
+    assert "--dry-run" not in cmd
+
+    # Toggling dry run updates the CLI command box immediately
+    window.dry_run_check.setChecked(True)
+    cmd_dry = window.cli_command_box.toPlainText()
+    assert "--dry-run" in cmd_dry
+
+    # Test copy command
+    window._copy_cli_command()
+    clipboard = QApplication.clipboard()
+    if clipboard:
+        assert clipboard.text() == cmd_dry
+
+    # Non-standard port emits --port
+    window.ep_port_input.setText("2222")
+    window._update_cli_command()
+    cmd_custom_port = window.cli_command_box.toPlainText()
+    assert "--port 2222" in cmd_custom_port
+
+    # API token mode emits --vcf-token placeholder
+    window.vcf_auth_type_combo.setCurrentText("API Token / Key")
+    window._update_cli_command()
+    cmd_token = window.cli_command_box.toPlainText()
+    assert '--vcf-token "<token>"' in cmd_token
 
 
 def test_main_window_vcf_auth_toggle(qapp, tmp_path):
