@@ -9,6 +9,8 @@ from typing import Dict, List, Optional
 
 from vcf_ops_telegraf_helper.adapters.base import IntegrationArtifacts, VCFOpsIntegration
 from vcf_ops_telegraf_helper.executors.base import EndpointExecutor
+from vcf_ops_telegraf_helper.executors.ssh import SSHExecutor
+from vcf_ops_telegraf_helper.executors.winrm import WinRMExecutor
 from vcf_ops_telegraf_helper.models.endpoint import (
     EndpointDiscoveryResult,
     EndpointTarget,
@@ -553,10 +555,10 @@ class ConfigureEndpointWorkflow:
                         "keyfile=\"/etc/apt/trusted.gpg.d/influxdata-archive.gpg\"; "
                         "if [ ! -f \"$keyfile\" ]; then keyfile=\"/etc/apt/trusted.gpg.d/influxdata.asc\"; fi; "
                         "echo \"deb [signed-by=$keyfile] https://repos.influxdata.com/$distro stable main\" > /etc/apt/sources.list.d/influxdata.list && "
-                        f"DEBIAN_FRONTEND=noninteractive UCF_FORCE_CONFFOLD=1 apt-get update -qq && (DEBIAN_FRONTEND=noninteractive UCF_FORCE_CONFFOLD=1 apt-get install -y -qq -o Dpkg::Options::=\"--force-confdef\" -o Dpkg::Options::=\"--force-confold\" telegraf={telegraf_ver}-1 2>/dev/null || DEBIAN_FRONTEND=noninteractive UCF_FORCE_CONFFOLD=1 apt-get install -y -qq -o Dpkg::Options::=\"--force-confdef\" -o Dpkg::Options::=\"--force-confold\" telegraf || true); "
+                        f"DEBIAN_FRONTEND=noninteractive UCF_FORCE_CONFFOLD=1 apt-get update -qq && (DEBIAN_FRONTEND=noninteractive UCF_FORCE_CONFFOLD=1 apt-get install -y -qq -o Dpkg::Options::=\"--force-confdef\" -o Dpkg::Options::=\"--force-confold\" telegraf={telegraf_ver}-1 2>/dev/null || true); "
                         "elif command -v dnf >/dev/null 2>&1 || command -v yum >/dev/null 2>&1; then "
                         "(echo \"[influxdata]\"; echo \"name = InfluxData Repository\"; echo \"baseurl = https://repos.influxdata.com/rhel/\\$releasever/\\$basearch/stable\"; echo \"enabled = 1\"; echo \"gpgcheck = 1\"; echo \"gpgkey = https://repos.influxdata.com/influxdata-archive_compat.key\") > /etc/yum.repos.d/influxdata.repo && "
-                        f"(dnf install -y -q telegraf-{telegraf_ver} 2>/dev/null || yum install -y -q telegraf-{telegraf_ver} 2>/dev/null || dnf install -y -q telegraf 2>/dev/null || yum install -y -q telegraf 2>/dev/null) || true; "
+                        f"(dnf install -y -q telegraf-{telegraf_ver} 2>/dev/null || yum install -y -q telegraf-{telegraf_ver} 2>/dev/null) || true; "
                         "fi; "
                         "if ! command -v telegraf >/dev/null 2>&1; then "
                         "td=$(mktemp -d /tmp/telegraf.XXXXXX) && "
@@ -671,14 +673,13 @@ class ConfigureEndpointWorkflow:
             if self.base_stub_content:
                 exists = self.executor.file_exists(main_cfg)
                 if exists and not self.executor.file_exists(f"{main_cfg}.orig"):
-                    exec_type = type(self.executor).__name__
-                    if is_win and exec_type == "WinRMExecutor":
+                    if is_win and (isinstance(self.executor, WinRMExecutor) or type(self.executor).__name__ == "WinRMExecutor"):
                         escaped_cfg = main_cfg.replace("'", "''")
                         self.executor.execute(
                             f"if (-not (Select-String -Path '{escaped_cfg}' -Pattern 'Managed by VCF Operations' -SimpleMatch -Quiet)) {{ "
                             f"Copy-Item -Path '{escaped_cfg}' -Destination '{escaped_cfg}.orig' -Force }}"
                         )
-                    elif not is_win and exec_type == "SSHExecutor":
+                    elif not is_win and (isinstance(self.executor, SSHExecutor) or type(self.executor).__name__ == "SSHExecutor"):
                         sudo_pfx = "sudo -n " if getattr(self.executor, "use_sudo", False) else ""
                         self.executor.execute(
                             f"{sudo_pfx}bash -c 'if ! grep -q \"Managed by VCF Operations\" {shlex.quote(main_cfg)} 2>/dev/null; then "
@@ -922,12 +923,23 @@ class ConfigureEndpointWorkflow:
                 )
                 self.verifications["Metrics transmission"] = "PASS" if probe_val.is_valid else f"FAIL ({probe_val.message})"
 
-                # Also inspect recent service log for output errors on Linux
-                if not is_win and probe_val.is_valid:
-                    journal_res = self.executor.execute('journalctl -u telegraf --since "-1 minute" --no-pager 2>/dev/null', timeout=5)
-                    if journal_res.success and journal_res.stdout:
-                        if "received status code: 403" in journal_res.stdout or "Error writing to outputs.http" in journal_res.stdout:
-                            self.verifications["Metrics transmission"] = "FAIL (HTTP 403 Forbidden in telegraf service log)"
+                # Also inspect recent service log for output errors on Linux and Windows
+                if probe_val.is_valid:
+                    if is_win:
+                        win_log_cmd = (
+                            "$t = (Get-Date).AddMinutes(-2); "
+                            "try { $events = Get-WinEvent -FilterHashtable @{LogName='Application'; ProviderName='telegraf'; StartTime=$t} -ErrorAction Stop; "
+                            "$events | ForEach-Object { $_.Message } } catch { }; exit 0"
+                        )
+                        log_res = self.executor.execute(win_log_cmd, timeout=10)
+                        if log_res.success and log_res.stdout:
+                            if "received status code: 403" in log_res.stdout or "Error writing to outputs.http" in log_res.stdout:
+                                self.verifications["Metrics transmission"] = "FAIL (HTTP 403 Forbidden in telegraf service log)"
+                    else:
+                        journal_res = self.executor.execute('journalctl -u telegraf --since "-1 minute" --no-pager 2>/dev/null', timeout=5)
+                        if journal_res.success and journal_res.stdout:
+                            if "received status code: 403" in journal_res.stdout or "Error writing to outputs.http" in journal_res.stdout:
+                                self.verifications["Metrics transmission"] = "FAIL (HTTP 403 Forbidden in telegraf service log)"
 
                 # 6. Ingestion in VCF Ops
                 ingestion_status = self.adapter.verify_ingestion(self.target.hostname)

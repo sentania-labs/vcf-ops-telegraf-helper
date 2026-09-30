@@ -405,20 +405,24 @@ class VCF91OpenTelegrafIntegration(VCFOpsIntegration):
         os_family: str = "linux",
     ) -> str:
         """Fetch mandatory_tags script from Cloud Proxy or return embedded fallback."""
-        if os_family.lower() == "windows":
-            # Cloud Proxy stock mandatory_tags.bat relies on deprecated wmic.exe,
-            # which breaks on Windows Server 2025 and Windows 11 24H2.
-            # Return modernized batch script with reg query fallbacks and safe formatting.
-            return self._get_windows_mandatory_tag_script()
-
-        script_name = "mandatory_tags.sh"
+        script_name = "mandatory_tags.bat" if os_family.lower() == "windows" else "mandatory_tags.sh"
         url = f"https://{collector_address}/downloads/salt/{script_name}"
         try:
             resp = self.session.get(url, verify=False, timeout=10)
             if resp.status_code == 200 and resp.text.strip():
-                return resp.text
+                content = resp.text
+                if os_family.lower() == "windows":
+                    # If Cloud Proxy script uses deprecated wmic without reg query fallback,
+                    # use the modernized script compatible with Windows Server 2025.
+                    if "reg query" in content:
+                        return content
+                    return self._get_windows_mandatory_tag_script()
+                return content
         except Exception:
             pass
+
+        if os_family.lower() == "windows":
+            return self._get_windows_mandatory_tag_script()
 
         return (
             "#!/usr/bin/env bash\n"
@@ -489,7 +493,7 @@ class VCF91OpenTelegrafIntegration(VCFOpsIntegration):
             "if not defined BOOTSTRAP_FQDN set BOOTSTRAP_FQDN=None\r\n"
             "set BOOTSTRAP_FQDN=%BOOTSTRAP_FQDN: =_%\r\n"
             "set METRIC_VALUE=1\r\n"
-            "if [%HNAME%]==[] AND [%VM_IP%]==[] AND [%OS_NAME%]==[] AND [%OS_VERSION%]==[] (set METRIC_VALUE=0)\r\n"
+            "if [%HNAME%]==[] if [%VM_IP%]==[] if [%OS_NAME%]==[] if [%OS_VERSION%]==[] set METRIC_VALUE=0\r\n"
             "echo mandatory.tag,OS_NAME=%OS_NAME%,OS_VERSION=%OS_VERSION%,TELEGRAF_VERSION=%TF_VERSION%,IP=%VM_IP%,BIOS_VERSION=%BIOS_VERSION%,BOOTSTRAP_FQDN=%BOOTSTRAP_FQDN%,HOSTNAME=%HNAME% value=%METRIC_VALUE%i\r\n"
         )
         return (

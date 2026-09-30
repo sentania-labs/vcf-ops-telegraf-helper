@@ -366,6 +366,10 @@ class TelegrafRenderer:
                 cmd_pfx = "cmd.exe /c"
                 norm_script = mandatory_tags_path.replace("\\", "/")
                 norm_bin = (telegraf_bin_path or "C:/telegraf/telegraf.exe").replace("\\", "/")
+                if " " in norm_script:
+                    norm_script = f'"{norm_script}"'
+                if " " in norm_bin:
+                    norm_bin = f'"{norm_bin}"'
                 cmd_str = f"{cmd_pfx} {norm_script} {norm_bin}"
             else:
                 cmd_pfx = "/bin/bash"

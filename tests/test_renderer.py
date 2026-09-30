@@ -227,6 +227,20 @@ def test_render_vcf_output_windows_cmd_quoting():
     assert exec_cmd == "cmd.exe /c C:/telegraf/telegraf.d/mandatory_tags.bat C:/telegraf/telegraf.exe"
 
 
+def test_render_vcf_output_windows_cmd_quoting_with_spaces():
+    """Verify Windows mandatory_tags command quotes paths containing spaces."""
+    rendered = TelegrafRenderer.render_vcf_output(
+        collector_address="172.27.8.54",
+        hostname="win-node",
+        mandatory_tags_path=r"C:\Program Files\Telegraf\mandatory_tags.bat",
+        telegraf_bin_path=r"C:\Program Files\Telegraf\telegraf.exe",
+        is_windows=True,
+    )
+    parsed = tomllib.loads(rendered)
+    exec_cmd = parsed["inputs"]["exec"][0]["commands"][0]
+    assert exec_cmd == 'cmd.exe /c "C:/Program Files/Telegraf/mandatory_tags.bat" "C:/Program Files/Telegraf/telegraf.exe"'
+
+
 def test_render_vcf_output_omits_tls_cert_when_not_provided():
     """Verify tls_cert and tls_key are omitted when mutual_auth is disabled and certificates not configured."""
     rendered = TelegrafRenderer.render_vcf_output(

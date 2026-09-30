@@ -366,7 +366,6 @@ class Validator:
             or "schannel" in combined_out.lower()
             or "failed to open cert or key" in combined_out.lower()
             or "failed to import cert" in combined_out.lower()
-            or http_code == "000"
         ):
             # Built-in Windows curl.exe uses Schannel, which cannot load detached PEM private keys.
             # Telegraf uses Go's native crypto/tls stack which loads PEM certificates directly.
@@ -382,13 +381,20 @@ class Validator:
             tcp_ok = "tcp:true" in probe_out.lower()
             svc_running = "svc:running" in probe_out.lower()
 
-            if tcp_ok:
-                svc_desc = "running" if svc_running else "installed"
+            if tcp_ok and svc_running:
                 return ValidationResult(
                     domain="Metrics Transmission",
                     is_valid=True,
-                    message=f"Cloud Proxy port 443 reachable and Telegraf service {svc_desc} (Windows curl Schannel PEM limitation bypassed; Telegraf native Go TLS handles client certificates)",
+                    message="Cloud Proxy port 443 reachable and Telegraf service running (Windows curl Schannel PEM limitation bypassed; Telegraf native Go TLS handles client certificates)",
                     details=f"curl output: {out}; probe: {probe_out}",
+                )
+            elif tcp_ok and not svc_running:
+                return ValidationResult(
+                    domain="Metrics Transmission",
+                    is_valid=False,
+                    message="Cloud Proxy port 443 reachable but Telegraf service is stopped or failed",
+                    details=f"curl output: {out}; probe: {probe_out}",
+                    remediation="Start the Telegraf service using 'Start-Service telegraf' and verify Windows Application Event Log.",
                 )
             else:
                 return ValidationResult(
