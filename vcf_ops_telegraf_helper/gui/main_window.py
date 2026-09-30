@@ -356,30 +356,36 @@ class MainWindow(QMainWindow):
         self.vcf_collector_input = QLineEdit("10.10.10.50")
         grid.addWidget(self.vcf_collector_input, 1, 1)
 
+        self.vcf_collector_group_label = QLabel("Collector Group Name (optional):")
+        self.vcf_collector_group_input = QLineEdit()
+        self.vcf_collector_group_input.setPlaceholderText("Auto-detected from Cloud Proxy if blank")
+        grid.addWidget(self.vcf_collector_group_label, 2, 0)
+        grid.addWidget(self.vcf_collector_group_input, 2, 1)
+
         self.vcf_auth_type_label = QLabel("Authentication:")
         self.vcf_auth_type_combo = QComboBox()
         self.vcf_auth_type_combo.addItems(["API Token / Key", "Username & Password"])
         self.vcf_auth_type_combo.currentTextChanged.connect(self._on_vcf_auth_type_changed)
-        grid.addWidget(self.vcf_auth_type_label, 2, 0)
-        grid.addWidget(self.vcf_auth_type_combo, 2, 1)
+        grid.addWidget(self.vcf_auth_type_label, 3, 0)
+        grid.addWidget(self.vcf_auth_type_combo, 3, 1)
 
         self.vcf_token_label = QLabel("API Token / Key:")
         self.vcf_token_input = QLineEdit()
         self.vcf_token_input.setPlaceholderText("Paste VCF Operations API token or service key")
         self.vcf_token_input.setEchoMode(QLineEdit.Password)
-        grid.addWidget(self.vcf_token_label, 3, 0)
-        grid.addWidget(self.vcf_token_input, 3, 1)
+        grid.addWidget(self.vcf_token_label, 4, 0)
+        grid.addWidget(self.vcf_token_input, 4, 1)
 
         self.vcf_user_label = QLabel("Username:")
         self.vcf_user_input = QLineEdit("admin")
-        grid.addWidget(self.vcf_user_label, 4, 0)
-        grid.addWidget(self.vcf_user_input, 4, 1)
+        grid.addWidget(self.vcf_user_label, 5, 0)
+        grid.addWidget(self.vcf_user_input, 5, 1)
 
         self.vcf_pass_label = QLabel("Password:")
         self.vcf_pass_input = QLineEdit()
         self.vcf_pass_input.setEchoMode(QLineEdit.Password)
-        grid.addWidget(self.vcf_pass_label, 5, 0)
-        grid.addWidget(self.vcf_pass_input, 5, 1)
+        grid.addWidget(self.vcf_pass_label, 6, 0)
+        grid.addWidget(self.vcf_pass_input, 6, 1)
 
         c_layout.addLayout(grid)
         self._update_vcf_auth_visibility()
@@ -1730,6 +1736,8 @@ class MainWindow(QMainWindow):
         if not env.verify_ssl:
             parts.append("--no-verify-ssl")
         parts.append(f"--collector {shlex.quote(env.collector.address)}")
+        if env.collector.name:
+            parts.append(f"--collector-group {shlex.quote(env.collector.name)}")
 
         parts.append(f"--target-host {shlex.quote(target.hostname)}")
         parts.append(f"--connection {shlex.quote(target.connection_method.value)}")
@@ -1883,6 +1891,11 @@ class MainWindow(QMainWindow):
     # --------------------------------------------------------------------------
     def _get_vcf_env(self) -> VCFEnvironment:
         collector_addr = self.vcf_collector_input.text().strip() or "10.10.10.50"
+        collector_group = (
+            self.vcf_collector_group_input.text().strip()
+            if hasattr(self, "vcf_collector_group_input")
+            else None
+        ) or None
         use_key = hasattr(self, "vcf_auth_type_combo") and (
             "key" in self.vcf_auth_type_combo.currentText().lower()
             or "token" in self.vcf_auth_type_combo.currentText().lower()
@@ -1901,7 +1914,7 @@ class MainWindow(QMainWindow):
             username=username,
             password=password,
             token=token,
-            collector=CollectorInfo(address=collector_addr),
+            collector=CollectorInfo(address=collector_addr, name=collector_group),
             verify_ssl=self.vcf_ssl_check.isChecked(),
         )
 

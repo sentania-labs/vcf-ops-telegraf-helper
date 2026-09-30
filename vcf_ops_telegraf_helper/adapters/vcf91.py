@@ -6,7 +6,10 @@ Implements the official Broadcom workflow for VCF Operations 9.1 open-source Tel
 from __future__ import annotations
 
 import io
-from typing import Any, Dict, Optional, Tuple
+import os
+import re
+from typing import Any, Dict, List, Optional, Tuple
+import urllib.parse
 import zipfile
 import requests
 
@@ -182,6 +185,116 @@ class VCF91OpenTelegrafIntegration(VCFOpsIntegration):
             return True, vm_name or res_key.get("name"), vcid, vm_mor
         return False, None, None, None
 
+    def get_collector_groups(self) -> List[Dict[str, Any]]:
+        """Retrieve list of collector groups from VCF Operations Suite API."""
+        if not self.env.token:
+            return []
+
+        headers = {
+            "Accept": "application/json",
+            "Authorization": f"vRealizeOpsToken {self.env.token}",
+        }
+        for endpoint in ("/suite-api/api/collectorGroups", "/suite-api/api/collectorgroups"):
+            try:
+                resp = self.session.get(f"{self.base_url}{endpoint}", headers=headers, timeout=10)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    groups = data.get("collectorGroup", []) or data.get("collectorGroups", [])
+                    if isinstance(groups, list):
+                        return groups
+                    elif isinstance(groups, dict):
+                        return [groups]
+                else:
+                    logger.warning(
+                        "Collector groups query to %s returned HTTP %d: %s",
+                        endpoint,
+                        resp.status_code,
+                        resp.text,
+                    )
+            except Exception as e:
+                logger.warning("Failed querying collector groups at %s: %s", endpoint, e)
+        return []
+
+    def get_collectors(self) -> List[Dict[str, Any]]:
+        """Retrieve list of collectors from VCF Operations Suite API."""
+        if not self.env.token:
+            return []
+
+        headers = {
+            "Accept": "application/json",
+            "Authorization": f"vRealizeOpsToken {self.env.token}",
+        }
+        try:
+            resp = self.session.get(f"{self.base_url}/suite-api/api/collectors", headers=headers, timeout=10)
+            if resp.status_code == 200:
+                data = resp.json()
+                collectors = data.get("collector", []) or data.get("collectors", [])
+                if isinstance(collectors, list):
+                    return collectors
+                elif isinstance(collectors, dict):
+                    return [collectors]
+            else:
+                logger.warning("Collectors query returned HTTP %d: %s", resp.status_code, resp.text)
+        except Exception as e:
+            logger.warning("Failed querying collectors: %s", e)
+        return []
+
+    def resolve_collector_group_name(self, collector_target: str) -> str:
+        """Resolve a Cloud Proxy target to its Collector Group name.
+
+        The VCF Operations client certificate API endpoint requires the Collector Group Name,
+        not the individual proxy or VIP IP address.
+        """
+        if self.env.collector.name:
+            return self.env.collector.name
+
+        groups = self.get_collector_groups()
+        target_clean = collector_target.strip().lower()
+
+        # 1. Match collector target against collector group attributes (name, id, VIP, IP, FQDN)
+        for g in groups:
+            g_name = str(g.get("name", "")).strip()
+            g_id = str(g.get("id", "")).strip()
+            g_vip = str(g.get("vip", "")).strip()
+            g_virtual_ip = str(g.get("virtualIp", "")).strip()
+            g_ip = str(g.get("ipAddress", "")).strip()
+            g_configured_vip = str(g.get("configuredVip", "")).strip()
+            g_fqdn = str(g.get("fqdn", "")).strip()
+            g_host = str(g.get("hostName", "")).strip()
+
+            candidates = {
+                c.lower() for c in (g_name, g_id, g_vip, g_virtual_ip, g_ip, g_configured_vip, g_fqdn, g_host) if c
+            }
+            if target_clean in candidates:
+                return g_name
+
+        # 2. Match collector target against individual collectors to find group membership
+        collectors = self.get_collectors()
+        matching_collector = None
+        for c in collectors:
+            c_ip = str(c.get("ipAddress", "")).strip().lower()
+            c_name = str(c.get("name", "")).strip().lower()
+            c_host = str(c.get("hostName", "")).strip().lower()
+            if target_clean in (c_ip, c_name, c_host):
+                matching_collector = c
+                break
+
+        if matching_collector:
+            c_group_name = matching_collector.get("collectorGroupName")
+            if c_group_name:
+                return c_group_name
+            c_group_id = str(matching_collector.get("collectorGroupId", ""))
+            if c_group_id:
+                for g in groups:
+                    if str(g.get("id", "")) == c_group_id:
+                        return g.get("name", collector_target)
+
+        # 3. Fallback: if exactly one group exists in the environment, use it
+        if len(groups) == 1 and groups[0].get("name"):
+            return groups[0]["name"]
+
+        return collector_target
+
     def fetch_client_certificate_bundle(
         self,
         collector_group_or_cp: str,
@@ -194,7 +307,8 @@ class VCF91OpenTelegrafIntegration(VCFOpsIntegration):
             else:
                 raise RuntimeError("VCF Operations authentication token required for certificate retrieval.")
 
-        url = f"{self.base_url}/suite-api/api/applications/clientCertificate/{collector_group_or_cp}"
+        safe_group = urllib.parse.quote(collector_group_or_cp, safe="")
+        url = f"{self.base_url}/suite-api/api/applications/clientCertificate/{safe_group}"
         headers = {
             "Authorization": f"vRealizeOpsToken {self.env.token}",
             "Accept": "application/octet-stream",
@@ -211,26 +325,60 @@ class VCF91OpenTelegrafIntegration(VCFOpsIntegration):
         ca_pem = ""
         cert_pem = ""
         key_pem = ""
+        master_pub = None
+        vip = None
         mutual_auth = True
+
+        def is_ca_filename(filename: str) -> bool:
+            base = os.path.basename(filename).lower()
+            return bool(
+                re.search(r"(^|[._-])ca([._-]|$)", base)
+                or "cacert" in base
+                or "root" in base
+            )
+
+        def is_key_filename(filename: str) -> bool:
+            base = os.path.basename(filename).lower()
+            return base.endswith((".key", ".key.pem", "-key.pem", "_key.pem")) or "key" in base
 
         try:
             with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
                 namelist = zf.namelist()
-                for name in ("ca.cert.pem", "ca.pem"):
-                    if name in namelist:
+
+                # 1. Identify CA certificate
+                ca_name = None
+                for name in namelist:
+                    if name.endswith((".pem", ".crt")) and is_ca_filename(name) and not is_key_filename(name):
                         ca_pem = zf.read(name).decode("utf-8")
+                        ca_name = name
                         break
+
+                # 2. Identify private key
+                key_name = None
                 for name in namelist:
-                    if name.endswith(".cert.pem") and name not in ("ca.cert.pem", "ca.pem"):
-                        cert_pem = zf.read(name).decode("utf-8")
-                        break
-                    elif name.endswith("cert.pem") and name not in ("ca.cert.pem", "ca.pem"):
-                        cert_pem = zf.read(name).decode("utf-8")
-                        break
-                for name in namelist:
-                    if name.endswith(".key") or name.endswith("key.pem"):
+                    if is_key_filename(name):
                         key_pem = zf.read(name).decode("utf-8")
+                        key_name = name
                         break
+
+                # 3. Identify client certificate (must not be CA cert or key)
+                for name in namelist:
+                    if name.endswith((".pem", ".crt")) and name != ca_name and not is_key_filename(name):
+                        if not is_ca_filename(name):
+                            cert_pem = zf.read(name).decode("utf-8")
+                            break
+
+                # Fallback for client cert if not matched above
+                if not cert_pem:
+                    for name in namelist:
+                        if name.endswith((".pem", ".crt")) and name != ca_name and name != key_name:
+                            cert_pem = zf.read(name).decode("utf-8")
+                            break
+
+                if "master.pub" in namelist:
+                    master_pub = zf.read("master.pub").decode("utf-8")
+                if "IP" in namelist:
+                    vip = zf.read("IP").decode("utf-8").strip()
                 if "MUTUAL_AUTHENTICATION" in namelist:
                     raw_ma = zf.read("MUTUAL_AUTHENTICATION").decode("utf-8").strip().lower()
                     mutual_auth = (raw_ma == "true")
@@ -246,6 +394,8 @@ class VCF91OpenTelegrafIntegration(VCFOpsIntegration):
             "ca_cert": ca_pem,
             "client_cert": cert_pem,
             "client_key": key_pem,
+            "master_pub": master_pub,
+            "vip": vip,
             "mutual_auth": mutual_auth,
         }
 
@@ -339,32 +489,52 @@ class VCF91OpenTelegrafIntegration(VCFOpsIntegration):
         ca_cert_content = None
         client_cert_content = None
         client_key_content = None
+        master_pub_content = None
+        vip_content = None
         mutual_auth = True
+        collector_group = None
 
-        collector_target = self.env.collector.name or collector_addr
-        last_cert_err = None
-        try:
-            bundle = self.fetch_client_certificate_bundle(collector_target, client_id)
-            ca_cert_content = bundle.get("ca_cert")
-            client_cert_content = bundle.get("client_cert")
-            client_key_content = bundle.get("client_key")
-            mutual_auth = bundle.get("mutual_auth", True)
-        except Exception as e:
-            last_cert_err = e
-            # If collector group name failed and address is different, try address
-            if self.env.collector.name and collector_target != collector_addr:
-                try:
-                    bundle = self.fetch_client_certificate_bundle(collector_addr, client_id)
-                    ca_cert_content = bundle.get("ca_cert")
-                    client_cert_content = bundle.get("client_cert")
-                    client_key_content = bundle.get("client_key")
-                    mutual_auth = bundle.get("mutual_auth", True)
-                    last_cert_err = None
-                except Exception as inner_e:
-                    last_cert_err = inner_e
+        if token == "local-simulated-token":
+            ca_cert_content = "-----BEGIN CERTIFICATE-----\nSIMULATED CA CERT\n-----END CERTIFICATE-----\n"
+            client_cert_content = "-----BEGIN CERTIFICATE-----\nSIMULATED CLIENT CERT\n-----END CERTIFICATE-----\n"
+            client_key_content = "-----BEGIN RSA PRIVATE KEY-----\nSIMULATED KEY\n-----END RSA PRIVATE KEY-----\n"
+            master_pub_content = "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQC simulated"
+            vip_content = collector_addr
+            collector_group = "default-collector-group"
+            mutual_auth = True
+        else:
+            collector_group = self.resolve_collector_group_name(collector_addr)
+            logger.info("Resolved collector group name for %s: %s", collector_addr, collector_group)
 
-        if last_cert_err is not None:
-            logger.warning("Could not acquire mTLS client certificate bundle for client %s: %s", client_id, last_cert_err)
+            last_cert_err = None
+            try:
+                bundle = self.fetch_client_certificate_bundle(collector_group, client_id)
+                ca_cert_content = bundle.get("ca_cert")
+                client_cert_content = bundle.get("client_cert")
+                client_key_content = bundle.get("client_key")
+                master_pub_content = bundle.get("master_pub")
+                vip_content = bundle.get("vip")
+                mutual_auth = bundle.get("mutual_auth", True)
+            except Exception as e:
+                last_cert_err = e
+                # If collector group name failed and differs from collector_addr, try collector_addr
+                if collector_group != collector_addr:
+                    try:
+                        bundle = self.fetch_client_certificate_bundle(collector_addr, client_id)
+                        ca_cert_content = bundle.get("ca_cert")
+                        client_cert_content = bundle.get("client_cert")
+                        client_key_content = bundle.get("client_key")
+                        master_pub_content = bundle.get("master_pub")
+                        vip_content = bundle.get("vip")
+                        mutual_auth = bundle.get("mutual_auth", True)
+                        last_cert_err = None
+                    except Exception as inner_e:
+                        last_cert_err = inner_e
+
+            if last_cert_err is not None:
+                raise RuntimeError(
+                    f"Failed to acquire mTLS client certificate bundle from VCF Operations for collector group '{collector_group}' and client '{client_id}': {last_cert_err}"
+                )
 
         # 4. Retrieve mandatory_tags script content
         mandatory_tags_content = self.fetch_mandatory_tag_script(collector_addr, os_family)
@@ -379,6 +549,9 @@ class VCF91OpenTelegrafIntegration(VCFOpsIntegration):
             ca_cert_content=ca_cert_content,
             client_cert_content=client_cert_content,
             client_key_content=client_key_content,
+            master_pub_content=master_pub_content,
+            vip_content=vip_content,
+            collector_group=collector_group,
             mandatory_tags_content=mandatory_tags_content,
             is_managed_vm=is_managed,
             vm_mor=vm_mor,

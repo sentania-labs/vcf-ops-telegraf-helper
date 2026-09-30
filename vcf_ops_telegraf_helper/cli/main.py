@@ -116,6 +116,7 @@ def gui_cmd(theme: str) -> None:
 @click.option("--vcf-token", default=None, help="VCF Operations API token")
 @click.option("--mock-vcf", is_flag=True, help="Use simulated VCF Operations adapter for offline testing")
 @click.option("--collector", required=True, help="Cloud Proxy or Collector IP/FQDN")
+@click.option("--collector-group", default=None, help="Collector group name for mTLS client certificate bundle")
 @click.option("--verify-ssl/--no-verify-ssl", default=True, help="Verify TLS certificates")
 @click.option("--target-host", required=True, help="Target hostname or IP address")
 @click.option(
@@ -161,6 +162,7 @@ def run_cmd(
     vcf_token: Optional[str],
     mock_vcf: bool,
     collector: str,
+    collector_group: Optional[str],
     verify_ssl: bool,
     target_host: str,
     connection: str,
@@ -199,7 +201,7 @@ def run_cmd(
         username=vcf_user,
         password=vcf_pass,
         token=vcf_token,
-        collector=CollectorInfo(address=collector),
+        collector=CollectorInfo(address=collector, name=collector_group),
         verify_ssl=verify_ssl,
     )
 

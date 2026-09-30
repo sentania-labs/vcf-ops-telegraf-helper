@@ -117,6 +117,8 @@ class MockExecutor(EndpointExecutor):
         # Network connectivity / Collector check
         if "curl" in cmd_lower or "nc" in cmd_lower or "/dev/tcp" in cmd_lower:
             if self.collector_reachable:
+                if "%{http_code}" in cmd_lower or "-w" in cmd_lower:
+                    return CommandResult(exit_code=0, stdout="200\n", command=command)
                 return CommandResult(exit_code=0, stdout="HTTP/1.1 200 OK\n", command=command)
             return CommandResult(exit_code=7, stderr="Failed to connect to host\n", command=command)
 

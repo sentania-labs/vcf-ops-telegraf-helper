@@ -27,6 +27,9 @@ class IntegrationArtifacts(BaseModel):
     vc_id: Optional[str] = Field(default=None, description="vCenter Instance UUID (VMEntityVCID)")
     client_id: Optional[str] = Field(default=None, description="Client ID used in certificate request")
     mutual_auth: bool = Field(default=True, description="Whether mutual TLS is enforced on Cloud Proxy")
+    master_pub_content: Optional[str] = Field(default=None, description="Content of master.pub public key")
+    vip_content: Optional[str] = Field(default=None, description="VIP IP address from certificate bundle")
+    collector_group: Optional[str] = Field(default=None, description="Resolved Collector Group name")
 
 
 class VCFOpsIntegration(ABC):

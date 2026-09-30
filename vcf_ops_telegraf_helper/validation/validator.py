@@ -12,8 +12,10 @@ Provides discrete validation checks across specific failure domains:
 
 from __future__ import annotations
 
+import shlex
 import sys
-from typing import Optional
+import time
+from typing import Dict, Optional
 from pydantic import BaseModel, Field
 
 if sys.version_info >= (3, 11):
@@ -257,3 +259,114 @@ class Validator:
                 message="Telemetry verification failed in VCF Operations",
                 remediation="Confirm Cloud Proxy is online and credentials have metric write permissions.",
             )
+
+    @staticmethod
+    def validate_cloudproxy_mtls_metric_probe(
+        executor: EndpointExecutor,
+        collector_address: str,
+        cert_path: str,
+        key_path: str,
+        ca_cert_path: str,
+        headers: Optional[Dict[str, str]] = None,
+        hostname: str = "localhost",
+        is_windows: bool = False,
+        verify_ssl: bool = False,
+    ) -> ValidationResult:
+        """Actively test metric ingestion against the Cloud Proxy endpoint using client mTLS credentials."""
+        hdrs = headers or {}
+        probe_metric = f"vcf_helper.probe 1.0 {int(time.time())} host={hostname}"
+        target_url = f"https://{collector_address}/opensource/default/metric"
+
+        if is_windows or type(executor).__name__ == "WinRMExecutor":
+            def ps_quote(s: str) -> str:
+                return "'" + s.replace("'", "''") + "'"
+
+            args = [
+                "-s",
+                "-S",
+                "-o", "NUL",
+                "-w", "`n%{http_code}",
+                "-X", "POST",
+                ps_quote(target_url),
+                "--cert", ps_quote(cert_path),
+                "--key", ps_quote(key_path),
+                "--cacert", ps_quote(ca_cert_path),
+            ]
+            if not verify_ssl:
+                args.append("-k")
+            for k, v in hdrs.items():
+                args.extend(["-H", ps_quote(f"{k}: {v}")])
+            args.extend(["--data", ps_quote(probe_metric)])
+            arg_str = " ".join(args)
+
+            cmd = (
+                f"if (Get-Command curl.exe -ErrorAction SilentlyContinue) {{ "
+                f"& curl.exe {arg_str} 2>&1 "
+                f"}} else {{ 'CURL_NOT_FOUND' }}"
+            )
+        else:
+            cmd_parts = [
+                "curl",
+                "-s",
+                "-S",
+                "-o", "/dev/null",
+                "-w", "\n%{http_code}",
+                "-X", "POST",
+                target_url,
+                "--cert", cert_path,
+                "--key", key_path,
+                "--cacert", ca_cert_path,
+            ]
+            if not verify_ssl:
+                cmd_parts.append("-k")
+            for k, v in hdrs.items():
+                cmd_parts.extend(["-H", f"{k}: {v}"])
+            cmd_parts.extend(["--data", probe_metric])
+
+            cmd = " ".join(shlex.quote(p) for p in cmd_parts) + " 2>&1"
+
+        res = executor.execute(cmd, timeout=15)
+        out = (res.stdout or "").strip()
+
+        if out == "CURL_NOT_FOUND":
+            return ValidationResult(
+                domain="Metrics Transmission",
+                is_valid=False,
+                message="curl.exe is not available on Windows target to perform mTLS metric verification probe",
+                details="curl.exe was not found in system PATH",
+                remediation="Ensure curl.exe is available in Windows System32.",
+            )
+
+        # The last non-empty line contains the HTTP status code if curl executed HTTP request
+        lines = [line.strip() for line in out.splitlines() if line.strip()]
+        last_line = lines[-1] if lines else ""
+
+        http_code = ""
+        if last_line.isdigit() and len(last_line) == 3:
+            http_code = last_line
+        elif "200 ok" in last_line.lower() or "http/1.1 200" in last_line.lower():
+            http_code = "200"
+
+        if http_code in ("200", "202", "204"):
+            return ValidationResult(
+                domain="Metrics Transmission",
+                is_valid=True,
+                message=f"Cloud Proxy accepted mutual TLS metric transmission (HTTP {http_code})",
+            )
+
+        if http_code == "403" or "403 forbidden" in out.lower():
+            return ValidationResult(
+                domain="Metrics Transmission",
+                is_valid=False,
+                message="HTTP 403 Forbidden: Cloud Proxy rejected transmission (mutual TLS client certificate missing, untrusted, or expired)",
+                details=out,
+                remediation="Ensure the collector group client certificate bundle was properly acquired and deployed into telegraf.d/.",
+            )
+
+        return ValidationResult(
+            domain="Metrics Transmission",
+            is_valid=False,
+            message=f"Cloud Proxy metric transmission probe failed (HTTP {http_code or 'error'})",
+            details=out or res.stderr,
+            remediation="Verify network routing to Cloud Proxy, port 443 reachability, and client certificates.",
+        )

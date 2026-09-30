@@ -57,6 +57,9 @@ class MockVCFOpsIntegration(VCFOpsIntegration):
             is_managed_vm=False,
             client_id="simulated-client-id",
             mutual_auth=True,
+            master_pub_content="ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQC simulated",
+            vip_content=collector_addr,
+            collector_group="default-collector-group",
         )
 
     def verify_ingestion(self, target_hostname: str) -> str:

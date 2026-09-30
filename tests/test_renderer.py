@@ -228,17 +228,37 @@ def test_render_vcf_output_windows_cmd_quoting():
 
 
 def test_render_vcf_output_omits_tls_cert_when_not_provided():
-    """Verify tls_cert and tls_key are omitted when certificates are not configured."""
+    """Verify tls_cert and tls_key are omitted when mutual_auth is disabled and certificates not configured."""
     rendered = TelegrafRenderer.render_vcf_output(
         collector_address="172.27.8.54",
         hostname="console",
         cert_path=None,
         key_path=None,
+        ca_cert_path=None,
+        mutual_auth=False,
     )
     parsed = tomllib.loads(rendered)
     http_out = parsed["outputs"]["http"][0]
     assert "tls_cert" not in http_out
     assert "tls_key" not in http_out
+
+
+def test_render_vcf_output_emits_five_tls_lines_when_mutual_auth_true():
+    """Verify all five tls_ lines are emitted when mutual_auth is true, even with verify_ssl=False."""
+    rendered = TelegrafRenderer.render_vcf_output(
+        collector_address="172.27.8.54",
+        hostname="console.int.sentania.net",
+        verify_ssl=False,
+        mutual_auth=True,
+    )
+    parsed = tomllib.loads(rendered)
+    http_out = parsed["outputs"]["http"][0]
+    assert http_out["insecure_skip_verify"] is True
+    assert http_out["tls_ca"] == "/etc/telegraf/telegraf.d/ca.pem"
+    assert http_out["tls_cert"] == "/etc/telegraf/telegraf.d/cert.pem"
+    assert http_out["tls_key"] == "/etc/telegraf/telegraf.d/key.pem"
+    assert http_out["tls_min_version"] == "TLS13"
+
 
 
 
