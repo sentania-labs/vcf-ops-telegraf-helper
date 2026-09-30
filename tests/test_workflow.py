@@ -137,3 +137,153 @@ def test_workflow_honest_unknown_telemetry():
     )
     summary = wf.run()
     assert summary.verifications["VCF Ops ingestion"] == "UNKNOWN"
+
+
+def test_workflow_windows_schannel_with_confirmed_ingestion():
+    """Verify Windows Schannel limitation reports PASS when VCF Ops ingestion is confirmed."""
+    from unittest.mock import MagicMock
+    from vcf_ops_telegraf_helper.executors.base import CommandResult
+
+    env = VCFEnvironment(
+        name="test-env",
+        url="https://vcf-ops.local",
+        username="admin",
+        collector=CollectorInfo(address="10.10.10.50"),
+    )
+    target = EndpointTarget(
+        hostname="win01.corp.local",
+        os_family=OSFamily.WINDOWS,
+        connection_method=ConnectionMethod.WINRM,
+    )
+    monitoring = MonitoringConfig()
+    adapter = MockVCFOpsIntegration(env=env, connected=True, ingestion_status="PASS")
+
+    mock_exec = MagicMock()
+
+    def _exec(cmd, **kw):
+        if "schannel" in cmd or "curl.exe" in cmd:
+            return CommandResult(
+                exit_code=35,
+                stdout="curl: (35) schannel: Failed to open cert or key file by pathname: 0x80092002",
+                command=cmd,
+            )
+        if "TCP:" in cmd or "Test-NetConnection" in cmd:
+            return CommandResult(exit_code=0, stdout="TCP:True;SVC:Running\r\n", command=cmd)
+        if "Test-Path" in cmd:
+            return CommandResult(exit_code=0, stdout="True\r\nTrue", command=cmd)
+        if "Get-WinEvent" in cmd:
+            return CommandResult(exit_code=0, stdout="", command=cmd)
+        if "Get-Service" in cmd:
+            return CommandResult(exit_code=0, stdout="Running", command=cmd)
+        if "PROCESSOR_ARCH" in cmd:
+            return CommandResult(exit_code=0, stdout="AMD64", command=cmd)
+        if "telegraf.exe" in cmd and "version" in cmd:
+            return CommandResult(exit_code=0, stdout="Telegraf 1.40.1", command=cmd)
+        if "test" in cmd:
+            return CommandResult(exit_code=0, stdout="cpu,host=win01 value=1", command=cmd)
+        return CommandResult(exit_code=0, stdout="", command=cmd)
+
+    mock_exec.execute.side_effect = _exec
+    mock_exec.file_exists.return_value = True
+
+    wf = ConfigureEndpointWorkflow(
+        environment=env,
+        target=target,
+        monitoring=monitoring,
+        executor=mock_exec,
+        adapter=adapter,
+    )
+    summary = wf.run()
+    assert summary.success is True
+    assert summary.verifications["Metrics transmission"] == "PASS (verified via VCF Ops ingestion)"
+
+
+def test_workflow_windows_schannel_with_unknown_ingestion_fails():
+    """Verify Windows Schannel limitation fails Stage 8 when VCF Ops ingestion cannot be confirmed."""
+    from unittest.mock import MagicMock
+    from vcf_ops_telegraf_helper.executors.base import CommandResult
+
+    env = VCFEnvironment(
+        name="test-env",
+        url="https://vcf-ops.local",
+        username="admin",
+        collector=CollectorInfo(address="10.10.10.50"),
+    )
+    target = EndpointTarget(
+        hostname="win01.corp.local",
+        os_family=OSFamily.WINDOWS,
+        connection_method=ConnectionMethod.WINRM,
+    )
+    monitoring = MonitoringConfig()
+    # Ingestion status is UNKNOWN
+    adapter = MockVCFOpsIntegration(env=env, connected=True, ingestion_status="UNKNOWN")
+
+    mock_exec = MagicMock()
+
+    def _exec(cmd, **kw):
+        if "schannel" in cmd or "curl.exe" in cmd:
+            return CommandResult(
+                exit_code=35,
+                stdout="curl: (35) schannel: Failed to open cert or key file by pathname: 0x80092002",
+                command=cmd,
+            )
+        if "TCP:" in cmd or "Test-NetConnection" in cmd:
+            return CommandResult(exit_code=0, stdout="TCP:True;SVC:Running\r\n", command=cmd)
+        if "Test-Path" in cmd:
+            return CommandResult(exit_code=0, stdout="True\r\nTrue", command=cmd)
+        if "Get-WinEvent" in cmd:
+            return CommandResult(exit_code=0, stdout="", command=cmd)
+        if "Get-Service" in cmd:
+            return CommandResult(exit_code=0, stdout="Running", command=cmd)
+        if "PROCESSOR_ARCH" in cmd:
+            return CommandResult(exit_code=0, stdout="AMD64", command=cmd)
+        if "telegraf.exe" in cmd and "version" in cmd:
+            return CommandResult(exit_code=0, stdout="Telegraf 1.40.1", command=cmd)
+        if "test" in cmd:
+            return CommandResult(exit_code=0, stdout="cpu,host=win01 value=1", command=cmd)
+        return CommandResult(exit_code=0, stdout="", command=cmd)
+
+    mock_exec.execute.side_effect = _exec
+    mock_exec.file_exists.return_value = True
+
+    wf = ConfigureEndpointWorkflow(
+        environment=env,
+        target=target,
+        monitoring=monitoring,
+        executor=mock_exec,
+        adapter=adapter,
+    )
+    summary = wf.run()
+    assert summary.success is False
+    assert "FAIL" in summary.verifications["Metrics transmission"]
+    assert "Schannel backend cannot load detached PEM" in summary.verifications["Metrics transmission"]
+
+
+def test_workflow_options_telegraf_version_precedence():
+    """Verify WorkflowOptions telegraf_version takes precedence over default EndpointTarget."""
+    env = VCFEnvironment(
+        name="test-env",
+        url="https://vcf-ops.local",
+        username="admin",
+        collector=CollectorInfo(address="10.10.10.50"),
+    )
+    target = EndpointTarget(
+        hostname="win02.corp.local",
+        os_family=OSFamily.WINDOWS,
+        connection_method=ConnectionMethod.WINRM,
+        install_telegraf=True,
+    )
+    opts = WorkflowOptions(install_telegraf=True, telegraf_version="1.34.0")
+    adapter = MockVCFOpsIntegration(env=env, connected=True)
+    executor = MockExecutor(connected=True, telegraf_installed=False)
+
+    wf = ConfigureEndpointWorkflow(
+        environment=env,
+        target=target,
+        monitoring=MonitoringConfig(),
+        executor=executor,
+        adapter=adapter,
+        options=opts,
+    )
+    det_res = wf.detect_telegraf()
+    assert "1.34.0" in det_res.message

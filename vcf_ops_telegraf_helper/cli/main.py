@@ -131,6 +131,7 @@ def gui_cmd(theme: str) -> None:
 @click.option("--ssh-key", default=None, help="SSH private key path")
 @click.option("--winrm-ssl", is_flag=True, default=False, help="Use HTTPS/SSL for WinRM transport")
 @click.option("--install-telegraf", is_flag=True, default=False, help="Automatically install Telegraf agent if missing")
+@click.option("--telegraf-version", default="1.40.1", help="Telegraf agent release version to install (default: 1.40.1)")
 @click.option("--cpu/--no-cpu", default=True, help="Enable CPU monitoring")
 @click.option("--mem/--no-mem", default=True, help="Enable memory monitoring")
 @click.option("--disk/--no-disk", default=True, help="Enable disk monitoring")
@@ -172,6 +173,7 @@ def run_cmd(
     ssh_key: Optional[str],
     winrm_ssl: bool,
     install_telegraf: bool,
+    telegraf_version: str,
     cpu: bool,
     mem: bool,
     disk: bool,
@@ -218,6 +220,7 @@ def run_cmd(
         key_filename=ssh_key,
         winrm_use_ssl=winrm_ssl,
         install_telegraf=install_telegraf,
+        telegraf_version=telegraf_version,
     )
 
     svc_list = [s.strip() for s in win_services.split(",") if s.strip()] if win_services else ["*"]
@@ -294,6 +297,8 @@ def run_cmd(
         dry_run=dry_run,
         output_dir=output_dir,
         restart_service=True,
+        install_telegraf=install_telegraf,
+        telegraf_version=telegraf_version,
     )
 
     workflow = ConfigureEndpointWorkflow(

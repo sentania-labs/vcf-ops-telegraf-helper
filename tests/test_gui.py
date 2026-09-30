@@ -257,13 +257,13 @@ def test_main_window_step3_plugins_and_preview(qapp, tmp_path):
     assert "[[inputs.nginx]]" in preview_txt
     assert "[[inputs.ping]]" in preview_txt
     summary_linux = window.review_summary_box.toPlainText()
-    assert "Install official InfluxData agent via native package manager" in summary_linux
+    assert "Install official InfluxData agent 1.40.1 via native package manager" in summary_linux
     assert "downloads/salt" not in summary_linux
 
     window.ep_os_combo.setCurrentText("Windows")
     window._update_preview()
     summary_win = window.review_summary_box.toPlainText()
-    assert "Install official InfluxData agent release package" in summary_win
+    assert "Install official InfluxData agent release 1.40.1 package" in summary_win
     assert "downloads/salt" not in summary_win
 
     window.ep_auto_install_check.setChecked(False)
@@ -568,6 +568,39 @@ def test_main_window_uninstall_agent_button(qapp, monkeypatch):
     qapp.processEvents()
     assert win.ep_status_label.text() == "Telegraf completely uninstalled"
     assert win.ep_missing_banner.isHidden() is False
+
+
+def test_main_window_telegraf_version_selection(qapp, tmp_path):
+    """Verify Telegraf version combobox presets, custom editing, toggle handling, and CLI export."""
+    state_file = tmp_path / "state.json"
+    store = StateStore(state_file=state_file)
+    window = MainWindow(state_store=store)
+
+    assert hasattr(window, "ep_version_combo")
+    assert window.ep_version_combo.isEditable() is True
+    assert window.ep_version_combo.count() >= 4
+    assert window._get_selected_telegraf_version() == "1.40.1"
+
+    # Toggle auto-install disables combo
+    window.ep_auto_install_check.setChecked(False)
+    assert window.ep_version_combo.isEnabled() is False
+    window.ep_auto_install_check.setChecked(True)
+    assert window.ep_version_combo.isEnabled() is True
+
+    # Select preset 1.34.0
+    window.ep_version_combo.setCurrentIndex(1)
+    assert window._get_selected_telegraf_version() == "1.34.0"
+    target = window._get_endpoint_target()
+    assert target.telegraf_version == "1.34.0"
+
+    cli_cmd = window._build_cli_command()
+    assert "--telegraf-version 1.34.0" in cli_cmd
+
+    # Type custom version
+    window.ep_version_combo.setEditText("1.39.2")
+    assert window._get_selected_telegraf_version() == "1.39.2"
+    target_custom = window._get_endpoint_target()
+    assert target_custom.telegraf_version == "1.39.2"
 
 
 

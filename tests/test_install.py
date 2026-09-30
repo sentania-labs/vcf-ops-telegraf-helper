@@ -284,3 +284,81 @@ def test_windows_detect_architecture_x86_64():
     assert wf.discovery.architecture == "x86_64"
 
 
+def test_apply_respects_custom_telegraf_version():
+    """Verify apply stage uses specified telegraf_version for both Windows zip and Linux tar/repo."""
+    env = VCFEnvironment(name="test", url="https://vcf.local", username="admin", collector=CollectorInfo(address="10.10.10.50"))
+    target = EndpointTarget(
+        hostname="win-node.local",
+        os_family=OSFamily.WINDOWS,
+        connection_method=ConnectionMethod.WINRM,
+        install_telegraf=True,
+        telegraf_version="1.34.0",
+    )
+    mon = MonitoringConfig()
+    mock_exec = MagicMock()
+    mock_exec.execute.return_value = CommandResult(exit_code=0, stdout="success", command="cmd")
+    mock_exec.file_exists.return_value = False
+    mock_adapter = MagicMock()
+    mock_adapter.prepare_telegraf_integration.return_value = IntegrationArtifacts(
+        collector_address="10.10.10.50",
+        script_url="https://10.10.10.50/downloads/salt/telegraf-utils.ps1",
+        output_url="https://10.10.10.50/opensource/default/metric",
+        token="test-token-xyz",
+    )
+
+    wf = ConfigureEndpointWorkflow(
+        environment=env,
+        target=target,
+        monitoring=mon,
+        executor=mock_exec,
+        adapter=mock_adapter,
+        options=WorkflowOptions(mode=DeploymentMode.PUSH, install_telegraf=True),
+    )
+    wf.artifacts = mock_adapter.prepare_telegraf_integration()
+    wf.discovery = EndpointDiscoveryResult(
+        hostname=target.hostname,
+        os_name="Windows",
+        os_version="Microsoft Windows Server 2025",
+        telegraf_installed=False,
+        architecture="x86_64",
+    )
+
+    res = wf.apply()
+    assert res.status == StageStatus.PASS
+    executed_cmds = [call[0][0] for call in mock_exec.execute.call_args_list]
+    win_cmd = next(cmd for cmd in executed_cmds if "telegraf.exe" in cmd)
+    assert "telegraf-1.34.0_windows_amd64.zip" in win_cmd
+
+    # Now verify Linux with version 1.40.1
+    target_linux = EndpointTarget(
+        hostname="linux-node.local",
+        os_family=OSFamily.LINUX,
+        connection_method=ConnectionMethod.SSH,
+        install_telegraf=True,
+        telegraf_version="1.40.1",
+    )
+    mock_exec.reset_mock()
+    wf_linux = ConfigureEndpointWorkflow(
+        environment=env,
+        target=target_linux,
+        monitoring=mon,
+        executor=mock_exec,
+        adapter=mock_adapter,
+        options=WorkflowOptions(mode=DeploymentMode.PUSH, install_telegraf=True),
+    )
+    wf_linux.artifacts = mock_adapter.prepare_telegraf_integration()
+    wf_linux.discovery = EndpointDiscoveryResult(
+        hostname=target_linux.hostname,
+        os_name="Linux",
+        os_version="Ubuntu",
+        telegraf_installed=False,
+        architecture="x86_64",
+    )
+    res_linux = wf_linux.apply()
+    assert res_linux.status == StageStatus.PASS
+    executed_linux = [call[0][0] for call in mock_exec.execute.call_args_list]
+    linux_cmd = next(cmd for cmd in executed_linux if "influxdata" in cmd.lower())
+    assert "telegraf-1.40.1_linux_amd64.tar.gz" in linux_cmd
+    assert "telegraf=1.40.1-1" in linux_cmd
+
+

@@ -220,3 +220,97 @@ def test_validate_cloudproxy_mtls_metric_probe_windows_curl_missing():
     assert "curl.exe is not available" in res.message
 
 
+def test_validate_cloudproxy_mtls_metric_probe_windows_schannel_pem_fallback_unverified():
+    """Verify probe returns is_valid=False and indicates unverified when Windows curl hits Schannel PEM error."""
+    from unittest.mock import MagicMock
+    from vcf_ops_telegraf_helper.executors.base import CommandResult
+
+    mock_exec = MagicMock()
+    mock_exec.execute.side_effect = [
+        CommandResult(
+            exit_code=35,
+            stdout="curl: (35) schannel: Failed to open cert or key file by pathname: 0x80092002",
+            stderr="",
+        ),
+        CommandResult(
+            exit_code=0,
+            stdout="TCP:True;SVC:Running\r\n",
+            stderr="",
+        ),
+    ]
+
+    res = Validator.validate_cloudproxy_mtls_metric_probe(
+        executor=mock_exec,
+        collector_address="10.10.10.50",
+        cert_path="C:\\telegraf\\telegraf.d\\cert.pem",
+        key_path="C:\\telegraf\\telegraf.d\\key.pem",
+        ca_cert_path="C:\\telegraf\\telegraf.d\\ca.pem",
+        is_windows=True,
+    )
+    assert res.is_valid is False
+    assert "Schannel backend cannot load detached PEM client certificates" in res.message
+    assert "TCP:True;SVC:Running" in res.details
+
+
+def test_validate_cloudproxy_mtls_metric_probe_windows_schannel_pem_fallback_tcp_failure():
+    """Verify probe reports port 443 unreachable when Windows curl hits Schannel PEM error and TCP test fails."""
+    from unittest.mock import MagicMock
+    from vcf_ops_telegraf_helper.executors.base import CommandResult
+
+    mock_exec = MagicMock()
+    mock_exec.execute.side_effect = [
+        CommandResult(
+            exit_code=35,
+            stdout="curl: (35) schannel: Failed to open cert or key file by pathname: 0x80092002",
+            stderr="",
+        ),
+        CommandResult(
+            exit_code=0,
+            stdout="TCP:False;SVC:Stopped\r\n",
+            stderr="",
+        ),
+    ]
+
+    res = Validator.validate_cloudproxy_mtls_metric_probe(
+        executor=mock_exec,
+        collector_address="10.10.10.50",
+        cert_path="C:\\telegraf\\telegraf.d\\cert.pem",
+        key_path="C:\\telegraf\\telegraf.d\\key.pem",
+        ca_cert_path="C:\\telegraf\\telegraf.d\\ca.pem",
+        is_windows=True,
+    )
+    assert res.is_valid is False
+    assert "port 443 unreachable" in res.message
+
+
+def test_validate_cloudproxy_mtls_metric_probe_windows_schannel_pem_fallback_service_stopped():
+    """Verify probe reports failure when port 443 is reachable but Telegraf service is stopped."""
+    from unittest.mock import MagicMock
+    from vcf_ops_telegraf_helper.executors.base import CommandResult
+
+    mock_exec = MagicMock()
+    mock_exec.execute.side_effect = [
+        CommandResult(
+            exit_code=35,
+            stdout="curl: (35) schannel: Failed to open cert or key file by pathname: 0x80092002",
+            stderr="",
+        ),
+        CommandResult(
+            exit_code=0,
+            stdout="TCP:True;SVC:Stopped\r\n",
+            stderr="",
+        ),
+    ]
+
+    res = Validator.validate_cloudproxy_mtls_metric_probe(
+        executor=mock_exec,
+        collector_address="10.10.10.50",
+        cert_path="C:\\telegraf\\telegraf.d\\cert.pem",
+        key_path="C:\\telegraf\\telegraf.d\\key.pem",
+        ca_cert_path="C:\\telegraf\\telegraf.d\\ca.pem",
+        is_windows=True,
+    )
+    assert res.is_valid is False
+    assert "service is stopped or failed" in res.message
+
+

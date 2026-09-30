@@ -521,6 +521,26 @@ class MainWindow(QMainWindow):
         self.ep_auto_install_check.setChecked(True)
         grid.addWidget(self.ep_auto_install_check, 8, 0, 1, 2)
 
+        ver_row = QHBoxLayout()
+        self.ep_version_label = QLabel("Telegraf Version:")
+        self.ep_version_label.setStyleSheet("font-size: 12px; margin-left: 20px;")
+        self.ep_version_combo = QComboBox()
+        self.ep_version_combo.setEditable(True)
+        self.ep_version_combo.addItems([
+            "1.40.1 (Latest Stable - Recommended)",
+            "1.34.0 (1.34 Series)",
+            "1.32.1 (1.32 Series)",
+            "1.30.0 (1.30 Series)",
+        ])
+        self.ep_version_combo.setCurrentIndex(0)
+        self.ep_version_combo.setToolTip("Select a release family or enter a specific release version (e.g. 1.40.1)")
+        ver_row.addWidget(self.ep_version_label)
+        ver_row.addWidget(self.ep_version_combo)
+        ver_row.addStretch()
+        grid.addLayout(ver_row, 9, 0, 1, 2)
+
+        self.ep_auto_install_check.toggled.connect(self._on_auto_install_toggled)
+
         c_layout.addLayout(grid)
         self._update_auth_and_endpoint_visibility()
 
@@ -664,6 +684,22 @@ class MainWindow(QMainWindow):
     def _on_advanced_toggled(self, checked: bool) -> None:
         self.ep_port_label.setVisible(checked)
         self.ep_port_input.setVisible(checked)
+
+    def _on_auto_install_toggled(self, checked: bool) -> None:
+        if hasattr(self, "ep_version_label"):
+            self.ep_version_label.setEnabled(checked)
+        if hasattr(self, "ep_version_combo"):
+            self.ep_version_combo.setEnabled(checked)
+
+    def _get_selected_telegraf_version(self) -> str:
+        if not hasattr(self, "ep_version_combo"):
+            return "1.40.1"
+        text = self.ep_version_combo.currentText().strip()
+        if " " in text:
+            text = text.split(" ", 1)[0].strip()
+        if text.startswith("v") and len(text) > 1 and text[1].isdigit():
+            text = text[1:]
+        return text or "1.40.1"
 
     def _on_uninstall_agent_clicked(self) -> None:
         if self.uninstall_worker_thread and self.uninstall_worker_thread.isRunning():
@@ -1582,9 +1618,9 @@ class MainWindow(QMainWindow):
 
         if target.install_telegraf:
             install_desc = (
-                "Install official InfluxData agent release package"
+                f"Install official InfluxData agent release {target.telegraf_version} package"
                 if is_win
-                else "Install official InfluxData agent via native package manager or archive fallback"
+                else f"Install official InfluxData agent {target.telegraf_version} via native package manager or archive fallback"
             )
         else:
             install_desc = "Verify existing pre-installed Telegraf agent"
@@ -1757,6 +1793,8 @@ class MainWindow(QMainWindow):
             parts.append("--winrm-ssl")
         if target.install_telegraf:
             parts.append("--install-telegraf")
+            if target.telegraf_version and target.telegraf_version != "1.40.1":
+                parts.append(f"--telegraf-version {shlex.quote(target.telegraf_version)}")
 
         if not mon.cpu.enabled:
             parts.append("--no-cpu")
@@ -1813,6 +1851,7 @@ class MainWindow(QMainWindow):
             restart_service=(mode == DeploymentMode.PUSH and not self.dry_run_check.isChecked()),
             verify_telemetry=True,
             install_telegraf=target.install_telegraf,
+            telegraf_version=target.telegraf_version,
         )
 
         executor = self._create_executor(target)
@@ -1942,6 +1981,8 @@ class MainWindow(QMainWindow):
                 key_filename = None
                 password = self.ep_pass_input.text().strip() or None
 
+        ver_str = self._get_selected_telegraf_version() if hasattr(self, "_get_selected_telegraf_version") else "1.40.1"
+
         return EndpointTarget(
             hostname=self.ep_host_input.text().strip() or "10.10.10.101",
             os_family=os_family,
@@ -1952,6 +1993,7 @@ class MainWindow(QMainWindow):
             key_filename=key_filename,
             winrm_use_ssl=(port_val == 5986),
             install_telegraf=auto_install,
+            telegraf_version=ver_str,
         )
 
     def _get_monitoring_config(self) -> MonitoringConfig:

@@ -368,3 +368,6 @@ def test_vcf91_fetch_mandatory_tag_script_fallback():
     script_bat = adapter.fetch_mandatory_tag_script("10.10.10.50", os_family="windows")
     assert "mandatory.tag" in script_bat
     assert "TELEGRAF_VERSION" in script_bat
+    assert "reg query" in script_bat
+    assert "BIOS_VERSION" in script_bat
+    assert "BOOTSTRAP_FQDN" in script_bat

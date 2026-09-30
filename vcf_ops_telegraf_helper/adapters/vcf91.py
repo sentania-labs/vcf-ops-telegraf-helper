@@ -410,27 +410,92 @@ class VCF91OpenTelegrafIntegration(VCFOpsIntegration):
         try:
             resp = self.session.get(url, verify=False, timeout=10)
             if resp.status_code == 200 and resp.text.strip():
-                return resp.text
+                content = resp.text
+                if os_family.lower() == "windows":
+                    # If Cloud Proxy script uses deprecated wmic without reg query fallback,
+                    # use the modernized script compatible with Windows Server 2025.
+                    if "reg query" in content:
+                        return content
+                    return self._get_windows_mandatory_tag_script()
+                return content
         except Exception:
             pass
 
         if os_family.lower() == "windows":
-            return (
-                "@echo off\r\n"
-                "set TELEGRAF_EXE_PATH=%~1\r\n"
-                "if \"%TELEGRAF_EXE_PATH%\"==\"\" set TELEGRAF_EXE_PATH=C:\\telegraf\\telegraf.exe\r\n"
-                "set OS_NAME=Windows\r\n"
-                "set OS_VERSION=unknown\r\n"
-                "set TELEGRAF_VER=unknown\r\n"
-                "set IP=unknown\r\n"
-                "for /f \"tokens=2*\" %%a in ('reg query \"HKLM\\Software\\Microsoft\\Windows NT\\CurrentVersion\" /v ProductName 2^>nul') do set OS_NAME=%%b\r\n"
-                "for /f \"tokens=2*\" %%a in ('reg query \"HKLM\\Software\\Microsoft\\Windows NT\\CurrentVersion\" /v CurrentBuild 2^>nul') do set OS_VERSION=%%b\r\n"
-                "for /f \"tokens=2\" %%v in ('\"%TELEGRAF_EXE_PATH%\" version 2^>nul') do set TELEGRAF_VER=%%v\r\n"
-                "for /f \"tokens=2 delims=:\" %%f in ('ipconfig ^| findstr /i \"IPv4\"') do if not defined IP set IP=%%f\r\n"
-                "set OS_NAME=%OS_NAME: =_%\r\n"
-                "set IP=%IP: =%\r\n"
-                "echo mandatory.tag,OS_NAME=%OS_NAME%,OS_VERSION=%OS_VERSION%,TELEGRAF_VERSION=%TELEGRAF_VER%,HOSTNAME=%COMPUTERNAME%,IP=%IP% value=1i\r\n"
-            )
+            return self._get_windows_mandatory_tag_script()
+
+        return (
+            "#!/usr/bin/env bash\n"
+            "TELEGRAF_BIN=\"${1:-/usr/bin/telegraf}\"\n"
+            "TVER=$(\"$TELEGRAF_BIN\" version 2>/dev/null | awk '{print $2}')\n"
+            "HNAME=$(hostname)\n"
+            "OS_NAME=\"Linux\"\n"
+            "OS_VER=\"unknown\"\n"
+            "if [ -f /etc/os-release ]; then\n"
+            "  . /etc/os-release\n"
+            "  [ -n \"$NAME\" ] && OS_NAME=$(echo \"$NAME\" | tr ' ' '_')\n"
+            "  [ -n \"$VERSION_ID\" ] && OS_VER=$(echo \"$VERSION_ID\" | tr ' ' '_')\n"
+            "fi\n"
+            "IP_VAL=$(hostname -I 2>/dev/null | awk '{print $1}')\n"
+            "OS_NAME=\"${OS_NAME:-Linux}\"\n"
+            "OS_VER=\"${OS_VER:-unknown}\"\n"
+            "TVER=\"${TVER:-unknown}\"\n"
+            "HNAME=\"${HNAME:-localhost}\"\n"
+            "IP_VAL=\"${IP_VAL:-unknown}\"\n"
+            "echo \"mandatory.tag,OS_NAME=${OS_NAME},OS_VERSION=${OS_VER},TELEGRAF_VERSION=${TVER},HOSTNAME=${HNAME},IP=${IP_VAL} value=1i\"\n"
+        )
+
+    @staticmethod
+    def _get_windows_mandatory_tag_script() -> str:
+        """Return robust mandatory_tags.bat compatible with Windows Server 2012 through 2025."""
+        return (
+            "@echo off\r\n"
+            "set TELEGRAF_BIN_PATH=C:\\telegraf\\telegraf.exe\r\n"
+            "set \"grains=C:\\VMware\\UCP\\salt\\conf\\grains\"\r\n"
+            "if NOT \"%~1\"==\"\" set TELEGRAF_BIN_PATH=%~1\r\n"
+            "set HNAME=%COMPUTERNAME%\r\n"
+            "set ip_address_string=\"IPv4\"\r\n"
+            "set ips=\r\n"
+            "for /f \"usebackq tokens=2 delims=:\" %%f in (`ipconfig ^| findstr /c:%ip_address_string%`) do call set \"ips=%%ips%%-%%f\"\r\n"
+            "set ips=%ips: =%\r\n"
+            "set VM_IP=%ips:~1%\r\n"
+            "if not defined VM_IP set VM_IP=127.0.0.1\r\n"
+            "set OS_NAME=\r\n"
+            "for /f \"tokens=2 delims==\" %%f in ('wmic os get Caption /value 2^>nul ^| find \"=\"') do set \"OS_NAME=%%f\"\r\n"
+            "if not defined OS_NAME (\r\n"
+            "    for /f \"tokens=2*\" %%a in ('reg query \"HKLM\\Software\\Microsoft\\Windows NT\\CurrentVersion\" /v ProductName 2^>nul') do set \"OS_NAME=%%b\"\r\n"
+            ")\r\n"
+            "if not defined OS_NAME set OS_NAME=Windows\r\n"
+            "set OS_NAME=%OS_NAME: =_%\r\n"
+            "set OS_VERSION=\r\n"
+            "for /f \"tokens=2 delims==\" %%f in ('wmic os get Version /value 2^>nul ^| find \"=\"') do set \"OS_VERSION=%%f\"\r\n"
+            "if not defined OS_VERSION (\r\n"
+            "    for /f \"tokens=2*\" %%a in ('reg query \"HKLM\\Software\\Microsoft\\Windows NT\\CurrentVersion\" /v CurrentBuild 2^>nul') do set \"OS_VERSION=%%b\"\r\n"
+            ")\r\n"
+            "if not defined OS_VERSION set OS_VERSION=unknown\r\n"
+            "set OS_VERSION=%OS_VERSION: =_%\r\n"
+            "set TF_VERSION=unknown\r\n"
+            "for /f \"tokens=2\" %%i in ('\"%TELEGRAF_BIN_PATH%\" --version 2^>nul') do set TF_VERSION=%%i\r\n"
+            "if \"%TF_VERSION%\"==\"unknown\" (\r\n"
+            "    for /f \"tokens=2\" %%i in ('\"%TELEGRAF_BIN_PATH%\" version 2^>nul') do set TF_VERSION=%%i\r\n"
+            ")\r\n"
+            "set BIOS_VERSION=\r\n"
+            "for /f \"tokens=2 delims==\" %%f in ('wmic bios get smbiosbiosversion /value 2^>nul ^| find \"=\"') do set \"BIOS_VERSION=%%f\"\r\n"
+            "if not defined BIOS_VERSION (\r\n"
+            "    for /f \"tokens=2*\" %%a in ('reg query \"HKLM\\HARDWARE\\DESCRIPTION\\System\\BIOS\" /v BIOSVersion 2^>nul') do set \"BIOS_VERSION=%%b\"\r\n"
+            ")\r\n"
+            "if not defined BIOS_VERSION set BIOS_VERSION=unknown\r\n"
+            "set BIOS_VERSION=%BIOS_VERSION: =_%\r\n"
+            "set BOOTSTRAP_FQDN=None\r\n"
+            "if exist \"%grains%\" (\r\n"
+            "    for /f \"tokens=1,2 delims=: \" %%a in ('findstr /i /c:\"arc_fqdn:\" \"%grains%\" 2^>nul') do set \"BOOTSTRAP_FQDN=%%b\"\r\n"
+            ")\r\n"
+            "if not defined BOOTSTRAP_FQDN set BOOTSTRAP_FQDN=None\r\n"
+            "set BOOTSTRAP_FQDN=%BOOTSTRAP_FQDN: =_%\r\n"
+            "set METRIC_VALUE=1\r\n"
+            "if [%HNAME%]==[] if [%VM_IP%]==[] if [%OS_NAME%]==[] if [%OS_VERSION%]==[] set METRIC_VALUE=0\r\n"
+            "echo mandatory.tag,OS_NAME=%OS_NAME%,OS_VERSION=%OS_VERSION%,TELEGRAF_VERSION=%TF_VERSION%,IP=%VM_IP%,BIOS_VERSION=%BIOS_VERSION%,BOOTSTRAP_FQDN=%BOOTSTRAP_FQDN%,HOSTNAME=%HNAME% value=%METRIC_VALUE%i\r\n"
+        )
         return (
             "#!/usr/bin/env bash\n"
             "TELEGRAF_BIN=\"${1:-/usr/bin/telegraf}\"\n"

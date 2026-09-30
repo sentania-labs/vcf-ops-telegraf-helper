@@ -285,7 +285,7 @@ class Validator:
                 "-s",
                 "-S",
                 "-o", "NUL",
-                "-w", "`n%{http_code}",
+                "-w", ps_quote(r"\n%{http_code}"),
                 "-X", "POST",
                 ps_quote(target_url),
                 "--cert", ps_quote(cert_path),
@@ -295,7 +295,10 @@ class Validator:
             if not verify_ssl:
                 args.append("-k")
             for k, v in hdrs.items():
-                args.extend(["-H", ps_quote(f"{k}: {v}")])
+                if v and str(v).strip():
+                    args.extend(["-H", ps_quote(f"{k}: {str(v).strip()}")])
+                else:
+                    args.extend(["-H", ps_quote(f"{k};")])
             args.extend(["--data", ps_quote(probe_metric)])
             arg_str = " ".join(args)
 
@@ -320,13 +323,17 @@ class Validator:
             if not verify_ssl:
                 cmd_parts.append("-k")
             for k, v in hdrs.items():
-                cmd_parts.extend(["-H", f"{k}: {v}"])
+                if v and str(v).strip():
+                    cmd_parts.extend(["-H", f"{k}: {str(v).strip()}"])
+                else:
+                    cmd_parts.extend(["-H", f"{k};"])
             cmd_parts.extend(["--data", probe_metric])
 
             cmd = " ".join(shlex.quote(p) for p in cmd_parts) + " 2>&1"
 
         res = executor.execute(cmd, timeout=15)
         out = (res.stdout or "").strip()
+        combined_out = f"{out}\n{res.stderr or ''}".strip()
 
         if out == "CURL_NOT_FOUND":
             return ValidationResult(
@@ -353,6 +360,51 @@ class Validator:
                 is_valid=True,
                 message=f"Cloud Proxy accepted mutual TLS metric transmission (HTTP {http_code})",
             )
+
+        if (is_windows or type(executor).__name__ == "WinRMExecutor") and (
+            "0x80092002" in combined_out.lower()
+            or "schannel" in combined_out.lower()
+            or "failed to open cert or key" in combined_out.lower()
+            or "failed to import cert" in combined_out.lower()
+        ):
+            # Built-in Windows curl.exe uses Schannel, which cannot load detached PEM private keys.
+            # Telegraf uses Go's native crypto/tls stack which loads PEM certificates directly.
+            # Fall back to verifying TCP port 443 connectivity to Cloud Proxy and Telegraf service state.
+            probe_cmd = (
+                "$ProgressPreference = 'SilentlyContinue'; "
+                f"$tcp = (Test-NetConnection -ComputerName '{collector_address}' -Port 443 -WarningAction SilentlyContinue).TcpTestSucceeded; "
+                "$svc = (Get-Service -Name telegraf -ErrorAction SilentlyContinue).Status; "
+                '"TCP:$tcp;SVC:$svc"'
+            )
+            probe_res = executor.execute(probe_cmd, timeout=15)
+            probe_out = (probe_res.stdout or "").strip()
+            tcp_ok = "tcp:true" in probe_out.lower()
+            svc_running = "svc:running" in probe_out.lower()
+
+            if tcp_ok and svc_running:
+                return ValidationResult(
+                    domain="Metrics Transmission",
+                    is_valid=False,
+                    message="Windows curl Schannel backend cannot load detached PEM client certificates; mTLS probe unverified",
+                    details=f"curl output: {out}; probe: {probe_out}",
+                    remediation="Windows built-in curl.exe uses Schannel and cannot load PEM client certificates for mTLS probe. Verify metrics ingestion in VCF Operations or check Telegraf service logs.",
+                )
+            elif tcp_ok and not svc_running:
+                return ValidationResult(
+                    domain="Metrics Transmission",
+                    is_valid=False,
+                    message="Cloud Proxy port 443 reachable but Telegraf service is stopped or failed",
+                    details=f"curl output: {out}; probe: {probe_out}",
+                    remediation="Start the Telegraf service using 'Start-Service telegraf' and verify Windows Application Event Log.",
+                )
+            else:
+                return ValidationResult(
+                    domain="Metrics Transmission",
+                    is_valid=False,
+                    message=f"Cloud Proxy port 443 unreachable from Windows endpoint ({collector_address}:443)",
+                    details=f"curl output: {out}; probe: {probe_out}",
+                    remediation=f"Verify network firewall, routing, and security groups between Windows host and Cloud Proxy {collector_address}:443.",
+                )
 
         if http_code == "403" or "403 forbidden" in out.lower():
             return ValidationResult(

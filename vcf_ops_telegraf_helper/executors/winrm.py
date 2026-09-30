@@ -103,8 +103,11 @@ class WinRMExecutor(EndpointExecutor):
         if not res.success:
             raise RuntimeError(f"Failed to initialize file {destination_path}: {res.stderr or res.stdout}")
 
-        # Chunk the payload into safe 32KB pieces to respect WinRM envelope limits
-        chunk_size = 32000
+        # Chunk base64 string so that the total PowerShell command line stays comfortably
+        # below the Windows WinRM limit (8,192 characters).
+        # A chunk of 1,500 base64 chars produces ~3,500 bytes of UTF-16LE script,
+        # which EncodedCommand expands to ~4,700 command-line characters.
+        chunk_size = 1500
         if not b64_str:
             return
 
