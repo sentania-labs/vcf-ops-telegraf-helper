@@ -259,14 +259,15 @@ class TelegrafRenderer:
         uuid: str = "",
         ip: str = "",
         verify_ssl: bool = True,
-        ca_cert_path: str = "/etc/telegraf/telegraf.d/ca.pem",
-        cert_path: str = "/etc/telegraf/telegraf.d/cert.pem",
-        key_path: str = "/etc/telegraf/telegraf.d/key.pem",
+        ca_cert_path: Optional[str] = None,
+        cert_path: Optional[str] = None,
+        key_path: Optional[str] = None,
         vm_mor: Optional[str] = None,
         vc_id: Optional[str] = None,
         mandatory_tags_path: Optional[str] = None,
         telegraf_bin_path: Optional[str] = None,
         is_windows: bool = False,
+        mutual_auth: bool = True,
     ) -> str:
         """Render the Broadcom VCF Operations Cloud Proxy Wavefront HTTP output.
 
@@ -287,6 +288,7 @@ class TelegrafRenderer:
             mandatory_tags_path: Optional path to mandatory_tags script.
             telegraf_bin_path: Optional path to telegraf binary.
             is_windows: True if target OS is Windows.
+            mutual_auth: True if mutual TLS is enforced by Cloud Proxy.
 
         Returns:
             Formatted TOML string for telegraf.d/cloudproxy-http.conf.
@@ -296,6 +298,10 @@ class TelegrafRenderer:
             short_hostname = hostname
         except ValueError:
             short_hostname = hostname.split(".")[0]
+
+        default_ca = "C:\\telegraf\\telegraf.d\\ca.pem" if is_windows else "/etc/telegraf/telegraf.d/ca.pem"
+        default_cert = "C:\\telegraf\\telegraf.d\\cert.pem" if is_windows else "/etc/telegraf/telegraf.d/cert.pem"
+        default_key = "C:\\telegraf\\telegraf.d\\key.pem" if is_windows else "/etc/telegraf/telegraf.d/key.pem"
 
         lines: List[str] = [
             MANAGED_HEADER,
@@ -323,12 +329,16 @@ class TelegrafRenderer:
             f"  insecure_skip_verify = {str(not verify_ssl).lower()}",
         ]
 
-        if ca_cert_path:
-            lines.append(f"  tls_ca = {_escape_toml_str(ca_cert_path)}")
-        if cert_path and key_path:
-            lines.append(f"  tls_cert = {_escape_toml_str(cert_path)}")
-            lines.append(f"  tls_key = {_escape_toml_str(key_path)}")
+        if mutual_auth or (cert_path and key_path):
+            actual_ca = ca_cert_path or default_ca
+            actual_cert = cert_path or default_cert
+            actual_key = key_path or default_key
+            lines.append(f"  tls_ca = {_escape_toml_str(actual_ca)}")
+            lines.append(f"  tls_cert = {_escape_toml_str(actual_cert)}")
+            lines.append(f"  tls_key = {_escape_toml_str(actual_key)}")
             lines.append('  tls_min_version = "TLS13"')
+        elif ca_cert_path:
+            lines.append(f"  tls_ca = {_escape_toml_str(ca_cert_path)}")
 
         lines.extend([
             '  data_format = "wavefront"',

@@ -87,7 +87,10 @@ def test_vcf91_acquire_token():
 
 
 def test_vcf91_prepare_artifacts():
-    """Verify artifacts preparation builds official Broadcom URLs."""
+    """Verify artifacts preparation builds official Broadcom URLs and extracts security artifacts."""
+    import io
+    import zipfile
+
     env = VCFEnvironment(
         name="test",
         url="https://vcf-ops.corp.local",
@@ -96,7 +99,26 @@ def test_vcf91_prepare_artifacts():
         collector=CollectorInfo(address="10.10.10.50"),
         verify_ssl=False,
     )
-    adapter = VCF91OpenTelegrafIntegration(env)
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("ca.cert.pem", "-----BEGIN CERTIFICATE-----\nCA-DATA\n-----END CERTIFICATE-----\n")
+        zf.writestr("client123.cert.pem", "-----BEGIN CERTIFICATE-----\nCLIENT-CERT\n-----END CERTIFICATE-----\n")
+        zf.writestr("client123.key", "-----BEGIN RSA PRIVATE KEY-----\nCLIENT-KEY\n-----END RSA PRIVATE KEY-----\n")
+        zf.writestr("master.pub", "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQC master-pub\n")
+        zf.writestr("IP", "10.10.10.50\n")
+        zf.writestr("MUTUAL_AUTHENTICATION", "true\n")
+    zip_bytes = buf.getvalue()
+
+    mock_session = MagicMock(spec=requests.Session)
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.content = zip_bytes
+    mock_resp.text = "#!/bin/bash\n# tag script"
+    mock_resp.json.return_value = {"collectorGroup": [{"name": "Default Group", "id": "1"}]}
+    mock_session.get.return_value = mock_resp
+
+    adapter = VCF91OpenTelegrafIntegration(env, session=mock_session)
     artifacts = adapter.prepare_telegraf_integration()
 
     assert artifacts.token == "existing-token-999"
@@ -104,6 +126,129 @@ def test_vcf91_prepare_artifacts():
     assert artifacts.script_url == "https://10.10.10.50/downloads/salt/telegraf-utils.sh"
     assert artifacts.output_url == "https://10.10.10.50/opensource/default/metric"
     assert artifacts.skip_certificate is True
+    assert "CA-DATA" in (artifacts.ca_cert_content or "")
+    assert "CLIENT-CERT" in (artifacts.client_cert_content or "")
+    assert "CLIENT-KEY" in (artifacts.client_key_content or "")
+    assert "master-pub" in (artifacts.master_pub_content or "")
+    assert artifacts.vip_content == "10.10.10.50"
+    assert artifacts.collector_group == "Default Group"
+    assert artifacts.mutual_auth is True
+
+
+def test_vcf91_resolve_collector_group_name():
+    """Verify resolve_collector_group_name matches collector IP to its collector group."""
+    env = VCFEnvironment(
+        name="test",
+        url="https://vcf-ops.corp.local",
+        username="admin",
+        token="existing-token-999",
+        collector=CollectorInfo(address="172.27.8.54"),
+    )
+    mock_session = MagicMock(spec=requests.Session)
+
+    def mock_get(url, **kwargs):
+        resp = MagicMock()
+        resp.status_code = 200
+        if "collectorGroups" in url or "collectorgroups" in url:
+            resp.json.return_value = {
+                "collectorGroup": [
+                    {"name": "Sentania-CP-Group", "id": "grp-1", "collectorId": ["col-1"]},
+                    {"name": "Other-Group", "id": "grp-2", "collectorId": ["col-2"]},
+                ]
+            }
+        elif "collectors" in url:
+            resp.json.return_value = {
+                "collector": [
+                    {"id": "col-1", "name": "cp-01", "ipAddress": "172.27.8.54", "collectorGroupId": "grp-1"},
+                    {"id": "col-2", "name": "cp-02", "ipAddress": "10.10.10.20", "collectorGroupId": "grp-2"},
+                ]
+            }
+        return resp
+
+    mock_session.get.side_effect = mock_get
+    adapter = VCF91OpenTelegrafIntegration(env, session=mock_session)
+
+    resolved = adapter.resolve_collector_group_name("172.27.8.54")
+    assert resolved == "Sentania-CP-Group"
+
+
+def test_vcf91_resolve_collector_group_name_by_vip():
+    """Verify resolve_collector_group_name matches HA VIP on collector group."""
+    env = VCFEnvironment(
+        name="test",
+        url="https://vcf-ops.corp.local",
+        username="admin",
+        token="existing-token-999",
+        collector=CollectorInfo(address="172.27.8.100"),
+    )
+    mock_session = MagicMock(spec=requests.Session)
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.json.return_value = {
+        "collectorGroup": [
+            {"name": "HA-VIP-Group", "id": "grp-vip", "vip": "172.27.8.100"},
+        ]
+    }
+    mock_session.get.return_value = mock_resp
+    adapter = VCF91OpenTelegrafIntegration(env, session=mock_session)
+
+    assert adapter.resolve_collector_group_name("172.27.8.100") == "HA-VIP-Group"
+
+
+def test_vcf91_resolve_collector_group_name_explicit_override():
+    """Verify resolve_collector_group_name respects explicit collector name without API calls."""
+    env = VCFEnvironment(
+        name="test",
+        url="https://vcf-ops.corp.local",
+        username="admin",
+        token="existing-token-999",
+        collector=CollectorInfo(address="172.27.8.54", name="ExplicitGroupName"),
+    )
+    mock_session = MagicMock(spec=requests.Session)
+    adapter = VCF91OpenTelegrafIntegration(env, session=mock_session)
+
+    assert adapter.resolve_collector_group_name("172.27.8.54") == "ExplicitGroupName"
+    mock_session.get.assert_not_called()
+
+
+def test_vcf91_fetch_client_certificate_bundle_handles_varied_cert_filenames():
+    """Verify bundle parsing correctly identifies client_certificate.pem and does not confuse with CA cert."""
+    import io
+    import zipfile
+
+    env = VCFEnvironment(
+        name="test",
+        url="https://vcf-ops.corp.local",
+        username="admin",
+        token="token-123",
+        collector=CollectorInfo(address="10.10.10.50"),
+    )
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("ca.cert.pem", "CA-CERT-CONTENT\n")
+        # Filename has 'certificate' which contains 'ca' as a substring
+        zf.writestr("client_certificate.pem", "CLIENT-CERT-CONTENT\n")
+        zf.writestr("client.key", "KEY-CONTENT\n")
+        zf.writestr("master.pub", "PUBKEY\n")
+        zf.writestr("IP", "10.10.10.50\n")
+        zf.writestr("MUTUAL_AUTHENTICATION", "true\n")
+
+    mock_session = MagicMock(spec=requests.Session)
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.content = buf.getvalue()
+    mock_session.get.return_value = mock_resp
+
+    adapter = VCF91OpenTelegrafIntegration(env, session=mock_session)
+    bundle = adapter.fetch_client_certificate_bundle("TestGroup", "client1")
+
+    assert bundle["ca_cert"] == "CA-CERT-CONTENT\n"
+    assert bundle["client_cert"] == "CLIENT-CERT-CONTENT\n"
+    assert bundle["client_key"] == "KEY-CONTENT\n"
+    assert bundle["master_pub"] == "PUBKEY\n"
+    assert bundle["vip"] == "10.10.10.50"
+    assert bundle["mutual_auth"] is True
 
 
 def test_vcf91_detect_managed_vm_found():

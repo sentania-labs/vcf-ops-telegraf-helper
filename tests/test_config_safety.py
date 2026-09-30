@@ -52,10 +52,11 @@ def test_managed_fragment_isolation():
     assert "/etc/telegraf/telegraf.d/vcf-helper-system.conf" in executor.uploaded_files
     assert "/etc/telegraf/telegraf.d/cloudproxy-http.conf" in executor.uploaded_files
 
-    # Confirm pre-existing customer files remain intact and untouched
+    # Confirm pre-existing customer files remain intact, and base config preserved in .orig
     assert executor.uploaded_files["/etc/telegraf/telegraf.d/custom-nginx.conf"] == "[[inputs.nginx]]\n"
     assert executor.uploaded_files["/etc/telegraf/telegraf.d/custom-postgres.conf"] == "[[inputs.postgresql]]\n"
-    assert executor.uploaded_files["/etc/telegraf/telegraf.conf"] == "[agent]\n  interval = '10s'\n"
+    assert executor.uploaded_files["/etc/telegraf/telegraf.conf.orig"] == "[agent]\n  interval = '10s'\n"
+    assert "Base Telegraf agent configuration stub" in executor.uploaded_files["/etc/telegraf/telegraf.conf"]
 
 
 def test_workflow_application_idempotency():

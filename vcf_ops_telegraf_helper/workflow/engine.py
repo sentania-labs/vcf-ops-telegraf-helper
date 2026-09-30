@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import shlex
 import time
 from typing import Dict, List, Optional
 
@@ -331,6 +333,7 @@ class ConfigureEndpointWorkflow:
             )
             vm_mor_val = self.artifacts.vm_mor if self.artifacts else None
             vc_id_val = self.artifacts.vc_id if self.artifacts else None
+            mutual_auth = self.artifacts.mutual_auth if self.artifacts else True
 
             has_ca = bool(self.artifacts and (self.artifacts.ca_cert_content or self.env.ca_cert_path))
             has_cert = bool(self.artifacts and self.artifacts.client_cert_content)
@@ -353,6 +356,7 @@ class ConfigureEndpointWorkflow:
                 mandatory_tags_path=mandatory_script,
                 telegraf_bin_path=telegraf_bin,
                 is_windows=is_win,
+                mutual_auth=mutual_auth,
             )
 
             # 3. Render clean base stub to prevent duplicate metric collection
@@ -633,38 +637,68 @@ class ConfigureEndpointWorkflow:
                 self.executor.upload(self.artifacts.client_key_content, key_dest, mode=0o640)
                 self.managed_files.append(key_dest)
 
+            # Upload master.pub, IP, and MUTUAL_AUTHENTICATION security artifacts
+            if self.artifacts and self.artifacts.master_pub_content:
+                pub_dest = f"{config_dir}\\master.pub" if is_win else f"{config_dir}/master.pub"
+                self.executor.upload(self.artifacts.master_pub_content, pub_dest, mode=0o644)
+                self.managed_files.append(pub_dest)
+
+            ip_content = (self.artifacts.vip_content or self.artifacts.collector_address) if self.artifacts else self.env.collector.address
+            ip_dest = f"{config_dir}\\IP" if is_win else f"{config_dir}/IP"
+            self.executor.upload(f"{ip_content.strip()}\n", ip_dest, mode=0o644)
+            self.managed_files.append(ip_dest)
+
+            ma_val = "true\n" if (self.artifacts and self.artifacts.mutual_auth) else "false\n"
+            ma_dest = f"{config_dir}\\MUTUAL_AUTHENTICATION" if is_win else f"{config_dir}/MUTUAL_AUTHENTICATION"
+            self.executor.upload(ma_val, ma_dest, mode=0o644)
+            self.managed_files.append(ma_dest)
+
             # Upload mandatory_tags script if present
             if self.artifacts and self.artifacts.mandatory_tags_content:
                 tags_dest = f"{config_dir}\\mandatory_tags.bat" if is_win else f"{config_dir}/mandatory_tags.sh"
                 self.executor.upload(self.artifacts.mandatory_tags_content, tags_dest, mode=0o755)
                 self.managed_files.append(tags_dest)
 
-            # Deploy clean base stub to main telegraf.conf when freshly installed to prevent duplicate inputs,
-            # while preserving pre-existing customer configuration files if present
+            # Replace unmanaged stock telegraf.conf with clean base stub to eliminate duplicate inputs,
+            # while preserving the original configuration in telegraf.conf.orig
             main_cfg = (
                 self.discovery.main_config_path
                 if self.discovery
                 else ("C:\\telegraf\\telegraf.conf" if is_win else "/etc/telegraf/telegraf.conf")
             )
-            should_replace_base = (
-                not self.executor.file_exists(main_cfg)
-                or (self.discovery and not self.discovery.telegraf_installed)
-            )
-            if should_replace_base and self.base_stub_content:
+            if self.base_stub_content:
                 if self.executor.file_exists(main_cfg) and not self.executor.file_exists(f"{main_cfg}.orig"):
-                    if is_win:
-                        self.executor.execute(f"Copy-Item -Path '{main_cfg}' -Destination '{main_cfg}.orig' -Force")
-                    else:
-                        self.executor.execute(f"cp {main_cfg} {main_cfg}.orig")
+                    try:
+                        content_to_backup = self.executor.download(main_cfg)
+                        if "Managed by VCF Operations Open Telegraf Helper" not in content_to_backup:
+                            self.executor.upload(content_to_backup, f"{main_cfg}.orig", mode=0o644)
+                    except Exception:
+                        if is_win:
+                            escaped_cfg = main_cfg.replace("'", "''")
+                            self.executor.execute(f"Copy-Item -Path '{escaped_cfg}' -Destination '{escaped_cfg}.orig' -Force")
+                        else:
+                            self.executor.execute(f"cp {shlex.quote(main_cfg)} {shlex.quote(f'{main_cfg}.orig')}")
                 self.executor.upload(self.base_stub_content, main_cfg, mode=0o644)
+                if main_cfg not in self.managed_files:
+                    self.managed_files.append(main_cfg)
 
             # Enforce remote Linux permissions
             if not is_win:
-                self.executor.execute("chown -R root:telegraf /etc/telegraf 2>/dev/null || true")
-                self.executor.execute("chmod 755 /etc/telegraf /etc/telegraf/telegraf.d 2>/dev/null || true")
-                if self.artifacts and self.artifacts.client_key_content:
-                    self.executor.execute(f"chown root:telegraf {config_dir}/key.pem 2>/dev/null || true")
-                    self.executor.execute(f"chmod 640 {config_dir}/key.pem 2>/dev/null || true")
+                parent_dir = str(os.path.dirname(config_dir)) or "/etc/telegraf"
+                self.executor.execute(f"chown -R root:telegraf {shlex.quote(parent_dir)} 2>/dev/null || true")
+                self.executor.execute(f"chmod 755 {shlex.quote(parent_dir)} {shlex.quote(config_dir)} 2>/dev/null || true")
+                # Secure configuration files and certificates (do NOT include key.pem in chmod 644!)
+                self.executor.execute(
+                    f"chmod 644 {shlex.quote(main_cfg)} {shlex.quote(config_dir)}/*.conf "
+                    f"{shlex.quote(config_dir)}/ca.pem {shlex.quote(config_dir)}/cert.pem "
+                    f"{shlex.quote(config_dir)}/master.pub {shlex.quote(config_dir)}/IP "
+                    f"{shlex.quote(config_dir)}/MUTUAL_AUTHENTICATION 2>/dev/null || true"
+                )
+                # Client private key must NEVER be world-readable: 0640 with root:telegraf
+                self.executor.execute(f"chown root:telegraf {shlex.quote(config_dir)}/key.pem 2>/dev/null || true")
+                self.executor.execute(f"chmod 640 {shlex.quote(config_dir)}/key.pem 2>/dev/null || true")
+                if self.artifacts and self.artifacts.mandatory_tags_content:
+                    self.executor.execute(f"chmod 755 {shlex.quote(config_dir)}/mandatory_tags.sh 2>/dev/null || true")
 
             if hasattr(self.executor, "generate_deploy_script"):
                 telegraf_bin = (
@@ -833,14 +867,46 @@ class ConfigureEndpointWorkflow:
                     "PASS" if test_val.is_valid else "FAIL"
                 )
 
-                # 5. Output transmission check (verify no 403 Forbidden or network rejection in recent log)
-                transmission_status = "PASS"
-                if not is_win:
-                    journal_res = self.executor.execute('journalctl -u telegraf --since "-2 minutes" --no-pager 2>/dev/null', timeout=5)
+                # 5. Output transmission check (active mTLS metric probe and service log inspection)
+                metric_headers = {
+                    "Content-Type": "text/plain; charset=utf-8",
+                }
+                ep_hostname = self.discovery.hostname if (self.discovery and self.discovery.hostname) else self.target.hostname
+                short_host = ep_hostname.split(".")[0] if "." in ep_hostname else ep_hostname
+                if self.artifacts and self.artifacts.is_managed_vm and self.artifacts.vm_mor and self.artifacts.vc_id:
+                    metric_headers["vmId"] = self.artifacts.vm_mor
+                    metric_headers["vcid"] = self.artifacts.vc_id
+                    metric_headers["hostname"] = short_host
+                    metric_headers["uuid"] = ""
+                else:
+                    metric_headers["uuid"] = (self.discovery.host_uuid if self.discovery else "") or ""
+                    metric_headers["ip"] = self.target.hostname
+                    metric_headers["hostname"] = short_host
+
+                collector_addr = self.artifacts.collector_address if self.artifacts else self.target.hostname
+                cert_file = f"{config_dir}\\cert.pem" if is_win else f"{config_dir}/cert.pem"
+                key_file = f"{config_dir}\\key.pem" if is_win else f"{config_dir}/key.pem"
+                ca_file = f"{config_dir}\\ca.pem" if is_win else f"{config_dir}/ca.pem"
+
+                probe_val = Validator.validate_cloudproxy_mtls_metric_probe(
+                    executor=self.executor,
+                    collector_address=collector_addr,
+                    cert_path=cert_file,
+                    key_path=key_file,
+                    ca_cert_path=ca_file,
+                    headers=metric_headers,
+                    hostname=short_host,
+                    is_windows=is_win,
+                    verify_ssl=self.env.verify_ssl,
+                )
+                self.verifications["Metrics transmission"] = "PASS" if probe_val.is_valid else f"FAIL ({probe_val.message})"
+
+                # Also inspect recent service log for output errors on Linux
+                if not is_win and probe_val.is_valid:
+                    journal_res = self.executor.execute('journalctl -u telegraf --since "-1 minute" --no-pager 2>/dev/null', timeout=5)
                     if journal_res.success and journal_res.stdout:
                         if "received status code: 403" in journal_res.stdout or "Error writing to outputs.http" in journal_res.stdout:
-                            transmission_status = "FAIL (HTTP 403 Forbidden: collector rejected request)"
-                self.verifications["Metrics transmission"] = transmission_status
+                            self.verifications["Metrics transmission"] = "FAIL (HTTP 403 Forbidden in telegraf service log)"
 
                 # 6. Ingestion in VCF Ops
                 ingestion_status = self.adapter.verify_ingestion(self.target.hostname)
@@ -851,13 +917,22 @@ class ConfigureEndpointWorkflow:
                 self.verifications["Metrics transmission"] = "SKIPPED"
                 self.verifications["VCF Ops ingestion"] = "SKIPPED"
 
+            failed_checks = [k for k, v in self.verifications.items() if str(v).startswith("FAIL")]
             dur = int((time.monotonic() - start) * 1000)
-            res = StageResult(
-                stage=WorkflowStage.VERIFY,
-                status=StageStatus.PASS,
-                message="Completed all verification checks",
-                duration_ms=dur,
-            )
+            if failed_checks:
+                res = StageResult(
+                    stage=WorkflowStage.VERIFY,
+                    status=StageStatus.FAIL,
+                    message=f"Verification failed on: {', '.join(failed_checks)}",
+                    duration_ms=dur,
+                )
+            else:
+                res = StageResult(
+                    stage=WorkflowStage.VERIFY,
+                    status=StageStatus.PASS,
+                    message="Completed all verification checks",
+                    duration_ms=dur,
+                )
         except Exception as e:
             dur = int((time.monotonic() - start) * 1000)
             res = StageResult(
