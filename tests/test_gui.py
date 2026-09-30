@@ -579,6 +579,8 @@ def test_main_window_telegraf_version_selection(qapp, tmp_path):
     assert hasattr(window, "ep_version_combo")
     assert window.ep_version_combo.isEditable() is True
     assert window.ep_version_combo.count() >= 4
+    assert window.ep_version_combo.minimumWidth() >= 380
+    assert window.ep_version_combo.lineEdit().cursorPosition() == 0
     assert window._get_selected_telegraf_version() == "1.40.1"
 
     # Toggle auto-install disables combo

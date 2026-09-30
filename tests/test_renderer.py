@@ -274,5 +274,40 @@ def test_render_vcf_output_emits_five_tls_lines_when_mutual_auth_true():
     assert http_out["tls_min_version"] == "TLS13"
 
 
+def test_render_vcf_output_multiline_banner_hostname_valid_toml():
+    """Verify hostname containing banner text or newlines does not generate invalid TOML."""
+    dirty_hostname = "Authorized uses only.\nWelcome to node01\nnode01.corp.local\n"
+    rendered = TelegrafRenderer.render_vcf_output(
+        collector_address="172.27.8.54",
+        hostname=dirty_hostname,
+    )
+    parsed = tomllib.loads(rendered)
+    assert parsed["agent"]["hostname"] == "node01"
+    assert parsed["outputs"]["http"][0]["headers"]["hostname"] == "node01"
+
+
+def test_render_win_perf_print_valid_and_escaping():
+    """Verify WinPerfCounters respects print_valid and escapes process instances."""
+    from vcf_ops_telegraf_helper.models.monitoring import (
+        MonitoringConfig,
+        WinPerfCountersInputConfig,
+    )
+    cfg = MonitoringConfig(
+        win_perf_counters=WinPerfCountersInputConfig(
+            enabled=True,
+            print_valid=False,
+            process_instances=["_Total", "telegraf", 'custom"instance'],
+        )
+    )
+    rendered = TelegrafRenderer.render_system_inputs(cfg)
+    assert "PrintValid = false" in rendered
+    parsed = tomllib.loads(rendered)
+    win_perf = parsed["inputs"]["win_perf_counters"][0]
+    assert win_perf["PrintValid"] is False
+    # Check that the object with Measurement win_process has the escaped instance
+    proc_obj = next(o for o in win_perf["object"] if o.get("Measurement") == "win_process")
+    assert 'custom"instance' in proc_obj["Instances"]
+
+
 
 

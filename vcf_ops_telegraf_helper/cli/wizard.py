@@ -30,6 +30,10 @@ from vcf_ops_telegraf_helper.models.monitoring import (
     MemInputConfig,
     MonitoringConfig,
     NetInputConfig,
+    SwapInputConfig,
+    SystemInputConfig,
+    WinPerfCountersInputConfig,
+    WinServicesInputConfig,
 )
 from vcf_ops_telegraf_helper.models.vcf import CollectorInfo, VCFEnvironment
 from vcf_ops_telegraf_helper.models.workflow import DeploymentMode, WorkflowOptions
@@ -158,17 +162,39 @@ def run_wizard(console: Optional[Console] = None) -> None:
     # Step 3: Monitoring Selection
     # -------------------------------------------------------------------------
     con.print("\n[bold blue]Step 3: Monitoring Selection[/bold blue]")
-    enable_cpu = Confirm.ask("Enable CPU monitoring?", default=True, console=con)
-    enable_mem = Confirm.ask("Enable Memory monitoring?", default=True, console=con)
-    enable_disk = Confirm.ask("Enable Disk monitoring?", default=True, console=con)
-    enable_net = Confirm.ask("Enable Network monitoring?", default=True, console=con)
+    is_win = target.os_family == OSFamily.WINDOWS
+    if is_win:
+        enable_win_perf = Confirm.ask("Enable Windows Performance Counters (Broadcom template)?", default=True, console=con)
+        enable_win_svc = Confirm.ask("Enable Windows Services monitoring?", default=True, console=con)
 
-    monitoring = MonitoringConfig(
-        cpu=CpuInputConfig(enabled=enable_cpu),
-        mem=MemInputConfig(enabled=enable_mem),
-        disk=DiskInputConfig(enabled=enable_disk),
-        net=NetInputConfig(enabled=enable_net),
-    )
+        monitoring = MonitoringConfig(
+            cpu=CpuInputConfig(enabled=False),
+            mem=MemInputConfig(enabled=False),
+            disk=DiskInputConfig(enabled=False),
+            net=NetInputConfig(enabled=False),
+            system=SystemInputConfig(enabled=False),
+            swap=SwapInputConfig(enabled=False),
+            win_perf_counters=WinPerfCountersInputConfig(enabled=enable_win_perf),
+            win_services=WinServicesInputConfig(enabled=enable_win_svc, service_names=["*"]),
+        )
+    else:
+        enable_cpu = Confirm.ask("Enable CPU monitoring?", default=True, console=con)
+        enable_mem = Confirm.ask("Enable Memory monitoring?", default=True, console=con)
+        enable_disk = Confirm.ask("Enable Disk monitoring?", default=True, console=con)
+        enable_net = Confirm.ask("Enable Network monitoring?", default=True, console=con)
+        enable_sys = Confirm.ask("Enable System load and uptime monitoring?", default=True, console=con)
+        enable_swap = Confirm.ask("Enable Swap monitoring?", default=True, console=con)
+
+        monitoring = MonitoringConfig(
+            cpu=CpuInputConfig(enabled=enable_cpu),
+            mem=MemInputConfig(enabled=enable_mem),
+            disk=DiskInputConfig(enabled=enable_disk),
+            net=NetInputConfig(enabled=enable_net),
+            system=SystemInputConfig(enabled=enable_sys),
+            swap=SwapInputConfig(enabled=enable_swap),
+            win_perf_counters=WinPerfCountersInputConfig(enabled=False),
+            win_services=WinServicesInputConfig(enabled=False),
+        )
 
     # -------------------------------------------------------------------------
     # Step 4: Review
@@ -177,18 +203,28 @@ def run_wizard(console: Optional[Console] = None) -> None:
     system_toml = TelegrafRenderer.render_system_inputs(monitoring)
     vcf_toml = TelegrafRenderer.render_vcf_output(
         collector_address=collector_ip,
-        hostname=target_host,
+        hostname=target.registered_hostname or target_host,
         ip=target_host,
         verify_ssl=verify_ssl,
+        is_windows=is_win,
     )
 
-    planned_cmds = [
-        "mkdir -p /etc/telegraf/telegraf.d",
-        "upload vcf-helper-system.conf -> /etc/telegraf/telegraf.d/vcf-helper-system.conf",
-        "upload cloudproxy-http.conf -> /etc/telegraf/telegraf.d/cloudproxy-http.conf",
-        "/usr/bin/telegraf --test --config /etc/telegraf/telegraf.conf --config-directory /etc/telegraf/telegraf.d",
-        "systemctl restart telegraf",
-    ]
+    if is_win:
+        planned_cmds = [
+            "mkdir C:\\telegraf\\telegraf.d",
+            "upload vcf-helper-system.conf -> C:\\telegraf\\telegraf.d\\vcf-helper-system.conf",
+            "upload cloudproxy-http.conf -> C:\\telegraf\\telegraf.d\\cloudproxy-http.conf",
+            "& 'C:\\telegraf\\telegraf.exe' --test --config 'C:\\telegraf\\telegraf.conf' --config-directory 'C:\\telegraf\\telegraf.d'",
+            "Restart-Service telegraf -Force",
+        ]
+    else:
+        planned_cmds = [
+            "mkdir -p /etc/telegraf/telegraf.d",
+            "upload vcf-helper-system.conf -> /etc/telegraf/telegraf.d/vcf-helper-system.conf",
+            "upload cloudproxy-http.conf -> /etc/telegraf/telegraf.d/cloudproxy-http.conf",
+            "/usr/bin/telegraf --test --config /etc/telegraf/telegraf.conf --config-directory /etc/telegraf/telegraf.d",
+            "systemctl restart telegraf",
+        ]
     display_preview(con, target_host, collector_ip, system_toml, vcf_toml, planned_cmds)
 
     proceed = Confirm.ask("\nProceed with execution?", default=True, console=con)

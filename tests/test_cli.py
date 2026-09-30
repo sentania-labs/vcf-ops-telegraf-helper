@@ -8,6 +8,7 @@ from unittest.mock import patch
 from click.testing import CliRunner
 
 from vcf_ops_telegraf_helper.cli.main import _is_windows_double_click, cli
+from vcf_ops_telegraf_helper.executors.mock import MockExecutor
 
 
 def test_cli_help_runner():
@@ -123,4 +124,188 @@ def test_cli_run_with_port_and_token():
     )
     assert result.exit_code == 0
     assert "Operational Verification Checklist" in result.output
+
+
+def test_cli_opt_in_plugin_baseline_linux():
+    """Verify render subcommand defaults to Linux baseline without Windows plugins."""
+    runner = CliRunner()
+    result = runner.invoke(cli, ["render", "--collector", "10.10.10.50", "--target-host", "web01.local"])
+    assert result.exit_code == 0
+    assert "[[inputs.cpu]]" in result.output
+    assert "[[inputs.mem]]" in result.output
+    assert "[[inputs.disk]]" in result.output
+    assert "[[inputs.net]]" in result.output
+    assert "[[inputs.system]]" in result.output
+    assert "[[inputs.swap]]" in result.output
+    assert "[[inputs.win_perf_counters]]" not in result.output
+
+
+def test_cli_opt_in_plugin_baseline_windows():
+    """Verify run subcommand with Windows WinRM connection defaults to Windows baseline."""
+    with patch("vcf_ops_telegraf_helper.cli.main.WinRMExecutor") as mock_winrm:
+        mock_winrm.return_value = MockExecutor(connected=True, telegraf_installed=True)
+        runner = CliRunner()
+        result = runner.invoke(
+            cli,
+            [
+                "run",
+                "--vcf-url",
+                "https://vcf.local",
+                "--mock-vcf",
+                "--collector",
+                "10.10.10.50",
+                "--target-host",
+                "172.16.3.80",
+                "--connection",
+                "winrm",
+                "--preview",
+            ],
+        )
+        assert result.exit_code == 0
+        assert "[[inputs.win_perf_counters]]" in result.output
+        assert "[[inputs.win_services]]" in result.output
+        assert "[[inputs.cpu]]" not in result.output
+        assert "[[inputs.mem]]" not in result.output
+        assert "[[inputs.disk]]" not in result.output
+        assert "[[inputs.net]]" not in result.output
+
+
+def test_cli_opt_in_single_flag_win_perf():
+    """Verify passing --win-perf enables only win_perf without requiring --no-cpu flags."""
+    runner = CliRunner()
+    result = runner.invoke(cli, ["render", "--win-perf"])
+    assert result.exit_code == 0
+    assert "[[inputs.win_perf_counters]]" in result.output
+    assert "[[inputs.cpu]]" not in result.output
+    assert "[[inputs.mem]]" not in result.output
+    assert "[[inputs.disk]]" not in result.output
+    assert "[[inputs.net]]" not in result.output
+
+
+def test_cli_explicit_hostname_override():
+    """Verify --hostname overrides the registered hostname in VCF Operations output."""
+    with patch("vcf_ops_telegraf_helper.cli.main.WinRMExecutor") as mock_winrm:
+        mock_winrm.return_value = MockExecutor(connected=True, telegraf_installed=True)
+        runner = CliRunner()
+        result = runner.invoke(
+            cli,
+            [
+                "run",
+                "--vcf-url",
+                "https://vcf.local",
+                "--mock-vcf",
+                "--collector",
+                "10.10.10.50",
+                "--target-host",
+                "172.16.3.80",
+                "--hostname",
+                "mssqldemo",
+                "--connection",
+                "winrm",
+                "--preview",
+            ],
+        )
+        assert result.exit_code == 0
+        assert 'hostname = "mssqldemo"' in result.output
+
+
+def test_cli_render_no_swap_preserves_other_linux_baseline():
+    """Verify render --no-swap keeps cpu, mem, disk, net, and system enabled."""
+    runner = CliRunner()
+    result = runner.invoke(cli, ["render", "--no-swap"])
+    assert result.exit_code == 0
+    assert "[[inputs.cpu]]" in result.output
+    assert "[[inputs.mem]]" in result.output
+    assert "[[inputs.disk]]" in result.output
+    assert "[[inputs.net]]" in result.output
+    assert "[[inputs.system]]" in result.output
+    assert "[[inputs.swap]]" not in result.output
+
+
+def test_cli_render_os_windows_baseline():
+    """Verify render --os windows emits Windows Perfmon and Services without Linux plugins."""
+    runner = CliRunner()
+    result = runner.invoke(cli, ["render", "--os", "windows"])
+    assert result.exit_code == 0
+    assert "[[inputs.win_perf_counters]]" in result.output
+    assert "[[inputs.win_services]]" in result.output
+    assert "[[inputs.cpu]]" not in result.output
+    assert "[[inputs.mem]]" not in result.output
+    assert "[[inputs.disk]]" not in result.output
+    assert "[[inputs.net]]" not in result.output
+
+
+def test_cli_workload_flag_supplements_os_baseline():
+    """Verify specifying a workload flag like --postgres does not disable the OS baseline."""
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        [
+            "run",
+            "--vcf-url",
+            "https://vcf.local",
+            "--mock-vcf",
+            "--collector",
+            "10.10.10.50",
+            "--target-host",
+            "db01.local",
+            "--connection",
+            "mock",
+            "--postgres",
+            "host=127.0.0.1 user=postgres sslmode=disable",
+            "--preview",
+        ],
+    )
+    assert result.exit_code == 0
+    assert "[[inputs.cpu]]" in result.output
+    assert "[[inputs.mem]]" in result.output
+    assert "[[inputs.postgresql]]" in result.output
+
+
+def test_wizard_windows_monitoring_flow():
+    """Verify interactive wizard with Windows target selects WinPerf baseline and Windows commands."""
+    from vcf_ops_telegraf_helper.cli.wizard import run_wizard
+    from unittest.mock import MagicMock
+
+    prompt_answers = [
+        "https://vcf-ops.local",  # vcf_url
+        "admin",                  # vcf_user
+        "password",               # vcf_pass
+        "10.10.10.50",            # collector_ip
+        "172.16.3.80",            # target_host
+        "winrm",                  # conn_choice
+        "Administrator",          # winrm user
+        "password",               # winrm pass
+        "1.40.1",                 # telegraf_ver
+    ]
+
+    confirm_answers = [
+        False,  # verify_ssl
+        False,  # winrm_ssl
+        True,   # auto_install
+        True,   # enable_win_perf
+        True,   # enable_win_svc
+        False,  # proceed (abort before execution)
+    ]
+
+    mock_console = MagicMock()
+    with patch("rich.prompt.Prompt.ask", side_effect=prompt_answers), \
+         patch("rich.prompt.Confirm.ask", side_effect=confirm_answers), \
+         patch("vcf_ops_telegraf_helper.cli.wizard.display_preview") as mock_preview, \
+         patch("vcf_ops_telegraf_helper.adapters.mock.MockVCFOpsIntegration.validate_connection", return_value=True), \
+         patch("vcf_ops_telegraf_helper.cli.wizard.get_adapter") as mock_get_adapter:
+
+        mock_adapter = MagicMock()
+        mock_adapter.validate_connection.return_value = True
+        mock_adapter.detect_version.return_value = "9.1.0"
+        mock_get_adapter.return_value = mock_adapter
+
+        run_wizard(console=mock_console)
+
+        mock_preview.assert_called_once()
+        _, _, _, sys_toml, vcf_toml, planned = mock_preview.call_args[0]
+        assert "[[inputs.win_perf_counters]]" in sys_toml
+        assert "[[inputs.win_services]]" in sys_toml
+        assert "[[inputs.cpu]]" not in sys_toml
+        assert "Restart-Service telegraf -Force" in planned
 

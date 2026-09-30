@@ -238,6 +238,17 @@ QComboBox:disabled {{
     border-color: {t["line"]};
 }}
 
+QComboBox:editable {{
+    background-color: {t["surface-sunken"]};
+}}
+
+QComboBox QLineEdit {{
+    border: none;
+    background: transparent;
+    padding: 0px 4px;
+    color: {t["ink"]};
+}}
+
 QComboBox::drop-down {{
     subcontrol-origin: padding;
     subcontrol-position: top right;

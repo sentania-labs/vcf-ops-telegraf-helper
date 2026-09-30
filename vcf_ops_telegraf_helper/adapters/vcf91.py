@@ -538,11 +538,12 @@ class VCF91OpenTelegrafIntegration(VCFOpsIntegration):
 
         # 1. Detect if target is a managed VM in VCF Operations
         is_managed = False
+        vm_name = None
         vm_mor = None
         vc_id = None
 
         if target_ip or target_hostname:
-            is_managed, _, vc_id, vm_mor = self.detect_managed_vm(target_ip, target_hostname)
+            is_managed, vm_name, vc_id, vm_mor = self.detect_managed_vm(target_ip, target_hostname)
 
         # 2. Determine clientId for certificate request
         if is_managed and vc_id and vm_mor:
@@ -619,6 +620,7 @@ class VCF91OpenTelegrafIntegration(VCFOpsIntegration):
             collector_group=collector_group,
             mandatory_tags_content=mandatory_tags_content,
             is_managed_vm=is_managed,
+            vm_name=vm_name,
             vm_mor=vm_mor,
             vc_id=vc_id,
             client_id=client_id,

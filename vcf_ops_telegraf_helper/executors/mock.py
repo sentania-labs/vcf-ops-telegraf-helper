@@ -53,13 +53,27 @@ class MockExecutor(EndpointExecutor):
                 command=command,
             )
 
+        # Target inspection commands (Windows)
+        if "$env:computername" in cmd_lower:
+            return CommandResult(exit_code=0, stdout="WIN-HOST\n", command=command)
+        if "win32_operatingsystem" in cmd_lower:
+            return CommandResult(exit_code=0, stdout="Microsoft Windows Server 2022 Datacenter\n", command=command)
+        if "win32_computersystemproduct" in cmd_lower:
+            return CommandResult(exit_code=0, stdout="mock-win-uuid\n", command=command)
+        if "get-netipaddress" in cmd_lower:
+            return CommandResult(exit_code=0, stdout="172.16.3.80\n", command=command)
+
         # Telegraf detection commands
+        if "test-path" in cmd_lower:
+            out = "True\n" if self.telegraf_installed else "False\n"
+            return CommandResult(exit_code=0, stdout=out, command=command)
+
         if "which telegraf" in cmd_lower:
             if self.telegraf_installed:
                 return CommandResult(exit_code=0, stdout="/usr/bin/telegraf\n", command=command)
             return CommandResult(exit_code=1, stderr="telegraf not found\n", command=command)
 
-        if "telegraf version" in cmd_lower or "telegraf --version" in cmd_lower:
+        if "telegraf version" in cmd_lower or "telegraf --version" in cmd_lower or "telegraf.exe' version" in cmd_lower:
             if self.telegraf_installed:
                 return CommandResult(exit_code=0, stdout=f"{self.telegraf_version}\n", command=command)
             return CommandResult(exit_code=127, stderr="command not found\n", command=command)
@@ -115,8 +129,16 @@ class MockExecutor(EndpointExecutor):
             return CommandResult(exit_code=0, stdout="", command=command)
 
         # Network connectivity / Collector check
-        if "curl" in cmd_lower or "nc" in cmd_lower or "/dev/tcp" in cmd_lower:
+        if (
+            "curl" in cmd_lower
+            or "nc" in cmd_lower
+            or "/dev/tcp" in cmd_lower
+            or "tcpclient" in cmd_lower
+            or "test-netconnection" in cmd_lower
+        ):
             if self.collector_reachable:
+                if "tcpclient" in cmd_lower or "test-netconnection" in cmd_lower:
+                    return CommandResult(exit_code=0, stdout="True\n", command=command)
                 if "%{http_code}" in cmd_lower or "-w" in cmd_lower:
                     return CommandResult(exit_code=0, stdout="200\n", command=command)
                 return CommandResult(exit_code=0, stdout="HTTP/1.1 200 OK\n", command=command)

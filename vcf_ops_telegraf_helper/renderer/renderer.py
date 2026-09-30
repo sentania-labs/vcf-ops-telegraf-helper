@@ -128,38 +128,82 @@ class TelegrafRenderer:
 
         # Windows Performance Counters
         if config.win_perf_counters.enabled:
+            proc_insts = config.win_perf_counters.process_instances or ["_Total", "telegraf"]
+            proc_insts_formatted = ", ".join(_escape_toml_str(p) for p in proc_insts)
+            print_valid_str = str(config.win_perf_counters.print_valid).lower()
             lines.extend([
-                "# Read Windows Performance Counters",
+                "# Read Windows Performance Counters (Broadcom VCF Operations template)",
                 "[[inputs.win_perf_counters]]",
+                f"  PrintValid = {print_valid_str}",
+                "",
                 "  [[inputs.win_perf_counters.object]]",
                 '    ObjectName = "Processor"',
                 '    Instances = ["*"]',
-                '    Counters = ["% Processor Time", "% Idle Time", "% Privileged Time", "% User Time"]',
+                '    Counters = ["% Idle Time", "% Interrupt Time", "% Privileged Time", "% Processor Time", "% User Time", "Interrupts/sec", "% DPC Time"]',
                 '    Measurement = "win_cpu"',
-                "",
-                "  [[inputs.win_perf_counters.object]]",
-                '    ObjectName = "Memory"',
-                '    Instances = ["------"]',
-                '    Counters = ["Available Bytes", "Committed Bytes", "% Committed Bytes In Use"]',
-                '    Measurement = "win_mem"',
+                "    IncludeTotal = true",
                 "",
                 "  [[inputs.win_perf_counters.object]]",
                 '    ObjectName = "LogicalDisk"',
                 '    Instances = ["*"]',
-                '    Counters = ["% Free Space", "Free Megabytes", "Current Disk Queue Length"]',
+                '    Counters = ["% Disk Read Time", "% Disk Write Time", "% Free Space", "% Idle Time", "Avg. Disk Bytes/Read", "Avg. Disk Bytes/Write", "Avg. Disk Queue Length", "Avg. Disk sec/Read", "Avg. Disk sec/Write", "Avg. Disk Write Queue Length", "Avg. Disk Read Queue Length", "Free Megabytes", "Split IO/Sec"]',
                 '    Measurement = "win_disk"',
                 "",
                 "  [[inputs.win_perf_counters.object]]",
+                '    ObjectName = "Memory"',
+                '    Counters = ["Available Bytes", "Cache Bytes", "Committed Bytes", "Cache Faults/sec", "Demand Zero Faults/sec", "Page Faults/sec", "Pages/sec", "Transition Faults/sec", "Pool Nonpaged Bytes", "Pool Paged Bytes"]',
+                '    Instances = ["------"]',
+                '    Measurement = "win_mem"',
+                "",
+                "  [[inputs.win_perf_counters.object]]",
                 '    ObjectName = "Network Interface"',
+                '    Counters = ["Bytes Received/sec", "Bytes Sent/sec", "Packets Outbound Discarded", "Packets Outbound Errors", "Packets Received Discarded", "Packets Received Errors", "Packets Received/sec", "Packets Sent/sec", "Connections Established"]',
                 '    Instances = ["*"]',
-                '    Counters = ["Bytes Received/sec", "Bytes Sent/sec", "Packets Received Errors", "Packets Outbound Errors"]',
                 '    Measurement = "win_net"',
+                "    IncludeTotal = true",
+                "",
+                "  [[inputs.win_perf_counters.object]]",
+                '    ObjectName = "Paging File"',
+                '    Counters = ["% Usage"]',
+                '    Instances = ["*"]',
+                '    Measurement = "win_paging"',
+                "    IncludeTotal = true",
+                "",
+                "  [[inputs.win_perf_counters.object]]",
+                '    ObjectName = "Process"',
+                '    Counters = ["% Privileged Time", "% Processor Time", "% User Time", "Elapsed Time", "Handle Count", "IO Read Bytes/sec", "IO Read Operations/sec", "IO Write Bytes/sec", "IO Write Operations/sec", "Private Bytes", "Thread Count", "Virtual Bytes", "Working Set", "Working Set - Private"]',
+                f"    Instances = [{proc_insts_formatted}]",
+                '    Measurement = "win_process"',
                 "",
                 "  [[inputs.win_perf_counters.object]]",
                 '    ObjectName = "System"',
+                '    Counters = ["Context Switches/sec", "Processes", "Processor Queue Length", "System Calls/sec", "System Up Time", "Threads"]',
                 '    Instances = ["------"]',
-                '    Counters = ["Context Switches/sec", "System Calls/sec", "Processor Queue Length", "System Up Time"]',
                 '    Measurement = "win_system"',
+                "",
+                "  [[inputs.win_perf_counters.object]]",
+                '    ObjectName = "TCPv4"',
+                '    Counters = ["Connection Failures", "Connections Active", "Connections Established", "Connections Passive", "Connection Reset", "Segments Received/sec", "Segments Retransmitted/sec", "Segments Sent/sec"]',
+                '    Instances = ["------"]',
+                '    Measurement = "win_net_tcp"',
+                "",
+                "  [[inputs.win_perf_counters.object]]",
+                '    ObjectName = "TCPv6"',
+                '    Counters = ["Connection Failures", "Connections Active", "Connections Established", "Connections Passive", "Connection Reset", "Segments Received/sec", "Segments Retransmitted/sec", "Segments Sent/sec"]',
+                '    Instances = ["------"]',
+                '    Measurement = "win_net_tcp"',
+                "",
+                "  [[inputs.win_perf_counters.object]]",
+                '    ObjectName = "UDPv4"',
+                '    Counters = ["Datagrams No Port/sec", "Datagrams Received/Errors", "Datagrams Received/sec", "Datagrams Sent/sec"]',
+                '    Instances = ["------"]',
+                '    Measurement = "win_net_udp"',
+                "",
+                "  [[inputs.win_perf_counters.object]]",
+                '    ObjectName = "UDPv6"',
+                '    Counters = ["Datagrams No Port/sec", "Datagrams Received/Errors", "Datagrams Received/sec", "Datagrams Sent/sec"]',
+                '    Instances = ["------"]',
+                '    Measurement = "win_net_udp"',
                 "",
             ])
 
@@ -293,11 +337,13 @@ class TelegrafRenderer:
         Returns:
             Formatted TOML string for telegraf.d/cloudproxy-http.conf.
         """
+        # Clean hostname of any leading/trailing whitespace or newlines
+        clean_hostname = hostname.strip().splitlines()[-1].strip() if hostname and hostname.strip() else "localhost"
         try:
-            ipaddress.ip_address(hostname)
-            short_hostname = hostname
+            ipaddress.ip_address(clean_hostname)
+            short_hostname = clean_hostname
         except ValueError:
-            short_hostname = hostname.split(".")[0]
+            short_hostname = clean_hostname.split(".")[0]
 
         default_ca = "C:\\telegraf\\telegraf.d\\ca.pem" if is_windows else "/etc/telegraf/telegraf.d/ca.pem"
         default_cert = "C:\\telegraf\\telegraf.d\\cert.pem" if is_windows else "/etc/telegraf/telegraf.d/cert.pem"
@@ -318,7 +364,7 @@ class TelegrafRenderer:
             "  debug = false",
             "  quiet = false",
             '  logfile = ""',
-            f'  hostname = "{short_hostname}"',
+            f"  hostname = {_escape_toml_str(short_hostname)}",
             "  omit_hostname = true",
             "",
             "# Output configuration for VCF Operations Cloud Proxy",

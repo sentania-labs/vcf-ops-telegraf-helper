@@ -5,12 +5,14 @@ from __future__ import annotations
 from vcf_ops_telegraf_helper.models.monitoring import (
     ApacheInputConfig,
     CpuInputConfig,
+    DiskInputConfig,
     DiskIoInputConfig,
     DockerInputConfig,
     MemInputConfig,
     MonitoringConfig,
     MssqlInputConfig,
     MysqlInputConfig,
+    NetInputConfig,
     NginxInputConfig,
     PingInputConfig,
     PostgresqlInputConfig,
@@ -74,3 +76,30 @@ def test_render_selective_plugins():
     assert "[[inputs.mem]]" in rendered
     assert "[[inputs.nginx]]" in rendered
     assert "[[inputs.apache]]" not in rendered
+
+
+def test_render_windows_official_perfmon_template():
+    """Verify the 11-object official VCF Operations Windows Perfmon template renders valid TOML."""
+    mon = MonitoringConfig(
+        cpu=CpuInputConfig(enabled=False),
+        mem=MemInputConfig(enabled=False),
+        disk=DiskInputConfig(enabled=False),
+        net=NetInputConfig(enabled=False),
+        win_perf_counters=WinPerfCountersInputConfig(enabled=True, process_instances=["_Total", "telegraf", "w3wp"]),
+    )
+
+    rendered = TelegrafRenderer.render_system_inputs(mon)
+    assert "PrintValid = true" in rendered
+    assert 'Measurement = "win_cpu"' in rendered
+    assert 'Measurement = "win_disk"' in rendered
+    assert 'Measurement = "win_mem"' in rendered
+    assert 'Measurement = "win_net"' in rendered
+    assert 'Measurement = "win_paging"' in rendered
+    assert 'Measurement = "win_process"' in rendered
+    assert 'Measurement = "win_system"' in rendered
+    assert 'Measurement = "win_net_tcp"' in rendered
+    assert 'Measurement = "win_net_udp"' in rendered
+    assert 'Instances = ["_Total", "telegraf", "w3wp"]' in rendered
+
+    val_res = Validator.validate_toml_syntax(rendered, "Windows Perfmon TOML")
+    assert val_res.is_valid is True
