@@ -216,6 +216,7 @@ class ConfigureEndpointWorkflow:
 
             dur = int((time.monotonic() - start) * 1000)
             auto_install = self.target.install_telegraf or self.options.install_telegraf
+            telegraf_ver = getattr(self.target, "telegraf_version", None) or getattr(self.options, "telegraf_version", None) or "1.40.1"
 
             if not installed and self.options.mode == DeploymentMode.PUSH and not auto_install:
                 res = StageResult(
@@ -227,7 +228,7 @@ class ConfigureEndpointWorkflow:
                 )
             else:
                 status = StageStatus.PASS if installed else StageStatus.WARNING
-                msg_suffix = " (will auto-install official InfluxData agent)" if (not installed and auto_install) else ""
+                msg_suffix = f" (will auto-install official InfluxData agent {telegraf_ver})" if (not installed and auto_install) else ""
                 msg = f"{os_version} ({arch}), Telegraf: {version_str or 'Not installed'}{msg_suffix}"
                 res = StageResult(
                     stage=WorkflowStage.DETECT,
@@ -489,11 +490,12 @@ class ConfigureEndpointWorkflow:
             # Auto-install Telegraf if missing and requested
             auto_install = self.target.install_telegraf or self.options.install_telegraf
             if self.discovery and not self.discovery.telegraf_installed and auto_install:
+                telegraf_ver = getattr(self.target, "telegraf_version", None) or getattr(self.options, "telegraf_version", None) or "1.40.1"
                 arch_str = (getattr(self.discovery, "arch", "") or getattr(self.discovery, "architecture", "") or "").lower()
                 is_arm = "arm" in arch_str or "aarch" in arch_str
                 if is_win:
                     win_arch = "arm64" if is_arm else "amd64"
-                    zip_url = f"https://dl.influxdata.com/telegraf/releases/telegraf-1.32.1_windows_{win_arch}.zip"
+                    zip_url = f"https://dl.influxdata.com/telegraf/releases/telegraf-{telegraf_ver}_windows_{win_arch}.zip"
                     install_cmd = (
                         "$ErrorActionPreference = 'Stop'; "
                         "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; "
@@ -535,7 +537,7 @@ class ConfigureEndpointWorkflow:
                     )
                 else:
                     linux_arch = "arm64" if is_arm else "amd64"
-                    tar_url = f"https://dl.influxdata.com/telegraf/releases/telegraf-1.32.1_linux_{linux_arch}.tar.gz"
+                    tar_url = f"https://dl.influxdata.com/telegraf/releases/telegraf-{telegraf_ver}_linux_{linux_arch}.tar.gz"
                     sudo_pfx = "sudo -n " if getattr(self.executor, "use_sudo", False) else ""
                     install_cmd = (
                         f"{sudo_pfx}bash -c '"
@@ -551,10 +553,10 @@ class ConfigureEndpointWorkflow:
                         "keyfile=\"/etc/apt/trusted.gpg.d/influxdata-archive.gpg\"; "
                         "if [ ! -f \"$keyfile\" ]; then keyfile=\"/etc/apt/trusted.gpg.d/influxdata.asc\"; fi; "
                         "echo \"deb [signed-by=$keyfile] https://repos.influxdata.com/$distro stable main\" > /etc/apt/sources.list.d/influxdata.list && "
-                        "DEBIAN_FRONTEND=noninteractive UCF_FORCE_CONFFOLD=1 apt-get update -qq && DEBIAN_FRONTEND=noninteractive UCF_FORCE_CONFFOLD=1 apt-get install -y -qq -o Dpkg::Options::=\"--force-confdef\" -o Dpkg::Options::=\"--force-confold\" telegraf || true; "
+                        f"DEBIAN_FRONTEND=noninteractive UCF_FORCE_CONFFOLD=1 apt-get update -qq && (DEBIAN_FRONTEND=noninteractive UCF_FORCE_CONFFOLD=1 apt-get install -y -qq -o Dpkg::Options::=\"--force-confdef\" -o Dpkg::Options::=\"--force-confold\" telegraf={telegraf_ver}-1 2>/dev/null || DEBIAN_FRONTEND=noninteractive UCF_FORCE_CONFFOLD=1 apt-get install -y -qq -o Dpkg::Options::=\"--force-confdef\" -o Dpkg::Options::=\"--force-confold\" telegraf || true); "
                         "elif command -v dnf >/dev/null 2>&1 || command -v yum >/dev/null 2>&1; then "
                         "(echo \"[influxdata]\"; echo \"name = InfluxData Repository\"; echo \"baseurl = https://repos.influxdata.com/rhel/\\$releasever/\\$basearch/stable\"; echo \"enabled = 1\"; echo \"gpgcheck = 1\"; echo \"gpgkey = https://repos.influxdata.com/influxdata-archive_compat.key\") > /etc/yum.repos.d/influxdata.repo && "
-                        "(dnf install -y -q telegraf 2>/dev/null || yum install -y -q telegraf 2>/dev/null) || true; "
+                        f"(dnf install -y -q telegraf-{telegraf_ver} 2>/dev/null || yum install -y -q telegraf-{telegraf_ver} 2>/dev/null || dnf install -y -q telegraf 2>/dev/null || yum install -y -q telegraf 2>/dev/null) || true; "
                         "fi; "
                         "if ! command -v telegraf >/dev/null 2>&1; then "
                         "td=$(mktemp -d /tmp/telegraf.XXXXXX) && "
@@ -669,16 +671,30 @@ class ConfigureEndpointWorkflow:
             if self.base_stub_content:
                 exists = self.executor.file_exists(main_cfg)
                 if exists and not self.executor.file_exists(f"{main_cfg}.orig"):
-                    try:
-                        content_to_backup = self.executor.download(main_cfg)
-                        if "Managed by VCF Operations Open Telegraf Helper" not in content_to_backup:
-                            self.executor.upload(content_to_backup, f"{main_cfg}.orig", mode=0o644)
-                    except Exception:
-                        if is_win:
-                            escaped_cfg = main_cfg.replace("'", "''")
-                            self.executor.execute(f"Copy-Item -Path '{escaped_cfg}' -Destination '{escaped_cfg}.orig' -Force")
-                        else:
-                            self.executor.execute(f"cp {shlex.quote(main_cfg)} {shlex.quote(f'{main_cfg}.orig')}")
+                    exec_type = type(self.executor).__name__
+                    if is_win and exec_type == "WinRMExecutor":
+                        escaped_cfg = main_cfg.replace("'", "''")
+                        self.executor.execute(
+                            f"if (-not (Select-String -Path '{escaped_cfg}' -Pattern 'Managed by VCF Operations' -SimpleMatch -Quiet)) {{ "
+                            f"Copy-Item -Path '{escaped_cfg}' -Destination '{escaped_cfg}.orig' -Force }}"
+                        )
+                    elif not is_win and exec_type == "SSHExecutor":
+                        sudo_pfx = "sudo -n " if getattr(self.executor, "use_sudo", False) else ""
+                        self.executor.execute(
+                            f"{sudo_pfx}bash -c 'if ! grep -q \"Managed by VCF Operations\" {shlex.quote(main_cfg)} 2>/dev/null; then "
+                            f"cp {shlex.quote(main_cfg)} {shlex.quote(f'{main_cfg}.orig')} 2>/dev/null || true; fi'"
+                        )
+                    else:
+                        try:
+                            content_to_backup = self.executor.download(main_cfg)
+                            if "Managed by VCF Operations Open Telegraf Helper" not in content_to_backup:
+                                self.executor.upload(content_to_backup, f"{main_cfg}.orig", mode=0o644)
+                        except Exception:
+                            if is_win:
+                                escaped_cfg = main_cfg.replace("'", "''")
+                                self.executor.execute(f"Copy-Item -Path '{escaped_cfg}' -Destination '{escaped_cfg}.orig' -Force")
+                            else:
+                                self.executor.execute(f"cp {shlex.quote(main_cfg)} {shlex.quote(f'{main_cfg}.orig')}")
 
                 self.executor.upload(self.base_stub_content, main_cfg, mode=0o644)
                 if main_cfg not in self.managed_files:

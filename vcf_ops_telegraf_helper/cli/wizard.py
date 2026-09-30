@@ -109,7 +109,9 @@ def run_wizard(console: Optional[Console] = None) -> None:
         ssh_user = Prompt.ask("WinRM Username", default="Administrator", console=con)
         ssh_pass = Prompt.ask("WinRM Password", password=True, console=con)
         winrm_ssl = Confirm.ask("Use HTTPS for WinRM (port 5986)?", default=False, console=con)
-        auto_install = Confirm.ask("Install open-source Telegraf agent if missing (InfluxData official distribution)?", default=True, console=con)
+    telegraf_ver = "1.40.1"
+    if auto_install:
+        telegraf_ver = Prompt.ask("Telegraf release version to install", default="1.40.1", console=con).strip() or "1.40.1"
 
     target = EndpointTarget(
         hostname=target_host,
@@ -120,6 +122,7 @@ def run_wizard(console: Optional[Console] = None) -> None:
         key_filename=ssh_key,
         winrm_use_ssl=winrm_ssl,
         install_telegraf=auto_install,
+        telegraf_version=telegraf_ver,
     )
 
     # Instantiate chosen executor
@@ -195,6 +198,8 @@ def run_wizard(console: Optional[Console] = None) -> None:
     options = WorkflowOptions(
         mode=DeploymentMode.PUSH if conn_method != ConnectionMethod.PACKAGE else DeploymentMode.SCRIPT,
         restart_service=True,
+        install_telegraf=auto_install,
+        telegraf_version=telegraf_ver,
     )
 
     workflow = ConfigureEndpointWorkflow(

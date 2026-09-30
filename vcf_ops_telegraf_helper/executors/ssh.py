@@ -88,7 +88,7 @@ class SSHExecutor(EndpointExecutor):
             privileged_cmds = (
                 "mkdir", "systemctl", "cp", "rm", "chmod", "chown",
                 "test", "useradd", "adduser", "groupadd", "addgroup",
-                "apt-get", "yum", "dnf", "bash",
+                "apt-get", "yum", "dnf", "bash", "curl", "journalctl",
             )
             trusted_system_bins = (
                 "telegraf",

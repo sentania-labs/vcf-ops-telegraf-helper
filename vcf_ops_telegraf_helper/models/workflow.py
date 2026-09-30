@@ -88,6 +88,7 @@ class WorkflowOptions(BaseModel):
     skip_collector_check: bool = False
     preview_only: bool = False
     install_telegraf: bool = False
+    telegraf_version: str = "1.40.1"
 
 
 class RunSummary(BaseModel):

@@ -214,7 +214,7 @@ def test_render_vcf_output_ip_hostname_not_truncated():
 
 
 def test_render_vcf_output_windows_cmd_quoting():
-    """Verify Windows mandatory_tags command uses outer quotes for cmd.exe /c argument protection."""
+    """Verify Windows mandatory_tags command uses forward slashes to avoid backslash escaping issues."""
     rendered = TelegrafRenderer.render_vcf_output(
         collector_address="172.27.8.54",
         hostname="win-node",
@@ -224,7 +224,7 @@ def test_render_vcf_output_windows_cmd_quoting():
     )
     parsed = tomllib.loads(rendered)
     exec_cmd = parsed["inputs"]["exec"][0]["commands"][0]
-    assert exec_cmd == 'cmd.exe /c ""C:\\telegraf\\telegraf.d\\mandatory_tags.bat" "C:\\telegraf\\telegraf.exe""'
+    assert exec_cmd == "cmd.exe /c C:/telegraf/telegraf.d/mandatory_tags.bat C:/telegraf/telegraf.exe"
 
 
 def test_render_vcf_output_omits_tls_cert_when_not_provided():
