@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import ipaddress
 import os
 import shlex
+import socket
 import time
 from typing import Dict, List, Optional
 
@@ -76,6 +78,38 @@ class ConfigureEndpointWorkflow:
         if text is None:
             return None
         return redact_secrets(text, self._secrets)
+
+    @staticmethod
+    def _is_ip(val: Optional[str]) -> bool:
+        if not val:
+            return False
+        try:
+            ipaddress.ip_address(val.strip())
+            return True
+        except ValueError:
+            return False
+
+    def _get_registered_hostname(self) -> str:
+        """Resolve the shortname to register with VCF Operations."""
+        if getattr(self.target, "registered_hostname", None):
+            return self.target.registered_hostname.strip().splitlines()[-1].strip().split(".")[0]
+        if self.discovery and self.discovery.hostname and not self._is_ip(self.discovery.hostname):
+            return self.discovery.hostname.strip().splitlines()[-1].strip().split(".")[0]
+        if self.artifacts and getattr(self.artifacts, "vm_name", None) and not self._is_ip(self.artifacts.vm_name):
+            return self.artifacts.vm_name.strip().splitlines()[-1].strip().split(".")[0]
+        if not self._is_ip(self.target.hostname):
+            return self.target.hostname.strip().splitlines()[-1].strip().split(".")[0]
+        if hasattr(self, "_cached_ptr"):
+            return self._cached_ptr or self.target.hostname
+        try:
+            ptr = socket.gethostbyaddr(self.target.hostname)[0]
+            if ptr:
+                self._cached_ptr = ptr.strip().split(".")[0]
+                return self._cached_ptr
+        except Exception:
+            pass
+        self._cached_ptr = None
+        return self.target.hostname
 
     def detect_target(self) -> StageResult:
         """Stage 1: Verify connectivity and authenticate with target endpoint."""
@@ -152,8 +186,24 @@ class ConfigureEndpointWorkflow:
                 )
                 host_ip = ip_res.stdout.strip() if ip_res.success and ip_res.stdout.strip() else self.target.hostname
 
+                hname_res = self.executor.execute("$env:COMPUTERNAME", timeout=10)
+                discovered_hname = self.target.hostname
+                if hname_res.success and hname_res.stdout.strip():
+                    lines = [ln.strip() for ln in hname_res.stdout.splitlines() if ln.strip()]
+                    if lines:
+                        discovered_hname = lines[-1].split(".")[0]
+                if self._is_ip(discovered_hname):
+                    if not hasattr(self, "_cached_ptr"):
+                        try:
+                            ptr = socket.gethostbyaddr(discovered_hname)[0]
+                            self._cached_ptr = ptr.strip().split(".")[0] if ptr else None
+                        except Exception:
+                            self._cached_ptr = None
+                    if self._cached_ptr:
+                        discovered_hname = self._cached_ptr
+
                 self.discovery = EndpointDiscoveryResult(
-                    hostname=self.target.hostname,
+                    hostname=discovered_hname,
                     os_name=os_name,
                     os_version=os_version,
                     arch=arch,
@@ -201,8 +251,24 @@ class ConfigureEndpointWorkflow:
                 ip_res = self.executor.execute("hostname -I | awk '{print $1}'", timeout=5)
                 host_ip = ip_res.stdout.strip() if ip_res.success and ip_res.stdout.strip() else self.target.hostname
 
+                hname_res = self.executor.execute("hostname -s", timeout=5)
+                discovered_hname = self.target.hostname
+                if hname_res.success and hname_res.stdout.strip():
+                    lines = [ln.strip() for ln in hname_res.stdout.splitlines() if ln.strip()]
+                    if lines:
+                        discovered_hname = lines[-1].split(".")[0]
+                if self._is_ip(discovered_hname):
+                    if not hasattr(self, "_cached_ptr"):
+                        try:
+                            ptr = socket.gethostbyaddr(discovered_hname)[0]
+                            self._cached_ptr = ptr.strip().split(".")[0] if ptr else None
+                        except Exception:
+                            self._cached_ptr = None
+                    if self._cached_ptr:
+                        discovered_hname = self._cached_ptr
+
                 self.discovery = EndpointDiscoveryResult(
-                    hostname=self.target.hostname,
+                    hostname=discovered_hname,
                     os_name=os_name,
                     os_version=os_version,
                     arch=arch,
@@ -279,7 +345,7 @@ class ConfigureEndpointWorkflow:
             self.artifacts = self.adapter.prepare_telegraf_integration(
                 os_family=self.target.os_family.value,
                 target_ip=target_ip,
-                target_hostname=self.target.hostname,
+                target_hostname=self._get_registered_hostname(),
                 target_uuid=target_uuid,
             )
             if self.artifacts.token and self.artifacts.token not in self._secrets:
@@ -348,10 +414,10 @@ class ConfigureEndpointWorkflow:
             ca_path = (self.env.ca_cert_path or default_ca) if has_ca else None
             cert_path = default_cert if has_cert else None
             key_path = default_key if has_key else None
-
+            reg_hostname = self._get_registered_hostname()
             self.vcf_conf_content = TelegrafRenderer.render_vcf_output(
                 collector_address=collector_addr,
-                hostname=self.target.hostname,
+                hostname=reg_hostname,
                 uuid=uuid_val,
                 ip=ip_val,
                 verify_ssl=self.env.verify_ssl,
@@ -901,8 +967,7 @@ class ConfigureEndpointWorkflow:
                 metric_headers = {
                     "Content-Type": "text/plain; charset=utf-8",
                 }
-                ep_hostname = self.discovery.hostname if (self.discovery and self.discovery.hostname) else self.target.hostname
-                short_host = ep_hostname.split(".")[0] if "." in ep_hostname else ep_hostname
+                short_host = self._get_registered_hostname()
                 if self.artifacts and self.artifacts.is_managed_vm and self.artifacts.vm_mor and self.artifacts.vc_id:
                     metric_headers["vmId"] = self.artifacts.vm_mor
                     metric_headers["vcid"] = self.artifacts.vc_id
@@ -930,7 +995,9 @@ class ConfigureEndpointWorkflow:
                     verify_ssl=self.env.verify_ssl,
                 )
                 # 6. Ingestion in VCF Ops
-                ingestion_status = self.adapter.verify_ingestion(self.target.hostname)
+                ingestion_status = self.adapter.verify_ingestion(short_host)
+                if ingestion_status == "UNKNOWN" and short_host != self.target.hostname:
+                    ingestion_status = self.adapter.verify_ingestion(self.target.hostname)
                 self.verifications["VCF Ops ingestion"] = ingestion_status
 
                 # Verify metrics transmission either via authenticated probe or confirmed VCF Ops ingestion

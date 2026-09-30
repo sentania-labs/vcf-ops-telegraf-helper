@@ -76,6 +76,8 @@ class WinPerfCountersInputConfig(BaseModel):
     """Configuration for Windows Performance Counters plugin."""
 
     enabled: bool = False
+    print_valid: bool = True
+    process_instances: List[str] = Field(default_factory=lambda: ["_Total", "telegraf"])
 
 
 class WinServicesInputConfig(BaseModel):
@@ -160,3 +162,28 @@ class MonitoringConfig(BaseModel):
     docker: DockerInputConfig = Field(default_factory=DockerInputConfig)
     ping: PingInputConfig = Field(default_factory=PingInputConfig)
     custom_toml: str = Field(default="", description="Optional custom TOML fragment injected into configuration")
+
+    @classmethod
+    def baseline_for_os(cls, is_windows: bool) -> MonitoringConfig:
+        """Create a monitoring configuration populated with the recommended OS baseline."""
+        if is_windows:
+            return cls(
+                cpu=CpuInputConfig(enabled=False),
+                mem=MemInputConfig(enabled=False),
+                disk=DiskInputConfig(enabled=False),
+                net=NetInputConfig(enabled=False),
+                system=SystemInputConfig(enabled=False),
+                swap=SwapInputConfig(enabled=False),
+                win_perf_counters=WinPerfCountersInputConfig(enabled=True),
+                win_services=WinServicesInputConfig(enabled=True, service_names=["*"]),
+            )
+        return cls(
+            cpu=CpuInputConfig(enabled=True),
+            mem=MemInputConfig(enabled=True),
+            disk=DiskInputConfig(enabled=True),
+            net=NetInputConfig(enabled=True),
+            system=SystemInputConfig(enabled=True),
+            swap=SwapInputConfig(enabled=True),
+            win_perf_counters=WinPerfCountersInputConfig(enabled=False),
+            win_services=WinServicesInputConfig(enabled=False),
+        )

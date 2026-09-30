@@ -23,6 +23,7 @@ class IntegrationArtifacts(BaseModel):
     client_key_content: Optional[str] = Field(default=None, description="PEM content of client private key")
     mandatory_tags_content: Optional[str] = Field(default=None, description="Shell/batch script content for mandatory tags")
     is_managed_vm: bool = Field(default=False, description="True if host is a registered vSphere VM in VCF Ops")
+    vm_name: Optional[str] = Field(default=None, description="Discovered vSphere VM name")
     vm_mor: Optional[str] = Field(default=None, description="vCenter VM MOR (VMEntityObjectID), e.g. vm-31164")
     vc_id: Optional[str] = Field(default=None, description="vCenter Instance UUID (VMEntityVCID)")
     client_id: Optional[str] = Field(default=None, description="Client ID used in certificate request")

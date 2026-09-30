@@ -522,10 +522,12 @@ class MainWindow(QMainWindow):
         grid.addWidget(self.ep_auto_install_check, 8, 0, 1, 2)
 
         ver_row = QHBoxLayout()
+        ver_row.setContentsMargins(0, 0, 0, 0)
         self.ep_version_label = QLabel("Telegraf Version:")
         self.ep_version_label.setStyleSheet("font-size: 12px; margin-left: 20px;")
         self.ep_version_combo = QComboBox()
         self.ep_version_combo.setEditable(True)
+        self.ep_version_combo.setMinimumWidth(400)
         self.ep_version_combo.addItems([
             "1.40.1 (Latest Stable - Recommended)",
             "1.34.0 (1.34 Series)",
@@ -533,6 +535,9 @@ class MainWindow(QMainWindow):
             "1.30.0 (1.30 Series)",
         ])
         self.ep_version_combo.setCurrentIndex(0)
+        if self.ep_version_combo.lineEdit():
+            self.ep_version_combo.lineEdit().setCursorPosition(0)
+        self.ep_version_combo.currentIndexChanged.connect(self._on_version_combo_changed)
         self.ep_version_combo.setToolTip("Select a release family or enter a specific release version (e.g. 1.40.1)")
         ver_row.addWidget(self.ep_version_label)
         ver_row.addWidget(self.ep_version_combo)
@@ -677,6 +682,7 @@ class MainWindow(QMainWindow):
 
         if hasattr(self, "catalog_items"):
             self._update_catalog_os_compatibility(is_win)
+            self._apply_baseline_preset()
 
     def _on_auth_type_changed(self, text: str) -> None:
         self._update_auth_and_endpoint_visibility()
@@ -690,6 +696,10 @@ class MainWindow(QMainWindow):
             self.ep_version_label.setEnabled(checked)
         if hasattr(self, "ep_version_combo"):
             self.ep_version_combo.setEnabled(checked)
+
+    def _on_version_combo_changed(self) -> None:
+        if hasattr(self, "ep_version_combo") and self.ep_version_combo.lineEdit():
+            self.ep_version_combo.lineEdit().setCursorPosition(0)
 
     def _get_selected_telegraf_version(self) -> str:
         if not hasattr(self, "ep_version_combo"):
@@ -816,6 +826,12 @@ class MainWindow(QMainWindow):
                         caption_res = executor.execute("(Get-CimInstance Win32_OperatingSystem).Caption", timeout=10)
                         if caption_res.success and caption_res.stdout.strip():
                             os_version = caption_res.stdout.strip().splitlines()[0]
+                        h_res = executor.execute("$env:COMPUTERNAME", timeout=10)
+                        if h_res.success and h_res.stdout.strip():
+                            lines = [ln.strip() for ln in h_res.stdout.splitlines() if ln.strip()]
+                            self.discovered_hostname = lines[-1].split(".")[0] if lines else target.hostname
+                        else:
+                            self.discovered_hostname = target.hostname
 
                 self.ep_missing_banner.setVisible(not installed)
 
@@ -829,8 +845,10 @@ class MainWindow(QMainWindow):
                 else:
                     inst_str = "NO (auto-install disabled)"
 
+                disc_name = getattr(self, "discovered_hostname", target.hostname)
                 details = [
                     f"OS: {os_version}",
+                    f"Discovered Hostname: {disc_name}",
                     f"Architecture: {arch}",
                     f"Telegraf Installed: {inst_str}",
                     f"Telegraf Version: {version_str}",
@@ -840,7 +858,12 @@ class MainWindow(QMainWindow):
                 ]
                 self.ep_details_box.setPlainText("\n".join(details))
                 self.state_store.record_endpoint(target.hostname)
-                self.logger.info("Endpoint discovered successfully: %s", target.hostname)
+                self.logger.info("Endpoint discovered successfully: %s (hostname: %s)", target.hostname, disc_name)
+                if hasattr(self, "catalog_items"):
+                    self._update_catalog_os_compatibility(True)
+                    if getattr(self, "_last_detected_os", None) != "windows":
+                        self._last_detected_os = "windows"
+                        self._apply_baseline_preset()
                 return
 
             arch_res = executor.execute("uname -m", timeout=5)
@@ -871,6 +894,13 @@ class MainWindow(QMainWindow):
             svc_res = executor.execute("systemctl is-active telegraf", timeout=5)
             running = svc_res.success and svc_res.stdout.strip() == "active"
 
+            h_res = executor.execute("hostname -s", timeout=5)
+            if h_res.success and h_res.stdout.strip():
+                lines = [ln.strip() for ln in h_res.stdout.splitlines() if ln.strip()]
+                self.discovered_hostname = lines[-1].split(".")[0] if lines else target.hostname
+            else:
+                self.discovered_hostname = target.hostname
+
             self.ep_missing_banner.setVisible(not installed)
 
             self.ep_status_label.setText("Connected & Discovered")
@@ -884,8 +914,10 @@ class MainWindow(QMainWindow):
             else:
                 inst_str = "NO (auto-install disabled)"
 
+            disc_name = getattr(self, "discovered_hostname", target.hostname)
             details = [
                 f"OS: {os_version}",
+                f"Discovered Hostname: {disc_name}",
                 f"Architecture: {arch}",
                 f"Telegraf Installed: {inst_str}",
                 f"Telegraf Version: {version_str}",
@@ -895,7 +927,12 @@ class MainWindow(QMainWindow):
             ]
             self.ep_details_box.setPlainText("\n".join(details))
             self.state_store.record_endpoint(target.hostname)
-            self.logger.info("Endpoint discovered successfully: %s", target.hostname)
+            self.logger.info("Endpoint discovered successfully: %s (hostname: %s)", target.hostname, disc_name)
+            if hasattr(self, "catalog_items"):
+                self._update_catalog_os_compatibility(False)
+                if getattr(self, "_last_detected_os", None) != "linux":
+                    self._last_detected_os = "linux"
+                    self._apply_baseline_preset()
         except Exception as exc:
             self.logger.exception("Endpoint detection exception for %s", self.ep_host_input.text().strip())
             self.ep_status_label.setText(f"Detection error: {exc}")
@@ -1273,6 +1310,7 @@ class MainWindow(QMainWindow):
             else False
         )
         self._update_catalog_os_compatibility(is_win)
+        self._apply_baseline_preset()
         if is_win and self.docker_endpoint_input.text().strip() in ("", "unix:///var/run/docker.sock"):
             self.docker_endpoint_input.setText("npipe:////./pipe/docker_engine")
 
@@ -1396,9 +1434,12 @@ class MainWindow(QMainWindow):
                 self.custom_toml_check.setChecked(True)
 
     def _apply_baseline_preset(self) -> None:
-        is_win = (getattr(self, "ep_os_combo", None) and self.ep_os_combo.currentText().lower() == "windows")
+        is_win = bool(
+            getattr(self, "ep_os_combo", None)
+            and self.ep_os_combo.currentText().strip().lower().startswith("win")
+        )
         baseline_keys = (
-            {"cpu", "mem", "disk", "net", "win_perf", "win_svc"}
+            {"win_perf", "win_svc"}
             if is_win
             else {"cpu", "mem", "disk", "net", "system", "swap"}
         )
@@ -1418,42 +1459,45 @@ class MainWindow(QMainWindow):
         try:
             for idx, (key, _, _, chk) in enumerate(self.catalog_items):
                 item = self.plugin_catalog_list.item(idx)
-                if is_win and key in ("system", "swap"):
-                    chk.setChecked(False)
-                    chk.setEnabled(False)
-                    if item:
-                        item.setCheckState(Qt.Unchecked)
-                        item.setFlags(item.flags() & ~Qt.ItemIsEnabled)
+                incompatible = False
+                if is_win and key in ("cpu", "mem", "disk", "net", "system", "swap", "processes"):
+                    incompatible = True
                 elif not is_win and key in ("win_perf", "win_svc"):
+                    incompatible = True
+
+                if incompatible:
                     chk.setChecked(False)
                     chk.setEnabled(False)
                     if item:
                         item.setCheckState(Qt.Unchecked)
                         item.setFlags(item.flags() & ~Qt.ItemIsEnabled)
+                        item.setHidden(True)
                 else:
                     chk.setEnabled(True)
                     if item:
+                        item.setHidden(False)
                         item.setFlags(item.flags() | Qt.ItemIsEnabled | Qt.ItemIsUserCheckable)
         finally:
             self._updating_catalog = False
 
     def _select_all_plugins(self) -> None:
-        is_win = (
-            self.ep_os_combo.currentText().strip().lower().startswith("win")
-            if hasattr(self, "ep_os_combo")
-            else False
+        is_win = bool(
+            getattr(self, "ep_os_combo", None)
+            and self.ep_os_combo.currentText().strip().lower().startswith("win")
         )
         self._updating_catalog = True
         try:
             for idx, (key, _, _, chk) in enumerate(self.catalog_items):
-                if is_win and key in ("system", "swap"):
+                item = self.plugin_catalog_list.item(idx)
+                if item and item.isHidden():
+                    want = False
+                elif is_win and key in ("cpu", "mem", "disk", "net", "system", "swap", "processes"):
                     want = False
                 elif not is_win and key in ("win_perf", "win_svc"):
                     want = False
                 else:
                     want = True
                 chk.setChecked(want)
-                item = self.plugin_catalog_list.item(idx)
                 if item:
                     item.setCheckState(Qt.Checked if want else Qt.Unchecked)
         finally:
@@ -1796,19 +1840,56 @@ class MainWindow(QMainWindow):
             if target.telegraf_version and target.telegraf_version != "1.40.1":
                 parts.append(f"--telegraf-version {shlex.quote(target.telegraf_version)}")
 
-        if not mon.cpu.enabled:
-            parts.append("--no-cpu")
-        if not mon.mem.enabled:
-            parts.append("--no-mem")
-        if not mon.disk.enabled:
-            parts.append("--no-disk")
-        if not mon.net.enabled:
-            parts.append("--no-net")
-        if mon.win_perf_counters.enabled:
-            parts.append("--win-perf")
-        if mon.win_services.enabled and mon.win_services.service_names:
-            svcs = ",".join(mon.win_services.service_names)
-            parts.append(f"--win-services {shlex.quote(svcs)}")
+        reg_host = getattr(target, "registered_hostname", None) or getattr(self, "discovered_hostname", None)
+        if reg_host and reg_host != target.hostname:
+            parts.append(f"--hostname {shlex.quote(reg_host)}")
+
+        if target.os_family == OSFamily.WINDOWS:
+            has_win_core = mon.win_perf_counters.enabled or (mon.win_services.enabled and bool(mon.win_services.service_names))
+            if mon.win_perf_counters.enabled:
+                parts.append("--win-perf")
+            if mon.win_services.enabled and mon.win_services.service_names:
+                svcs = ",".join(mon.win_services.service_names)
+                parts.append(f"--win-services {shlex.quote(svcs)}")
+            if not has_win_core:
+                parts.append("--no-win-perf")
+                parts.append("--no-win-services")
+        else:
+            has_linux_core = any([
+                mon.cpu.enabled,
+                mon.mem.enabled,
+                mon.disk.enabled,
+                mon.net.enabled,
+                mon.system.enabled,
+                mon.swap.enabled,
+                mon.diskio.enabled,
+                mon.processes.enabled,
+            ])
+            if mon.cpu.enabled:
+                parts.append("--cpu")
+            if mon.mem.enabled:
+                parts.append("--mem")
+            if mon.disk.enabled:
+                parts.append("--disk")
+            if mon.net.enabled:
+                parts.append("--net")
+            if mon.system.enabled:
+                parts.append("--system")
+            if mon.swap.enabled:
+                parts.append("--swap")
+            if mon.diskio.enabled:
+                parts.append("--diskio")
+            if mon.processes.enabled:
+                parts.append("--processes")
+            if not has_linux_core:
+                parts.extend([
+                    "--no-cpu",
+                    "--no-mem",
+                    "--no-disk",
+                    "--no-net",
+                    "--no-system",
+                    "--no-swap",
+                ])
         if mon.nginx.enabled and mon.nginx.urls:
             parts.append(f"--nginx {shlex.quote(mon.nginx.urls[0])}")
         if mon.apache.enabled and mon.apache.urls:
@@ -1994,6 +2075,7 @@ class MainWindow(QMainWindow):
             winrm_use_ssl=(port_val == 5986),
             install_telegraf=auto_install,
             telegraf_version=ver_str,
+            registered_hostname=getattr(self, "discovered_hostname", None),
         )
 
     def _get_monitoring_config(self) -> MonitoringConfig:

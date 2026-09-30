@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from vcf_ops_telegraf_helper.adapters.mock import MockVCFOpsIntegration
+from vcf_ops_telegraf_helper.executors.base import CommandResult
 from vcf_ops_telegraf_helper.executors.mock import MockExecutor
 from vcf_ops_telegraf_helper.models.endpoint import (
     ConnectionMethod,
@@ -287,3 +288,148 @@ def test_workflow_options_telegraf_version_precedence():
     )
     det_res = wf.detect_telegraf()
     assert "1.34.0" in det_res.message
+
+
+def test_workflow_resolves_os_shortname_for_ip_target():
+    """Verify target IP address resolves to discovered OS shortname in rendered VCF output."""
+    env = VCFEnvironment(
+        name="test-env",
+        url="https://vcf-ops.local",
+        username="admin",
+        collector=CollectorInfo(address="10.10.10.50"),
+    )
+    target = EndpointTarget(
+        hostname="172.16.3.80",
+        os_family=OSFamily.WINDOWS,
+        connection_method=ConnectionMethod.WINRM,
+    )
+    mock_exec = MockExecutor(connected=True, telegraf_installed=True)
+    # Configure mock executor command response for $env:COMPUTERNAME
+    mock_exec.custom_responses["$env:COMPUTERNAME"] = CommandResult(
+        exit_code=0, stdout="mssqldemo\r\n", command="$env:COMPUTERNAME"
+    )
+
+    wf = ConfigureEndpointWorkflow(
+        environment=env,
+        target=target,
+        monitoring=MonitoringConfig(),
+        executor=mock_exec,
+        adapter=MockVCFOpsIntegration(env=env, connected=True),
+    )
+    wf.detect_target()
+    wf.detect_telegraf()
+    assert wf.discovery.hostname == "mssqldemo"
+
+    wf.configure_vcf_output()
+    wf.render_inputs()
+    assert 'hostname = "mssqldemo"' in wf.vcf_conf_content
+
+
+def test_workflow_resolves_vm_name_fallback():
+    """Verify VM name from VCF Operations is used when guest discovery returns IP."""
+    env = VCFEnvironment(
+        name="test-env",
+        url="https://vcf-ops.local",
+        username="admin",
+        collector=CollectorInfo(address="10.10.10.50"),
+    )
+    target = EndpointTarget(
+        hostname="172.16.3.80",
+        os_family=OSFamily.WINDOWS,
+        connection_method=ConnectionMethod.WINRM,
+    )
+    mock_exec = MockExecutor(connected=True, telegraf_installed=True)
+    # Mock executor returns empty for $env:COMPUTERNAME
+    mock_exec.custom_responses["$env:COMPUTERNAME"] = CommandResult(
+        exit_code=0, stdout="", command="$env:COMPUTERNAME"
+    )
+
+    adapter = MockVCFOpsIntegration(env=env, connected=True)
+    wf = ConfigureEndpointWorkflow(
+        environment=env,
+        target=target,
+        monitoring=MonitoringConfig(),
+        executor=mock_exec,
+        adapter=adapter,
+    )
+    wf.detect_target()
+    wf.detect_telegraf()
+    wf.configure_vcf_output()
+    # Inject discovered VM name into artifacts
+    wf.artifacts.vm_name = "mssqldemo"
+    wf.render_inputs()
+    assert 'hostname = "mssqldemo"' in wf.vcf_conf_content
+
+
+def test_workflow_strips_domain_to_shortname():
+    """Verify FQDN target host is stripped to shortname in rendered VCF output."""
+    env = VCFEnvironment(
+        name="test-env",
+        url="https://vcf-ops.local",
+        username="admin",
+        collector=CollectorInfo(address="10.10.10.50"),
+    )
+    target = EndpointTarget(
+        hostname="console.int.sentania.net",
+        os_family=OSFamily.LINUX,
+        connection_method=ConnectionMethod.SSH,
+    )
+    mock_exec = MockExecutor(connected=True, telegraf_installed=True)
+    mock_exec.custom_responses["hostname -s"] = CommandResult(
+        exit_code=0, stdout="console\n", command="hostname -s"
+    )
+
+    wf = ConfigureEndpointWorkflow(
+        environment=env,
+        target=target,
+        monitoring=MonitoringConfig(),
+        executor=mock_exec,
+        adapter=MockVCFOpsIntegration(env=env, connected=True),
+    )
+    wf.detect_target()
+    wf.detect_telegraf()
+    wf.configure_vcf_output()
+    wf.render_inputs()
+    assert 'hostname = "console"' in wf.vcf_conf_content
+
+
+def test_workflow_prepare_telegraf_integration_passes_shortname_for_vm_matching():
+    """Verify prepare_telegraf_integration receives discovered shortname instead of target IP."""
+    from unittest.mock import MagicMock
+
+    env = VCFEnvironment(
+        name="test-env",
+        url="https://vcf-ops.local",
+        username="admin",
+        collector=CollectorInfo(address="10.10.10.50"),
+    )
+    target = EndpointTarget(
+        hostname="172.16.3.80",
+        os_family=OSFamily.WINDOWS,
+        connection_method=ConnectionMethod.WINRM,
+    )
+    mock_exec = MockExecutor(connected=True, telegraf_installed=True)
+    mock_exec.custom_responses["$env:COMPUTERNAME"] = CommandResult(
+        exit_code=0, stdout="mssqldemo\r\n", command="$env:COMPUTERNAME"
+    )
+
+    adapter = MockVCFOpsIntegration(env=env, connected=True)
+    original_prepare = adapter.prepare_telegraf_integration
+    mock_prepare = MagicMock(side_effect=original_prepare)
+    adapter.prepare_telegraf_integration = mock_prepare
+
+    wf = ConfigureEndpointWorkflow(
+        environment=env,
+        target=target,
+        monitoring=MonitoringConfig(),
+        executor=mock_exec,
+        adapter=adapter,
+    )
+    wf.detect_target()
+    wf.detect_telegraf()
+    wf.configure_vcf_output()
+
+    mock_prepare.assert_called_once()
+    called_kwargs = mock_prepare.call_args.kwargs
+    assert called_kwargs["target_hostname"] == "mssqldemo"
+    assert called_kwargs["target_ip"] == "172.16.3.80"

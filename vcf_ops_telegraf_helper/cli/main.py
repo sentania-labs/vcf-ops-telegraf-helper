@@ -33,6 +33,7 @@ from vcf_ops_telegraf_helper.models.monitoring import (
     ApacheInputConfig,
     CpuInputConfig,
     DiskInputConfig,
+    DiskIoInputConfig,
     DockerInputConfig,
     MemInputConfig,
     MonitoringConfig,
@@ -42,6 +43,9 @@ from vcf_ops_telegraf_helper.models.monitoring import (
     NginxInputConfig,
     PingInputConfig,
     PostgresqlInputConfig,
+    ProcessesInputConfig,
+    SwapInputConfig,
+    SystemInputConfig,
     WinPerfCountersInputConfig,
     WinServicesInputConfig,
 )
@@ -132,12 +136,19 @@ def gui_cmd(theme: str) -> None:
 @click.option("--winrm-ssl", is_flag=True, default=False, help="Use HTTPS/SSL for WinRM transport")
 @click.option("--install-telegraf", is_flag=True, default=False, help="Automatically install Telegraf agent if missing")
 @click.option("--telegraf-version", default="1.40.1", help="Telegraf agent release version to install (default: 1.40.1)")
-@click.option("--cpu/--no-cpu", default=True, help="Enable CPU monitoring")
-@click.option("--mem/--no-mem", default=True, help="Enable memory monitoring")
-@click.option("--disk/--no-disk", default=True, help="Enable disk monitoring")
-@click.option("--net/--no-net", default=True, help="Enable network monitoring")
-@click.option("--win-perf", is_flag=True, default=False, help="Enable Windows performance counters")
+@click.option("--os", "target_os", type=click.Choice(["linux", "windows"], case_sensitive=False), default=None, help="Target operating system (defaults to windows for WinRM, linux otherwise)")
+@click.option("--hostname", default=None, help="Explicit hostname for VCF Operations registration (overrides discovery)")
+@click.option("--cpu/--no-cpu", default=None, help="Enable or disable CPU monitoring")
+@click.option("--mem/--no-mem", default=None, help="Enable or disable memory monitoring")
+@click.option("--disk/--no-disk", default=None, help="Enable or disable disk monitoring")
+@click.option("--net/--no-net", default=None, help="Enable or disable network monitoring")
+@click.option("--system/--no-system", default=None, help="Enable or disable system load and uptime monitoring")
+@click.option("--swap/--no-swap", default=None, help="Enable or disable swap monitoring")
+@click.option("--diskio/--no-diskio", default=None, help="Enable or disable disk I/O monitoring")
+@click.option("--processes/--no-processes", default=None, help="Enable or disable process count monitoring")
+@click.option("--win-perf/--no-win-perf", default=None, help="Enable or disable Windows performance counters")
 @click.option("--win-services", default=None, help="Comma-separated Windows services to monitor")
+@click.option("--no-win-services", is_flag=True, default=False, help="Disable Windows services monitoring")
 @click.option("--nginx", default=None, help="NGINX status URL (e.g. http://localhost/status)")
 @click.option("--apache", default=None, help="Apache status URL (e.g. http://localhost/server-status?auto)")
 @click.option("--mysql", default=None, help="MySQL connection string (e.g. tcp(127.0.0.1:3306)/)")
@@ -174,12 +185,19 @@ def run_cmd(
     winrm_ssl: bool,
     install_telegraf: bool,
     telegraf_version: str,
-    cpu: bool,
-    mem: bool,
-    disk: bool,
-    net: bool,
-    win_perf: bool,
+    target_os: Optional[str],
+    hostname: Optional[str],
+    cpu: Optional[bool],
+    mem: Optional[bool],
+    disk: Optional[bool],
+    net: Optional[bool],
+    system: Optional[bool],
+    swap: Optional[bool],
+    diskio: Optional[bool],
+    processes: Optional[bool],
+    win_perf: Optional[bool],
     win_services: Optional[str],
+    no_win_services: bool,
     nginx: Optional[str],
     apache: Optional[str],
     mysql: Optional[str],
@@ -208,7 +226,10 @@ def run_cmd(
     )
 
     conn_method = ConnectionMethod(connection)
-    is_win = conn_method == ConnectionMethod.WINRM
+    if target_os:
+        is_win = target_os.lower() == "windows"
+    else:
+        is_win = conn_method == ConnectionMethod.WINRM
     actual_port = port or (5985 if is_win else 22)
     target = EndpointTarget(
         hostname=target_host,
@@ -221,16 +242,70 @@ def run_cmd(
         winrm_use_ssl=winrm_ssl,
         install_telegraf=install_telegraf,
         telegraf_version=telegraf_version,
+        registered_hostname=hostname,
     )
+
+    # Opt-in plugin resolution:
+    # If the user explicitly passed any core plugin flags, enable only the ones opted into.
+    # If the user passed no core plugin flags at all, apply the recommended baseline for the target OS.
+    # Workload plugins (nginx, mssql, etc.) supplement the baseline rather than disabling it.
+    explicit_flags = [cpu, mem, disk, net, system, swap, diskio, processes, win_perf]
+    has_explicit_core_plugin = any(f is not None for f in explicit_flags) or bool(win_services) or no_win_services
+
+    if not has_explicit_core_plugin:
+        # Auto-apply OS baseline
+        effective_cpu = not is_win
+        effective_mem = not is_win
+        effective_disk = not is_win
+        effective_net = not is_win
+        effective_system = not is_win
+        effective_swap = not is_win
+        effective_diskio = False
+        effective_proc = False
+        effective_win_perf = is_win
+        effective_win_svc = is_win
+    else:
+        all_specified = [f for f in explicit_flags if f is not None]
+        only_negatives = (
+            len(all_specified) > 0 and all(f is False for f in all_specified) and not bool(win_services)
+        ) or (len(all_specified) == 0 and no_win_services)
+        if only_negatives:
+            # Baseline minus negated plugins
+            effective_cpu = (cpu if cpu is not None else True) if not is_win else False
+            effective_mem = (mem if mem is not None else True) if not is_win else False
+            effective_disk = (disk if disk is not None else True) if not is_win else False
+            effective_net = (net if net is not None else True) if not is_win else False
+            effective_system = (system if system is not None else True) if not is_win else False
+            effective_swap = (swap if swap is not None else True) if not is_win else False
+            effective_diskio = False
+            effective_proc = False
+            effective_win_perf = (win_perf if win_perf is not None else True) if is_win else False
+            effective_win_svc = (not no_win_services) if is_win else False
+        else:
+            # Pure opt-in
+            effective_cpu = bool(cpu)
+            effective_mem = bool(mem)
+            effective_disk = bool(disk)
+            effective_net = bool(net)
+            effective_system = bool(system)
+            effective_swap = bool(swap)
+            effective_diskio = bool(diskio)
+            effective_proc = bool(processes)
+            effective_win_perf = bool(win_perf)
+            effective_win_svc = bool(win_services) and not no_win_services
 
     svc_list = [s.strip() for s in win_services.split(",") if s.strip()] if win_services else ["*"]
     monitoring = MonitoringConfig(
-        cpu=CpuInputConfig(enabled=cpu),
-        mem=MemInputConfig(enabled=mem),
-        disk=DiskInputConfig(enabled=disk),
-        net=NetInputConfig(enabled=net),
-        win_perf_counters=WinPerfCountersInputConfig(enabled=win_perf),
-        win_services=WinServicesInputConfig(enabled=bool(win_services), service_names=svc_list),
+        cpu=CpuInputConfig(enabled=effective_cpu),
+        mem=MemInputConfig(enabled=effective_mem),
+        disk=DiskInputConfig(enabled=effective_disk),
+        net=NetInputConfig(enabled=effective_net),
+        system=SystemInputConfig(enabled=effective_system),
+        swap=SwapInputConfig(enabled=effective_swap),
+        diskio=DiskIoInputConfig(enabled=effective_diskio),
+        processes=ProcessesInputConfig(enabled=effective_proc),
+        win_perf_counters=WinPerfCountersInputConfig(enabled=effective_win_perf),
+        win_services=WinServicesInputConfig(enabled=effective_win_svc, service_names=svc_list),
         nginx=NginxInputConfig(enabled=bool(nginx), urls=[nginx] if nginx else ["http://localhost/status"]),
         apache=ApacheInputConfig(enabled=bool(apache), urls=[apache] if apache else ["http://localhost/server-status?auto"]),
         mysql=MysqlInputConfig(enabled=bool(mysql), servers=[mysql] if mysql else ["tcp(127.0.0.1:3306)/"]),
@@ -272,23 +347,34 @@ def run_cmd(
         system_toml = TelegrafRenderer.render_system_inputs(monitoring)
         vcf_toml = TelegrafRenderer.render_vcf_output(
             collector_address=collector,
-            hostname=target_host,
+            hostname=target.registered_hostname or target_host,
             ip=target_host,
             verify_ssl=verify_ssl,
+            is_windows=is_win,
         )
+        if is_win:
+            planned_cmds = [
+                "mkdir C:\\telegraf\\telegraf.d",
+                "upload vcf-helper-system.conf -> C:\\telegraf\\telegraf.d\\vcf-helper-system.conf",
+                "upload cloudproxy-http.conf -> C:\\telegraf\\telegraf.d\\cloudproxy-http.conf",
+                "& 'C:\\telegraf\\telegraf.exe' --test --config 'C:\\telegraf\\telegraf.conf' --config-directory 'C:\\telegraf\\telegraf.d'",
+                "Restart-Service telegraf -Force",
+            ]
+        else:
+            planned_cmds = [
+                "mkdir -p /etc/telegraf/telegraf.d",
+                "upload vcf-helper-system.conf -> /etc/telegraf/telegraf.d/vcf-helper-system.conf",
+                "upload cloudproxy-http.conf -> /etc/telegraf/telegraf.d/cloudproxy-http.conf",
+                "/usr/bin/telegraf --test",
+                "systemctl restart telegraf",
+            ]
         display_preview(
             console,
             target_host,
             collector,
             system_toml,
             vcf_toml,
-            [
-                "mkdir -p /etc/telegraf/telegraf.d",
-                "upload vcf-helper-system.conf -> /etc/telegraf/telegraf.d/vcf-helper-system.conf",
-                "upload cloudproxy-http.conf -> /etc/telegraf/telegraf.d/cloudproxy-http.conf",
-                "/usr/bin/telegraf --test",
-                "systemctl restart telegraf",
-            ],
+            planned_cmds,
         )
 
     reporter = RichTerminalProgressReporter(console)
@@ -327,12 +413,17 @@ def run_cmd(
 
 
 @cli.command("render")
-@click.option("--cpu/--no-cpu", default=True, help="Enable CPU monitoring")
-@click.option("--mem/--no-mem", default=True, help="Enable memory monitoring")
-@click.option("--disk/--no-disk", default=True, help="Enable disk monitoring")
-@click.option("--net/--no-net", default=True, help="Enable network monitoring")
-@click.option("--win-perf", is_flag=True, default=False, help="Enable Windows performance counters")
+@click.option("--cpu/--no-cpu", default=None, help="Enable or disable CPU monitoring")
+@click.option("--mem/--no-mem", default=None, help="Enable or disable memory monitoring")
+@click.option("--disk/--no-disk", default=None, help="Enable or disable disk monitoring")
+@click.option("--net/--no-net", default=None, help="Enable or disable network monitoring")
+@click.option("--system/--no-system", default=None, help="Enable or disable system load and uptime monitoring")
+@click.option("--swap/--no-swap", default=None, help="Enable or disable swap monitoring")
+@click.option("--diskio/--no-diskio", default=None, help="Enable or disable disk I/O monitoring")
+@click.option("--processes/--no-processes", default=None, help="Enable or disable process count monitoring")
+@click.option("--win-perf/--no-win-perf", default=None, help="Enable or disable Windows performance counters")
 @click.option("--win-services", default=None, help="Comma-separated Windows services to monitor")
+@click.option("--no-win-services", is_flag=True, default=False, help="Disable Windows services monitoring")
 @click.option("--nginx", default=None, help="NGINX status URL (e.g. http://localhost/status)")
 @click.option("--apache", default=None, help="Apache status URL (e.g. http://localhost/server-status?auto)")
 @click.option("--mysql", default=None, help="MySQL connection string (e.g. tcp(127.0.0.1:3306)/)")
@@ -340,15 +431,22 @@ def run_cmd(
 @click.option("--mssql", default=None, help="MSSQL connection string")
 @click.option("--docker", default=None, help="Docker daemon endpoint (e.g. unix:///var/run/docker.sock)")
 @click.option("--ping", default=None, help="Ping target IP or hostname")
+@click.option("--os", "target_os", type=click.Choice(["linux", "windows"], case_sensitive=False), default=None, help="Target operating system")
+@click.option("--hostname", default=None, help="Explicit hostname for VCF Operations registration")
 @click.option("--collector", default="10.10.10.50", help="Collector address for output fragment")
 @click.option("--target-host", default="target.local", help="Target hostname")
 def render_cmd(
-    cpu: bool,
-    mem: bool,
-    disk: bool,
-    net: bool,
-    win_perf: bool,
+    cpu: Optional[bool],
+    mem: Optional[bool],
+    disk: Optional[bool],
+    net: Optional[bool],
+    system: Optional[bool],
+    swap: Optional[bool],
+    diskio: Optional[bool],
+    processes: Optional[bool],
+    win_perf: Optional[bool],
     win_services: Optional[str],
+    no_win_services: bool,
     nginx: Optional[str],
     apache: Optional[str],
     mysql: Optional[str],
@@ -356,18 +454,72 @@ def render_cmd(
     mssql: Optional[str],
     docker: Optional[str],
     ping: Optional[str],
+    target_os: Optional[str],
+    hostname: Optional[str],
     collector: str,
     target_host: str,
 ) -> None:
     """Render and preview Telegraf TOML fragments directly to stdout."""
+    if target_os:
+        is_win = target_os.lower() == "windows"
+    else:
+        is_win = bool(win_perf or win_services or no_win_services or (win_perf is False))
+
+    explicit_flags = [cpu, mem, disk, net, system, swap, diskio, processes, win_perf]
+    has_explicit_core_plugin = any(f is not None for f in explicit_flags) or bool(win_services) or no_win_services
+
+    if not has_explicit_core_plugin:
+        effective_cpu = not is_win
+        effective_mem = not is_win
+        effective_disk = not is_win
+        effective_net = not is_win
+        effective_system = not is_win
+        effective_swap = not is_win
+        effective_diskio = False
+        effective_proc = False
+        effective_win_perf = is_win
+        effective_win_svc = is_win
+    else:
+        all_specified = [f for f in explicit_flags if f is not None]
+        only_negatives = (
+            len(all_specified) > 0 and all(f is False for f in all_specified) and not bool(win_services)
+        ) or (len(all_specified) == 0 and no_win_services)
+        if only_negatives:
+            # Baseline minus negated plugins
+            effective_cpu = (cpu if cpu is not None else True) if not is_win else False
+            effective_mem = (mem if mem is not None else True) if not is_win else False
+            effective_disk = (disk if disk is not None else True) if not is_win else False
+            effective_net = (net if net is not None else True) if not is_win else False
+            effective_system = (system if system is not None else True) if not is_win else False
+            effective_swap = (swap if swap is not None else True) if not is_win else False
+            effective_diskio = False
+            effective_proc = False
+            effective_win_perf = (win_perf if win_perf is not None else True) if is_win else False
+            effective_win_svc = (not no_win_services) if is_win else False
+        else:
+            effective_cpu = bool(cpu)
+            effective_mem = bool(mem)
+            effective_disk = bool(disk)
+            effective_net = bool(net)
+            effective_system = bool(system)
+            effective_swap = bool(swap)
+            effective_diskio = bool(diskio)
+            effective_proc = bool(processes)
+            effective_win_perf = bool(win_perf)
+            effective_win_svc = bool(win_services) and not no_win_services
+
     svc_list = [s.strip() for s in win_services.split(",") if s.strip()] if win_services else ["*"]
     cfg = MonitoringConfig(
-        cpu=CpuInputConfig(enabled=cpu),
-        mem=MemInputConfig(enabled=mem),
-        disk=DiskInputConfig(enabled=disk),
-        net=NetInputConfig(enabled=net),
-        win_perf_counters=WinPerfCountersInputConfig(enabled=win_perf),
-        win_services=WinServicesInputConfig(enabled=bool(win_services), service_names=svc_list),
+        cpu=CpuInputConfig(enabled=effective_cpu),
+        mem=MemInputConfig(enabled=effective_mem),
+        disk=DiskInputConfig(enabled=effective_disk),
+        net=NetInputConfig(enabled=effective_net),
+        system=SystemInputConfig(enabled=effective_system),
+        swap=SwapInputConfig(enabled=effective_swap),
+        diskio=DiskIoInputConfig(enabled=effective_diskio),
+        processes=ProcessesInputConfig(enabled=effective_proc),
+        win_perf_counters=WinPerfCountersInputConfig(enabled=effective_win_perf),
+        win_services=WinServicesInputConfig(enabled=effective_win_svc, service_names=svc_list),
         nginx=NginxInputConfig(enabled=bool(nginx), urls=[nginx] if nginx else ["http://localhost/status"]),
         apache=ApacheInputConfig(enabled=bool(apache), urls=[apache] if apache else ["http://localhost/server-status?auto"]),
         mysql=MysqlInputConfig(enabled=bool(mysql), servers=[mysql] if mysql else ["tcp(127.0.0.1:3306)/"]),
@@ -378,7 +530,11 @@ def render_cmd(
     )
 
     system_toml = TelegrafRenderer.render_system_inputs(cfg)
-    vcf_toml = TelegrafRenderer.render_vcf_output(collector_address=collector, hostname=target_host)
+    vcf_toml = TelegrafRenderer.render_vcf_output(
+        collector_address=collector,
+        hostname=hostname or target_host,
+        is_windows=is_win,
+    )
 
     console.print("[bold cyan]# vcf-helper-system.conf[/bold cyan]")
     console.print(Syntax(system_toml, "toml"))

@@ -40,6 +40,7 @@ class EndpointTarget(BaseModel):
     winrm_use_ssl: bool = Field(default=False, description="Use HTTPS/SSL for WinRM transport")
     install_telegraf: bool = Field(default=False, description="Install Telegraf agent if missing")
     telegraf_version: Optional[str] = Field(default=None, description="Telegraf version release to install")
+    registered_hostname: Optional[str] = Field(default=None, description="Explicit hostname for VCF Operations registration (overrides discovery)")
 
     @model_validator(mode="after")
     def set_winrm_default_port(self) -> EndpointTarget:
