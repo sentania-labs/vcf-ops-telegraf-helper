@@ -218,7 +218,11 @@ class ConfigureEndpointWorkflow:
 
             dur = int((time.monotonic() - start) * 1000)
             auto_install = self.target.install_telegraf or self.options.install_telegraf
-            telegraf_ver = getattr(self.target, "telegraf_version", None) or getattr(self.options, "telegraf_version", None) or "1.40.1"
+            telegraf_ver = (
+                getattr(self.options, "telegraf_version", None)
+                or getattr(self.target, "telegraf_version", None)
+                or "1.40.1"
+            )
 
             if not installed and self.options.mode == DeploymentMode.PUSH and not auto_install:
                 res = StageResult(
@@ -492,7 +496,11 @@ class ConfigureEndpointWorkflow:
             # Auto-install Telegraf if missing and requested
             auto_install = self.target.install_telegraf or self.options.install_telegraf
             if self.discovery and not self.discovery.telegraf_installed and auto_install:
-                telegraf_ver = getattr(self.target, "telegraf_version", None) or getattr(self.options, "telegraf_version", None) or "1.40.1"
+                telegraf_ver = (
+                    getattr(self.options, "telegraf_version", None)
+                    or getattr(self.target, "telegraf_version", None)
+                    or "1.40.1"
+                )
                 arch_str = (getattr(self.discovery, "arch", "") or getattr(self.discovery, "architecture", "") or "").lower()
                 is_arm = "arm" in arch_str or "aarch" in arch_str
                 if is_win:
@@ -921,10 +929,20 @@ class ConfigureEndpointWorkflow:
                     is_windows=is_win,
                     verify_ssl=self.env.verify_ssl,
                 )
-                self.verifications["Metrics transmission"] = "PASS" if probe_val.is_valid else f"FAIL ({probe_val.message})"
+                # 6. Ingestion in VCF Ops
+                ingestion_status = self.adapter.verify_ingestion(self.target.hostname)
+                self.verifications["VCF Ops ingestion"] = ingestion_status
+
+                # Verify metrics transmission either via authenticated probe or confirmed VCF Ops ingestion
+                if probe_val.is_valid:
+                    self.verifications["Metrics transmission"] = "PASS"
+                elif is_win and "schannel" in (str(probe_val.message) + " " + str(probe_val.details)).lower() and ingestion_status == "PASS":
+                    self.verifications["Metrics transmission"] = "PASS (verified via VCF Ops ingestion)"
+                else:
+                    self.verifications["Metrics transmission"] = f"FAIL ({probe_val.message})"
 
                 # Also inspect recent service log for output errors on Linux and Windows
-                if probe_val.is_valid:
+                if self.verifications["Metrics transmission"].startswith("PASS"):
                     if is_win:
                         win_log_cmd = (
                             "$t = (Get-Date).AddMinutes(-2); "
@@ -940,10 +958,6 @@ class ConfigureEndpointWorkflow:
                         if journal_res.success and journal_res.stdout:
                             if "received status code: 403" in journal_res.stdout or "Error writing to outputs.http" in journal_res.stdout:
                                 self.verifications["Metrics transmission"] = "FAIL (HTTP 403 Forbidden in telegraf service log)"
-
-                # 6. Ingestion in VCF Ops
-                ingestion_status = self.adapter.verify_ingestion(self.target.hostname)
-                self.verifications["VCF Ops ingestion"] = ingestion_status
             else:
                 self.verifications["Service running"] = "SKIPPED"
                 self.verifications["Local metrics generated"] = "SKIPPED"

@@ -220,8 +220,8 @@ def test_validate_cloudproxy_mtls_metric_probe_windows_curl_missing():
     assert "curl.exe is not available" in res.message
 
 
-def test_validate_cloudproxy_mtls_metric_probe_windows_schannel_pem_fallback_success():
-    """Verify probe succeeds when Windows curl hits Schannel PEM error but port 443 and service are active."""
+def test_validate_cloudproxy_mtls_metric_probe_windows_schannel_pem_fallback_unverified():
+    """Verify probe returns is_valid=False and indicates unverified when Windows curl hits Schannel PEM error."""
     from unittest.mock import MagicMock
     from vcf_ops_telegraf_helper.executors.base import CommandResult
 
@@ -247,9 +247,9 @@ def test_validate_cloudproxy_mtls_metric_probe_windows_schannel_pem_fallback_suc
         ca_cert_path="C:\\telegraf\\telegraf.d\\ca.pem",
         is_windows=True,
     )
-    assert res.is_valid is True
-    assert "port 443 reachable" in res.message
-    assert "Schannel PEM limitation bypassed" in res.message
+    assert res.is_valid is False
+    assert "Schannel backend cannot load detached PEM client certificates" in res.message
+    assert "TCP:True;SVC:Running" in res.details
 
 
 def test_validate_cloudproxy_mtls_metric_probe_windows_schannel_pem_fallback_tcp_failure():

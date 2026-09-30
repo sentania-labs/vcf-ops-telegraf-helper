@@ -384,9 +384,10 @@ class Validator:
             if tcp_ok and svc_running:
                 return ValidationResult(
                     domain="Metrics Transmission",
-                    is_valid=True,
-                    message="Cloud Proxy port 443 reachable and Telegraf service running (Windows curl Schannel PEM limitation bypassed; Telegraf native Go TLS handles client certificates)",
+                    is_valid=False,
+                    message="Windows curl Schannel backend cannot load detached PEM client certificates; mTLS probe unverified",
                     details=f"curl output: {out}; probe: {probe_out}",
+                    remediation="Windows built-in curl.exe uses Schannel and cannot load PEM client certificates for mTLS probe. Verify metrics ingestion in VCF Operations or check Telegraf service logs.",
                 )
             elif tcp_ok and not svc_running:
                 return ValidationResult(
