@@ -69,6 +69,7 @@ def test_winrm_executor_upload():
     expected_b64 = base64.b64encode(content.encode("utf-8")).decode("ascii")
     assert expected_b64 in called_cmd
     assert "C:\\telegraf\\telegraf.d\\test.conf" in called_cmd
+    assert "[System.IO.FileMode]::Append" in called_cmd
 
 
 def test_winrm_executor_file_exists():

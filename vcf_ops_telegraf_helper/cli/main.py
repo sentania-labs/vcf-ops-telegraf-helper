@@ -113,6 +113,7 @@ def gui_cmd(theme: str) -> None:
 @click.option("--vcf-url", required=True, help="VCF Operations URL, e.g. https://vcf-ops.local")
 @click.option("--vcf-user", default="admin", help="VCF Operations username")
 @click.option("--vcf-pass", default=None, help="VCF Operations password")
+@click.option("--vcf-token", default=None, help="VCF Operations API token")
 @click.option("--mock-vcf", is_flag=True, help="Use simulated VCF Operations adapter for offline testing")
 @click.option("--collector", required=True, help="Cloud Proxy or Collector IP/FQDN")
 @click.option("--verify-ssl/--no-verify-ssl", default=True, help="Verify TLS certificates")
@@ -123,6 +124,7 @@ def gui_cmd(theme: str) -> None:
     default="ssh",
     help="Endpoint connection method",
 )
+@click.option("--port", type=int, default=None, help="Remote connection port")
 @click.option("--ssh-user", default=None, help="SSH/WinRM username")
 @click.option("--ssh-pass", default=None, help="SSH/WinRM password")
 @click.option("--ssh-key", default=None, help="SSH private key path")
@@ -156,11 +158,13 @@ def run_cmd(
     vcf_url: str,
     vcf_user: str,
     vcf_pass: Optional[str],
+    vcf_token: Optional[str],
     mock_vcf: bool,
     collector: str,
     verify_ssl: bool,
     target_host: str,
     connection: str,
+    port: Optional[int],
     ssh_user: Optional[str],
     ssh_pass: Optional[str],
     ssh_key: Optional[str],
@@ -194,16 +198,19 @@ def run_cmd(
         url=vcf_url,
         username=vcf_user,
         password=vcf_pass,
+        token=vcf_token,
         collector=CollectorInfo(address=collector),
         verify_ssl=verify_ssl,
     )
 
     conn_method = ConnectionMethod(connection)
     is_win = conn_method == ConnectionMethod.WINRM
+    actual_port = port or (5985 if is_win else 22)
     target = EndpointTarget(
         hostname=target_host,
         os_family=OSFamily.WINDOWS if is_win else OSFamily.LINUX,
         connection_method=conn_method,
+        port=actual_port,
         username=ssh_user or ("Administrator" if is_win else None),
         password=ssh_pass,
         key_filename=ssh_key,
@@ -245,6 +252,7 @@ def run_cmd(
     else:
         executor = SSHExecutor(
             hostname=target_host,
+            port=target.port,
             username=ssh_user,
             password=ssh_pass,
             key_filename=ssh_key,

@@ -11,12 +11,13 @@ Provides the complete 5-step guided onboarding workflow:
 from __future__ import annotations
 
 from pathlib import Path
+import shlex
 import sys
 from typing import Any, Optional
 
-from PySide6.QtCore import QObject, QThread, Signal, Qt
+from PySide6.QtCore import QObject, QThread, QTimer, Signal, Qt
 from PySide6.QtWidgets import (
-    QButtonGroup,
+    QApplication,
     QCheckBox,
     QComboBox,
     QFileDialog,
@@ -31,7 +32,6 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
-    QRadioButton,
     QScrollArea,
     QStackedWidget,
     QVBoxLayout,
@@ -310,6 +310,8 @@ class MainWindow(QMainWindow):
     def _on_step_changed(self, row: int) -> None:
         if row == 3:  # Review & Preview
             self._update_preview()
+        elif row == 4:  # Execution
+            self._update_cli_command()
         self.page_stack.setCurrentIndex(row)
 
     # --------------------------------------------------------------------------
@@ -470,54 +472,48 @@ class MainWindow(QMainWindow):
         self.ep_os_combo.currentTextChanged.connect(self._on_os_changed)
         grid.addWidget(self.ep_os_combo, 0, 1)
 
-        grid.addWidget(QLabel("Connection Method:"), 1, 0)
-        self.ep_method_combo = QComboBox()
-        self.ep_method_combo.addItems(["SSH (Linux Remote)", "WinRM (Windows Remote)", "Local Subprocess", "Package Script Bundle"])
-        self.ep_method_combo.currentTextChanged.connect(self._on_method_changed)
-        grid.addWidget(self.ep_method_combo, 1, 1)
-
-        grid.addWidget(QLabel("Hostname or IP Address:"), 2, 0)
+        grid.addWidget(QLabel("Hostname or IP Address:"), 1, 0)
         self.ep_host_input = QLineEdit("10.10.10.101")
-        grid.addWidget(self.ep_host_input, 2, 1)
+        grid.addWidget(self.ep_host_input, 1, 1)
 
         self.ep_auth_type_label = QLabel("Authentication:")
         self.ep_auth_type_combo = QComboBox()
         self.ep_auth_type_combo.addItems(["SSH Private Key", "Username & Password"])
         self.ep_auth_type_combo.currentTextChanged.connect(self._on_auth_type_changed)
-        grid.addWidget(self.ep_auth_type_label, 3, 0)
-        grid.addWidget(self.ep_auth_type_combo, 3, 1)
+        grid.addWidget(self.ep_auth_type_label, 2, 0)
+        grid.addWidget(self.ep_auth_type_combo, 2, 1)
 
         self.ep_user_label = QLabel("Username:")
         self.ep_user_input = QLineEdit("root")
-        grid.addWidget(self.ep_user_label, 4, 0)
-        grid.addWidget(self.ep_user_input, 4, 1)
+        grid.addWidget(self.ep_user_label, 3, 0)
+        grid.addWidget(self.ep_user_input, 3, 1)
 
         self.ep_pass_label = QLabel("Password:")
         self.ep_pass_input = QLineEdit()
         self.ep_pass_input.setEchoMode(QLineEdit.Password)
-        grid.addWidget(self.ep_pass_label, 5, 0)
-        grid.addWidget(self.ep_pass_input, 5, 1)
+        grid.addWidget(self.ep_pass_label, 4, 0)
+        grid.addWidget(self.ep_pass_input, 4, 1)
 
         self.ep_key_label = QLabel("SSH Key Path:")
         self.ep_key_input = QLineEdit("~/.ssh/id_rsa")
-        grid.addWidget(self.ep_key_label, 6, 0)
-        grid.addWidget(self.ep_key_input, 6, 1)
+        grid.addWidget(self.ep_key_label, 5, 0)
+        grid.addWidget(self.ep_key_input, 5, 1)
 
         self.ep_advanced_check = QCheckBox("Show advanced connection options")
         self.ep_advanced_check.setChecked(False)
         self.ep_advanced_check.toggled.connect(self._on_advanced_toggled)
-        grid.addWidget(self.ep_advanced_check, 7, 0, 1, 2)
+        grid.addWidget(self.ep_advanced_check, 6, 0, 1, 2)
 
         self.ep_port_label = QLabel("Port:")
         self.ep_port_input = QLineEdit("22")
         self.ep_port_label.setVisible(False)
         self.ep_port_input.setVisible(False)
-        grid.addWidget(self.ep_port_label, 8, 0)
-        grid.addWidget(self.ep_port_input, 8, 1)
+        grid.addWidget(self.ep_port_label, 7, 0)
+        grid.addWidget(self.ep_port_input, 7, 1)
 
         self.ep_auto_install_check = QCheckBox("Install open-source Telegraf agent if missing (InfluxData official distribution)")
         self.ep_auto_install_check.setChecked(True)
-        grid.addWidget(self.ep_auto_install_check, 9, 0, 1, 2)
+        grid.addWidget(self.ep_auto_install_check, 8, 0, 1, 2)
 
         c_layout.addLayout(grid)
         self._update_auth_and_endpoint_visibility()
@@ -590,12 +586,11 @@ class MainWindow(QMainWindow):
         return page
 
     def _update_auth_and_endpoint_visibility(self) -> None:
-        if not hasattr(self, "ep_os_combo") or not hasattr(self, "ep_method_combo"):
+        if not hasattr(self, "ep_os_combo"):
             return
         is_win = self.ep_os_combo.currentText().lower().startswith("win")
-        method = self.ep_method_combo.currentText().lower()
 
-        if is_win or "winrm" in method:
+        if is_win:
             self.ep_auth_type_label.setVisible(False)
             self.ep_auth_type_combo.setVisible(False)
             self.ep_key_label.setVisible(False)
@@ -606,29 +601,18 @@ class MainWindow(QMainWindow):
             self.ep_pass_input.setVisible(True)
             self.ep_user_label.setVisible(True)
             self.ep_user_input.setVisible(True)
-        elif "ssh" in method:
+        else:
             self.ep_auth_type_label.setVisible(True)
             self.ep_auth_type_combo.setVisible(True)
             self.ep_user_label.setVisible(True)
             self.ep_user_input.setVisible(True)
-            use_key = "key" in self.ep_auth_type_combo.currentText().lower()
+            use_key = hasattr(self, "ep_auth_type_combo") and "key" in self.ep_auth_type_combo.currentText().lower()
             self.ep_key_label.setVisible(use_key)
             self.ep_key_input.setVisible(use_key)
             self.ep_key_label.setEnabled(use_key)
             self.ep_key_input.setEnabled(use_key)
             self.ep_pass_label.setVisible(not use_key)
             self.ep_pass_input.setVisible(not use_key)
-        else:
-            self.ep_auth_type_label.setVisible(False)
-            self.ep_auth_type_combo.setVisible(False)
-            self.ep_key_label.setVisible(False)
-            self.ep_key_input.setVisible(False)
-            self.ep_key_label.setEnabled(False)
-            self.ep_key_input.setEnabled(False)
-            self.ep_pass_label.setVisible(False)
-            self.ep_pass_input.setVisible(False)
-            self.ep_user_label.setVisible(False)
-            self.ep_user_input.setVisible(False)
 
     def _update_vcf_auth_visibility(self) -> None:
         if not hasattr(self, "vcf_auth_type_combo"):
@@ -649,16 +633,14 @@ class MainWindow(QMainWindow):
     def _on_os_changed(self, os_name: str) -> None:
         is_win = os_name.lower().startswith("win")
         if is_win:
-            self.ep_method_combo.setCurrentText("WinRM (Windows Remote)")
-            if not self.ep_advanced_check.isChecked():
+            if not self.ep_advanced_check.isChecked() or self.ep_port_input.text() == "22":
                 self.ep_port_input.setText("5985")
             if self.ep_user_input.text() == "root":
                 self.ep_user_input.setText("Administrator")
             if hasattr(self, "docker_endpoint_input") and self.docker_endpoint_input.text().strip() in ("", "unix:///var/run/docker.sock"):
                 self.docker_endpoint_input.setText("npipe:////./pipe/docker_engine")
         else:
-            self.ep_method_combo.setCurrentText("SSH (Linux Remote)")
-            if not self.ep_advanced_check.isChecked():
+            if not self.ep_advanced_check.isChecked() or self.ep_port_input.text() == "5985":
                 self.ep_port_input.setText("22")
             if self.ep_user_input.text() == "Administrator":
                 self.ep_user_input.setText("root")
@@ -669,20 +651,6 @@ class MainWindow(QMainWindow):
 
         if hasattr(self, "catalog_items"):
             self._update_catalog_os_compatibility(is_win)
-
-    def _on_method_changed(self, method_name: str) -> None:
-        m_lower = method_name.lower()
-        if "winrm" in m_lower:
-            if hasattr(self, "ep_os_combo") and self.ep_os_combo.currentText() != "Windows":
-                self.ep_os_combo.setCurrentText("Windows")
-            if hasattr(self, "ep_port_input") and not self.ep_advanced_check.isChecked():
-                self.ep_port_input.setText("5985")
-        elif "ssh" in m_lower:
-            if hasattr(self, "ep_os_combo") and self.ep_os_combo.currentText() != "Linux":
-                self.ep_os_combo.setCurrentText("Linux")
-            if hasattr(self, "ep_port_input") and not self.ep_advanced_check.isChecked():
-                self.ep_port_input.setText("22")
-        self._update_auth_and_endpoint_visibility()
 
     def _on_auth_type_changed(self, text: str) -> None:
         self._update_auth_and_endpoint_visibility()
@@ -1268,24 +1236,6 @@ class MainWindow(QMainWindow):
 
         c_layout.addLayout(pane_layout)
 
-        sec_mode = QLabel("DEPLOYMENT MODE")
-        sec_mode.setProperty("class", "lattice-section-label")
-        c_layout.addWidget(sec_mode)
-
-        self.mode_group = QButtonGroup(self)
-        self.mode_push = QRadioButton("Direct Push: Helper automatically applies config and restarts Telegraf")
-        self.mode_push.setChecked(True)
-        self.mode_script = QRadioButton("Generate Bundle: Creates auditable script package (apply.sh + configs)")
-        self.mode_conf = QRadioButton("Configuration Only: Preview and render files without target changes")
-
-        self.mode_group.addButton(self.mode_push, 0)
-        self.mode_group.addButton(self.mode_script, 1)
-        self.mode_group.addButton(self.mode_conf, 2)
-
-        c_layout.addWidget(self.mode_push)
-        c_layout.addWidget(self.mode_script)
-        c_layout.addWidget(self.mode_conf)
-
         btn_row = QHBoxLayout()
         back_btn = QPushButton("<- Back: Endpoint")
         back_btn.clicked.connect(lambda: self.step_list.setCurrentRow(1))
@@ -1509,10 +1459,14 @@ class MainWindow(QMainWindow):
         desc.setWordWrap(True)
         c_layout.addWidget(desc)
 
+        lbl_plan = QLabel("EXECUTION PLAN:")
+        lbl_plan.setProperty("class", "lattice-caption")
+        c_layout.addWidget(lbl_plan)
+
         self.review_summary_box = QPlainTextEdit()
         self.review_summary_box.setProperty("class", "code-block")
         self.review_summary_box.setReadOnly(True)
-        self.review_summary_box.setMaximumHeight(80)
+        self.review_summary_box.setMinimumHeight(140)
         c_layout.addWidget(self.review_summary_box)
 
         lbl_sys = QLabel("GENERATED SYSTEM INPUTS (vcf-helper-system.conf):")
@@ -1564,7 +1518,6 @@ class MainWindow(QMainWindow):
         target = self._get_endpoint_target()
         env = self._get_vcf_env()
         mon = self._get_monitoring_config()
-        mode = self._get_deployment_mode()
 
         is_win = target.os_family == OSFamily.WINDOWS
         conf_dir = "C:\\telegraf\\telegraf.d" if is_win else "/etc/telegraf/telegraf.d"
@@ -1623,23 +1576,28 @@ class MainWindow(QMainWindow):
 
         if target.install_telegraf:
             install_desc = (
-                "YES (Source: InfluxData Official Release (https://dl.influxdata.com/telegraf/releases/))"
+                "Install official InfluxData agent release package"
                 if is_win
-                else "YES (Source: InfluxData Repository (https://repos.influxdata.com) / Official Archive)"
+                else "Install official InfluxData agent via native package manager or archive fallback"
             )
         else:
-            install_desc = "NO (assumes pre-installed agent)"
+            install_desc = "Verify existing pre-installed Telegraf agent"
 
-        summary_lines = [
-            f"Target: {target.hostname} ({target.connection_method.value}, OS: {target.os_family.value})",
-            f"VCF Collector: {env.collector.address} (SSL Verify: {env.verify_ssl})",
-            f"Auto-Install Telegraf: {install_desc}",
-            f"Deployment Mode: {mode.value}",
-            f"Config Directory: {conf_dir}",
-            f"Active Plugins ({len(active_plugins)}): {', '.join(active_plugins)}",
-            f"Managed Fragments: {conf_dir}/vcf-helper-system.conf, {conf_dir}/cloudproxy-http.conf",
+        plan_lines = [
+            f"Target Endpoint: {target.hostname} ({target.connection_method.value.upper()}, OS: {target.os_family.value}, Port: {target.port})",
+            f"VCF Collector:   {env.collector.address} (SSL Verify: {env.verify_ssl})",
+            "",
+            "PLANNED EXECUTION STAGES:",
+            f"1. Validate Connectivity: Test connection to {target.hostname} via {target.connection_method.value.upper()} (port {target.port}) and verify VCF Ops Collector reachability.",
+            f"2. Acquire Certificates: Connect to VCF Operations Suite API ({env.url}) to acquire mTLS client certificates (ca.cert, client.cert, client.key).",
+            f"3. Agent Provisioning: {install_desc}.",
+            f"4. Monitoring Configuration: Deploy {conf_dir}/vcf-helper-system.conf ({len(active_plugins)} active plugins: {', '.join(active_plugins)}).",
+            f"5. Output Pipeline: Deploy {conf_dir}/cloudproxy-http.conf targeting {env.collector.address} with mTLS authentication.",
+            f"6. Mandatory Metadata: Deploy {'mandatory_tags.bat' if is_win else 'mandatory_tags.sh'} to inject VCF Operations resource tags.",
+            f"7. Syntax Verification: Run telegraf --test on {target.hostname} to ensure valid configuration syntax before starting service.",
+            f"8. Service Activation: Enable and restart Telegraf service ({'Windows Service' if is_win else 'systemd unit'}) and verify telemetry ingestion.",
         ]
-        self.review_summary_box.setPlainText("\n".join(summary_lines))
+        self.review_summary_box.setPlainText("\n".join(plan_lines))
         self.preview_system_box.setPlainText(sys_toml)
         self.preview_output_box.setPlainText(out_toml)
 
@@ -1707,16 +1665,33 @@ class MainWindow(QMainWindow):
         self.stage_list_box.setMinimumHeight(180)
         c_layout.addWidget(self.stage_list_box)
 
-        # Verification Checklist table
-        ver_lbl = QLabel("OPERATIONAL VERIFICATION CHECKLIST")
-        ver_lbl.setProperty("class", "lattice-section-label")
-        c_layout.addWidget(ver_lbl)
+        # CLI Command card (Exchange-style repeatability)
+        cli_lbl = QLabel("CLI COMMAND TO REPEAT THIS WORKFLOW")
+        cli_lbl.setProperty("class", "lattice-section-label")
+        c_layout.addWidget(cli_lbl)
 
-        self.ver_box = QPlainTextEdit()
-        self.ver_box.setProperty("class", "code-block")
-        self.ver_box.setReadOnly(True)
-        self.ver_box.setMinimumHeight(130)
-        c_layout.addWidget(self.ver_box)
+        cli_header_row = QHBoxLayout()
+        cli_desc = QLabel("Command-line invocation to repeat this exact onboarding workflow from CLI or scripts:")
+        cli_desc.setProperty("class", "lattice-muted")
+        cli_header_row.addWidget(cli_desc)
+        cli_header_row.addStretch()
+
+        self.copy_cli_btn = QPushButton("Copy Command")
+        self.copy_cli_btn.setProperty("class", "secondary")
+        self.copy_cli_btn.clicked.connect(self._copy_cli_command)
+        cli_header_row.addWidget(self.copy_cli_btn)
+        c_layout.addLayout(cli_header_row)
+
+        self.cli_command_box = QPlainTextEdit()
+        self.cli_command_box.setProperty("class", "code-block")
+        self.cli_command_box.setReadOnly(True)
+        self.cli_command_box.setMinimumHeight(130)
+        c_layout.addWidget(self.cli_command_box)
+
+        self.ver_box = self.stage_list_box
+
+        self.dry_run_check.toggled.connect(self._update_cli_command)
+        self._update_cli_command()
 
         layout.addWidget(card)
         layout.addStretch()
@@ -1727,12 +1702,97 @@ class MainWindow(QMainWindow):
         v.addWidget(scroll)
         return page
 
+    def _copy_cli_command(self) -> None:
+        cmd = self.cli_command_box.toPlainText()
+        if cmd:
+            clipboard = QApplication.clipboard()
+            if clipboard:
+                clipboard.setText(cmd)
+            self.copy_cli_btn.setText("Copied!")
+            QTimer.singleShot(2000, self, lambda: self.copy_cli_btn.setText("Copy Command"))
+
+    def _build_cli_command(self) -> str:
+        target = self._get_endpoint_target()
+        env = self._get_vcf_env()
+        mon = self._get_monitoring_config()
+        dry_run = getattr(self, "dry_run_check", None) and self.dry_run_check.isChecked()
+
+        parts = ["vcf-telegraf-helper run"]
+        parts.append(f"--vcf-url {shlex.quote(env.url)}")
+        use_token_auth = hasattr(self, "vcf_auth_type_combo") and "token" in self.vcf_auth_type_combo.currentText().lower()
+        if use_token_auth:
+            parts.append('--vcf-token "<token>"')
+        elif env.username:
+            parts.append(f"--vcf-user {shlex.quote(env.username)}")
+            if env.password:
+                parts.append('--vcf-pass "<password>"')
+
+        if not env.verify_ssl:
+            parts.append("--no-verify-ssl")
+        parts.append(f"--collector {shlex.quote(env.collector.address)}")
+
+        parts.append(f"--target-host {shlex.quote(target.hostname)}")
+        parts.append(f"--connection {shlex.quote(target.connection_method.value)}")
+
+        std_port = 5985 if target.os_family == OSFamily.WINDOWS else 22
+        if target.port != std_port:
+            parts.append(f"--port {target.port}")
+
+        if target.username:
+            parts.append(f"--ssh-user {shlex.quote(target.username)}")
+        if target.key_filename:
+            parts.append(f"--ssh-key {shlex.quote(target.key_filename)}")
+        else:
+            parts.append('--ssh-pass "<password>"')
+
+        if target.winrm_use_ssl:
+            parts.append("--winrm-ssl")
+        if target.install_telegraf:
+            parts.append("--install-telegraf")
+
+        if not mon.cpu.enabled:
+            parts.append("--no-cpu")
+        if not mon.mem.enabled:
+            parts.append("--no-mem")
+        if not mon.disk.enabled:
+            parts.append("--no-disk")
+        if not mon.net.enabled:
+            parts.append("--no-net")
+        if mon.win_perf_counters.enabled:
+            parts.append("--win-perf")
+        if mon.win_services.enabled and mon.win_services.service_names:
+            svcs = ",".join(mon.win_services.service_names)
+            parts.append(f"--win-services {shlex.quote(svcs)}")
+        if mon.nginx.enabled and mon.nginx.urls:
+            parts.append(f"--nginx {shlex.quote(mon.nginx.urls[0])}")
+        if mon.apache.enabled and mon.apache.urls:
+            parts.append(f"--apache {shlex.quote(mon.apache.urls[0])}")
+        if mon.mysql.enabled and mon.mysql.servers:
+            parts.append(f"--mysql {shlex.quote(mon.mysql.servers[0])}")
+        if mon.postgresql.enabled and mon.postgresql.address:
+            parts.append(f"--postgres {shlex.quote(mon.postgresql.address)}")
+        if mon.mssql.enabled and mon.mssql.servers:
+            parts.append(f"--mssql {shlex.quote(mon.mssql.servers[0])}")
+        if mon.docker.enabled and mon.docker.endpoint:
+            parts.append(f"--docker {shlex.quote(mon.docker.endpoint)}")
+        if mon.ping.enabled and mon.ping.urls:
+            parts.append(f"--ping {shlex.quote(mon.ping.urls[0])}")
+
+        if dry_run:
+            parts.append("--dry-run")
+
+        return " \\\n  ".join(parts)
+
+    def _update_cli_command(self) -> None:
+        if hasattr(self, "cli_command_box"):
+            self.cli_command_box.setPlainText(self._build_cli_command())
+
     def _run_workflow(self) -> None:
         self.execute_btn.setEnabled(False)
         self.stage_list_box.clear()
-        self.ver_box.clear()
         self.export_md_btn.setEnabled(False)
         self.export_json_btn.setEnabled(False)
+        self._update_cli_command()
 
         target = self._get_endpoint_target()
         env = self._get_vcf_env()
@@ -1780,19 +1840,22 @@ class MainWindow(QMainWindow):
         self.export_md_btn.setEnabled(True)
         self.export_json_btn.setEnabled(True)
 
-        # Populate verification checklist
         chk = summary.verification
         v_lines = [
+            "",
+            "============================================================",
+            f"OPERATIONAL VERIFICATION: {'PASS' if summary.success else 'FAIL'}",
+            "============================================================",
             f"Collector Reachable:     {chk.collector_reachable.value}",
             f"Telegraf Installed:      {chk.telegraf_installed.value}",
             f"Config Valid:            {chk.config_valid.value}",
             f"Service Running:         {chk.service_running.value}",
             f"Local Metrics Generated: {chk.local_metrics_generated.value}",
             f"VCF Ops Ingestion:       {chk.vcf_ops_ingestion.value}",
-            "",
-            f"Overall Status:          {'PASS' if summary.success else 'FAIL'}",
+            "============================================================",
         ]
-        self.ver_box.setPlainText("\n".join(v_lines))
+        self.stage_list_box.appendPlainText("\n".join(v_lines))
+        self._update_cli_command()
 
     def _on_worker_failed(self, error: str) -> None:
         self.execute_btn.setEnabled(True)
@@ -1843,20 +1906,18 @@ class MainWindow(QMainWindow):
         )
 
     def _get_endpoint_target(self) -> EndpointTarget:
-        method_str = self.ep_method_combo.currentText().split()[0].lower()
-        if method_str not in ("ssh", "winrm", "mock", "local", "package"):
-            method_str = "ssh"
         os_str = getattr(self, "ep_os_combo", None)
-        os_family = OSFamily.WINDOWS if os_str and os_str.currentText().lower() == "windows" else OSFamily.LINUX
-        default_user = "Administrator" if os_family == OSFamily.WINDOWS else "root"
+        is_win = bool(os_str and os_str.currentText().lower().startswith("win"))
+        os_family = OSFamily.WINDOWS if is_win else OSFamily.LINUX
+        method = ConnectionMethod.WINRM if is_win else ConnectionMethod.SSH
+        default_user = "Administrator" if is_win else "root"
         try:
             port_val = int(self.ep_port_input.text().strip())
         except Exception:
-            port_val = 5985 if os_family == OSFamily.WINDOWS else 22
+            port_val = 5985 if is_win else 22
         auto_install = self.ep_auto_install_check.isChecked() if hasattr(self, "ep_auto_install_check") else False
 
-        is_win = (os_family == OSFamily.WINDOWS)
-        if is_win or method_str == "winrm":
+        if is_win:
             key_filename = None
             password = self.ep_pass_input.text().strip() or None
         else:
@@ -1871,7 +1932,7 @@ class MainWindow(QMainWindow):
         return EndpointTarget(
             hostname=self.ep_host_input.text().strip() or "10.10.10.101",
             os_family=os_family,
-            connection_method=ConnectionMethod(method_str),
+            connection_method=method,
             port=port_val,
             username=self.ep_user_input.text().strip() or default_user,
             password=password,
@@ -1938,11 +1999,7 @@ class MainWindow(QMainWindow):
         )
 
     def _get_deployment_mode(self) -> DeploymentMode:
-        if self.mode_push.isChecked():
-            return DeploymentMode.PUSH
-        if self.mode_script.isChecked():
-            return DeploymentMode.SCRIPT
-        return DeploymentMode.CONFIG_ONLY
+        return DeploymentMode.PUSH
 
     def _create_executor(self, target: EndpointTarget) -> Any:
         m = target.connection_method.value

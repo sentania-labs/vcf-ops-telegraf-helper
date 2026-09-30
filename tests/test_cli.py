@@ -97,3 +97,30 @@ def test_cli_run_with_install_and_mock():
     assert result.exit_code == 0
     assert "Operational Verification Checklist" in result.output
 
+
+def test_cli_run_with_port_and_token():
+    """Verify run subcommand accepts --port and --vcf-token."""
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        [
+            "run",
+            "--vcf-url",
+            "https://vcf.local",
+            "--vcf-token",
+            "mock-token-xyz",
+            "--mock-vcf",
+            "--collector",
+            "10.10.10.50",
+            "--target-host",
+            "10.10.10.101",
+            "--connection",
+            "mock",
+            "--port",
+            "2222",
+            "--dry-run",
+        ],
+    )
+    assert result.exit_code == 0
+    assert "Operational Verification Checklist" in result.output
+

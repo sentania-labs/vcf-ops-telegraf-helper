@@ -112,7 +112,8 @@ class WinRMExecutor(EndpointExecutor):
         for chunk in chunks:
             append_script = (
                 f"$bytes = [System.Convert]::FromBase64String('{chunk}'); "
-                f"[System.IO.File]::AppendAllBytes('{safe_path}', $bytes);"
+                f"$stream = [System.IO.File]::Open('{safe_path}', [System.IO.FileMode]::Append, [System.IO.FileAccess]::Write); "
+                "try { $stream.Write($bytes, 0, $bytes.Length) } finally { $stream.Close() };"
             )
             res = self.execute(append_script, timeout=max(20, self.timeout))
             if not res.success:

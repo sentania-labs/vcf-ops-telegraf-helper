@@ -10,6 +10,8 @@ Adheres to the core Lattice principles:
 
 from __future__ import annotations
 
+from pathlib import Path
+
 DARK_TOKENS = {
     "bg": "#1b1f24",
     "surface": "#23282f",
@@ -66,6 +68,9 @@ LIGHT_TOKENS = {
 def build_stylesheet(theme: str = "dark") -> str:
     """Generate Qt Style Sheet (QSS) adhering to Lattice tokens."""
     t = DARK_TOKENS if theme == "dark" else LIGHT_TOKENS
+
+    chevron_file = "chevron_down_dark.svg" if theme == "dark" else "chevron_down_light.svg"
+    chevron_path = (Path(__file__).parent / "assets" / chevron_file).as_posix()
 
     return f"""
 /* Global Application Reset */
@@ -193,8 +198,8 @@ QPushButton.danger {{
     border: 1px solid {t["bad"]};
 }}
 
-/* Text Inputs and Combo Boxes (radius-lg: 6px) */
-QLineEdit, QComboBox, QTextEdit, QPlainTextEdit {{
+/* Text Inputs (radius-lg: 6px) */
+QLineEdit, QTextEdit, QPlainTextEdit {{
     background-color: {t["surface-sunken"]};
     border: 1px solid {t["line"]};
     border-radius: 6px;
@@ -203,14 +208,85 @@ QLineEdit, QComboBox, QTextEdit, QPlainTextEdit {{
     font-size: 13px;
 }}
 
-QLineEdit:focus, QComboBox:focus, QTextEdit:focus, QPlainTextEdit:focus {{
+QLineEdit:focus, QTextEdit:focus, QPlainTextEdit:focus {{
     border: 1px solid {t["accent"]};
     background-color: {t["surface"]};
 }}
 
+/* Combo Boxes (radius-lg: 6px, clear pulldown chevron indicator) */
+QComboBox {{
+    background-color: {t["surface-sunken"]};
+    border: 1px solid {t["line"]};
+    border-radius: 6px;
+    color: {t["ink"]};
+    padding: 6px 28px 6px 10px;
+    font-size: 13px;
+    min-height: 20px;
+}}
+
+QComboBox:hover {{
+    border: 1px solid {t["ink-subtle"]};
+}}
+
+QComboBox:focus {{
+    border: 1px solid {t["accent"]};
+    background-color: {t["surface"]};
+}}
+
+QComboBox:disabled {{
+    color: {t["ink-subtle"]};
+    border-color: {t["line"]};
+}}
+
 QComboBox::drop-down {{
-    border: none;
-    width: 20px;
+    subcontrol-origin: padding;
+    subcontrol-position: top right;
+    width: 24px;
+    border-left: 1px solid {t["line"]};
+    border-top-right-radius: 6px;
+    border-bottom-right-radius: 6px;
+    background-color: transparent;
+}}
+
+QComboBox::drop-down:hover {{
+    background-color: {t["line-soft"]};
+}}
+
+QComboBox::down-arrow {{
+    image: url("{chevron_path}");
+    width: 12px;
+    height: 12px;
+}}
+
+QComboBox::down-arrow:disabled {{
+    image: url("{chevron_path}");
+}}
+
+QComboBox QAbstractItemView {{
+    background-color: {t["surface"]};
+    border: 1px solid {t["line"]};
+    border-radius: 6px;
+    selection-background-color: {t["accent"]};
+    selection-color: #ffffff;
+    padding: 4px;
+    outline: none;
+}}
+
+QComboBox QAbstractItemView::item {{
+    min-height: 24px;
+    padding: 4px 8px;
+    border-radius: 4px;
+    color: {t["ink"]};
+}}
+
+QComboBox QAbstractItemView::item:hover {{
+    background-color: {t["surface-sunken"]};
+    color: {t["ink"]};
+}}
+
+QComboBox QAbstractItemView::item:selected {{
+    background-color: {t["accent"]};
+    color: #ffffff;
 }}
 
 /* Checkboxes */

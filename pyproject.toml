@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "vcf-ops-telegraf-helper"
-version = "0.4.0"
+version = "0.4.1"
 description = "Local administrator utility for VCF Operations open-source Telegraf onboarding"
 authors = [{ name = "Scott" }]
 readme = "README.md"
@@ -31,6 +31,9 @@ vcf-telegraf-helper = "vcf_ops_telegraf_helper.cli.main:cli"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["vcf_ops_telegraf_helper*"]
+
+[tool.setuptools.package-data]
+"vcf_ops_telegraf_helper.gui" = ["assets/*.svg"]
 
 [tool.ruff]
 line-length = 100

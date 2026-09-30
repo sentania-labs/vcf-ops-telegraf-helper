@@ -210,3 +210,11 @@ def test_ssh_executor_execute_prepends_sudo():
     res = executor.execute("uname -s")
     assert res.success is True
     mock_client.exec_command.assert_called_with("uname -s", timeout=30)
+
+
+def test_ssh_executor_key_filename_tilde_expansion():
+    """Verify tilde in key_filename is expanded to full home path."""
+    import os
+    executor = SSHExecutor(hostname="linux.local", key_filename="~/.ssh/custom_key")
+    expected = os.path.expanduser("~/.ssh/custom_key")
+    assert executor.key_filename == expected
