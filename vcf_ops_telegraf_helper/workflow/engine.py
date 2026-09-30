@@ -667,7 +667,8 @@ class ConfigureEndpointWorkflow:
                 else ("C:\\telegraf\\telegraf.conf" if is_win else "/etc/telegraf/telegraf.conf")
             )
             if self.base_stub_content:
-                if self.executor.file_exists(main_cfg) and not self.executor.file_exists(f"{main_cfg}.orig"):
+                exists = self.executor.file_exists(main_cfg)
+                if exists and not self.executor.file_exists(f"{main_cfg}.orig"):
                     try:
                         content_to_backup = self.executor.download(main_cfg)
                         if "Managed by VCF Operations Open Telegraf Helper" not in content_to_backup:
@@ -678,6 +679,7 @@ class ConfigureEndpointWorkflow:
                             self.executor.execute(f"Copy-Item -Path '{escaped_cfg}' -Destination '{escaped_cfg}.orig' -Force")
                         else:
                             self.executor.execute(f"cp {shlex.quote(main_cfg)} {shlex.quote(f'{main_cfg}.orig')}")
+
                 self.executor.upload(self.base_stub_content, main_cfg, mode=0o644)
                 if main_cfg not in self.managed_files:
                     self.managed_files.append(main_cfg)
@@ -833,7 +835,10 @@ class ConfigureEndpointWorkflow:
             installed = (
                 self.discovery.telegraf_installed if self.discovery else False
             )
-            self.verifications["Telegraf installed"] = "PASS" if installed else "FAIL"
+            if self.options.mode == DeploymentMode.PUSH and not self.options.dry_run:
+                self.verifications["Telegraf installed"] = "PASS" if installed else "FAIL"
+            else:
+                self.verifications["Telegraf installed"] = "PASS" if installed else "SKIPPED"
 
             # 2. Config valid check
             cfg_valid = bool(self.system_conf_content and self.vcf_conf_content)
