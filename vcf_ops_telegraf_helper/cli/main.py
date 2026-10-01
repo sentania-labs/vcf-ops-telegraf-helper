@@ -10,6 +10,7 @@ import click
 from rich.console import Console
 from rich.syntax import Syntax
 
+from vcf_ops_telegraf_helper import __version__
 from vcf_ops_telegraf_helper.adapters.factory import get_adapter
 from vcf_ops_telegraf_helper.adapters.mock import MockVCFOpsIntegration
 from vcf_ops_telegraf_helper.cli.display import (
@@ -75,6 +76,7 @@ def _is_windows_double_click() -> bool:
 
 
 @click.group(invoke_without_command=True)
+@click.version_option(__version__, "--version", "-v", prog_name="vcf-ops-telegraf-helper")
 @click.pass_context
 def cli(ctx: click.Context) -> None:
     """VCF Operations Open Telegraf Helper: Local onboarding utility."""
@@ -280,6 +282,15 @@ def resolve_monitoring_config(
 @click.option("--output-dir", default="./vcf-telegraf-bundle", help="Output directory for script/bundle")
 @click.option("--export-md", default=None, help="Export summary to Markdown file")
 @click.option("--export-json", default=None, help="Export summary to JSON file")
+@click.option(
+    "--ca-cert",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    default=None,
+    help="Path to custom enterprise CA certificate bundle for VCF Operations TLS validation",
+)
+@click.option("--vm-name", default=None, help="Target virtual machine name in vCenter / VCF Operations")
+@click.option("--vm-id", default=None, help="Target vCenter virtual machine MOR (e.g. vm-1042)")
+@click.option("--force-new-cert", is_flag=True, default=False, help="Force minting a new client certificate even if existing cert is valid")
 def run_cmd(
     vcf_url: str,
     vcf_user: str,
@@ -325,6 +336,10 @@ def run_cmd(
     output_dir: str,
     export_md: Optional[str],
     export_json: Optional[str],
+    ca_cert: Optional[Path] = None,
+    vm_name: Optional[str] = None,
+    vm_id: Optional[str] = None,
+    force_new_cert: bool = False,
 ) -> None:
     """Execute the guided workflow via command-line options."""
     display_banner(console)
@@ -354,6 +369,7 @@ def run_cmd(
         token=vcf_token,
         collector=CollectorInfo(address=collector, name=collector_group),
         verify_ssl=verify_ssl,
+        ca_cert_path=str(ca_cert) if ca_cert else None,
     )
 
     if conn_method in (ConnectionMethod.SSH, ConnectionMethod.WINRM) and not ssh_pass and not ssh_key:
@@ -374,7 +390,8 @@ def run_cmd(
         winrm_use_ssl=winrm_ssl,
         install_telegraf=install_telegraf,
         telegraf_version=telegraf_version,
-        registered_hostname=hostname,
+        registered_hostname=hostname or vm_name,
+        vm_mor=vm_id,
     )
 
     monitoring = resolve_monitoring_config(
@@ -470,6 +487,7 @@ def run_cmd(
         restart_service=True,
         install_telegraf=install_telegraf,
         telegraf_version=telegraf_version,
+        force_new_cert=force_new_cert,
     )
 
     workflow = ConfigureEndpointWorkflow(
@@ -495,6 +513,116 @@ def run_cmd(
 
     if not summary.success:
         sys.exit(1)
+
+
+@cli.command("vms")
+@click.option("--vcf-url", envvar="VCF_URL", required=True, help="VCF Operations URL, e.g. https://vcf-ops.local")
+@click.option("--vcf-user", envvar="VCF_USER", default="admin", help="VCF Operations API username")
+@click.option("--vcf-pass", envvar="VCF_PASS", default=None, help="VCF Operations API password")
+@click.option("--vcf-token", envvar="VCF_TOKEN", default=None, help="VCF Operations API token")
+@click.option("--mock-vcf", is_flag=True, help="Use simulated VCF Operations adapter for offline testing")
+@click.option(
+    "--ca-cert",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    default=None,
+    help="Custom enterprise CA certificate bundle path",
+)
+@click.option("--verify-ssl/--no-verify-ssl", default=True, help="Verify TLS certificates")
+@click.option(
+    "--os",
+    "os_filter",
+    type=click.Choice(["all", "windows", "linux"], case_sensitive=False),
+    default="all",
+    help="Filter by guest OS family",
+)
+@click.option("--cg", "cg_filter", default=None, help="Filter by collector group")
+@click.option("--filter", "query_filter", default=None, help="Search filter for VM name, IP, or MOR")
+def vms_cmd(
+    vcf_url: str,
+    vcf_user: str,
+    vcf_pass: Optional[str],
+    vcf_token: Optional[str],
+    mock_vcf: bool,
+    ca_cert: Optional[Path],
+    verify_ssl: bool,
+    os_filter: str,
+    cg_filter: Optional[str],
+    query_filter: Optional[str],
+) -> None:
+    """Query and display virtual machine inventory from VCF Operations."""
+    from rich.table import Table
+
+    display_banner(console)
+    vcf_pass = vcf_pass or os.environ.get("VCF_PASS")
+    vcf_token = vcf_token or os.environ.get("VCF_TOKEN")
+    if not mock_vcf and not vcf_token and not vcf_pass:
+        if sys.stdin.isatty():
+            vcf_pass = click.prompt(f"Password for VCF user {vcf_user}", hide_input=True)
+
+    vcf_env = VCFEnvironment(
+        name="cli-vms",
+        url=vcf_url,
+        username=vcf_user,
+        password=vcf_pass,
+        token=vcf_token,
+        collector=CollectorInfo(address="127.0.0.1"),
+        verify_ssl=verify_ssl,
+        ca_cert_path=str(ca_cert) if ca_cert else None,
+    )
+
+    if mock_vcf:
+        adapter = MockVCFOpsIntegration(vcf_env)
+    else:
+        adapter = get_adapter(vcf_env)
+
+    try:
+        console.print(f"[bold cyan]-->[/bold cyan] Querying VCF Operations inventory from {vcf_url}...")
+        vms = adapter.list_virtual_machines()
+    except Exception as exc:
+        console.print(f"[bold red]Failed to retrieve inventory:[/bold red] {exc}")
+        sys.exit(1)
+
+    filtered = []
+    q = (query_filter or "").strip().lower()
+    for vm in vms:
+        if q and q not in vm.name.lower() and q not in (vm.ip_address or "").lower() and q not in (vm.vm_mor or "").lower():
+            continue
+        if os_filter.lower() == "windows" and vm.os_family.lower() != "windows":
+            continue
+        if os_filter.lower() == "linux" and vm.os_family.lower() != "linux":
+            continue
+        if cg_filter and (vm.collector_group or "").lower() != cg_filter.strip().lower():
+            continue
+        filtered.append(vm)
+
+    table = Table(
+        title=f"VCF Operations Virtual Machine Inventory ({len(filtered)} / {len(vms)} VMs)",
+        show_header=True,
+        header_style="bold magenta",
+    )
+    table.add_column("VM Name", style="cyan")
+    table.add_column("IP Address", style="white")
+    table.add_column("OS Family", justify="center")
+    table.add_column("VM MOR", justify="center")
+    table.add_column("Collector Group")
+    table.add_column("Agent Status", justify="center")
+
+    for vm in filtered:
+        st_color = (
+            "green"
+            if vm.telegraf_status == "Installed"
+            else ("yellow" if vm.telegraf_status == "Not Installed" else "dim")
+        )
+        table.add_row(
+            vm.name,
+            vm.ip_address or "N/A",
+            vm.os_family.capitalize(),
+            vm.vm_mor or "N/A",
+            vm.collector_group or "Default",
+            f"[{st_color}]{vm.telegraf_status}[/{st_color}]",
+        )
+
+    console.print(table)
 
 
 @cli.command("render")

@@ -34,3 +34,19 @@ class VCFEnvironment(BaseModel):
     verify_ssl: bool = Field(default=True, description="Verify TLS certificates")
     ca_cert_path: Optional[str] = Field(default=None, description="Custom CA certificate bundle path")
     token: Optional[str] = Field(default=None, description="Active auth token if previously acquired")
+
+
+class VirtualMachineResource(BaseModel):
+    """Virtual machine inventory item discovered from VCF Operations."""
+
+    resource_id: str = Field(description="VCF Operations internal resource identifier (UUID)")
+    name: str = Field(description="Canonical virtual machine name")
+    ip_address: Optional[str] = Field(default=None, description="Primary IPv4 address for guest transport")
+    vm_mor: Optional[str] = Field(default=None, description="vCenter VM MOR, e.g. vm-1042")
+    vc_id: Optional[str] = Field(default=None, description="vCenter instance UUID")
+    os_name: Optional[str] = Field(default=None, description="Guest OS name string")
+    os_family: str = Field(default="LINUX", description="Normalized OS family: WINDOWS or LINUX")
+    collector_group: Optional[str] = Field(default=None, description="Assigned collector group or proxy name")
+    telegraf_status: str = Field(default="MISSING", description="ACTIVE, STOPPED, or MISSING")
+    telegraf_version: Optional[str] = Field(default=None, description="Installed telegraf version if known")
+

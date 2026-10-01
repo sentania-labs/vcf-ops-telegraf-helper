@@ -660,6 +660,109 @@ def test_cli_uninstall_credential_env_precedence_ssh_vs_winrm(monkeypatch):
         assert winrm_init_kwargs.get("password") == "WindowsUninstallPass456!"
 
 
+def test_cli_version_option():
+    """Verify --version and -v return current package version."""
+    from vcf_ops_telegraf_helper import __version__
+    runner = CliRunner()
+    res = runner.invoke(cli, ["--version"])
+    assert res.exit_code == 0
+    assert __version__ in res.output
+
+    res_short = runner.invoke(cli, ["-v"])
+    assert res_short.exit_code == 0
+    assert __version__ in res_short.output
+
+
+def test_cli_vms_command_listing_and_filtering():
+    """Verify vms command queries inventory and applies OS and query filters."""
+    runner = CliRunner()
+    res = runner.invoke(
+        cli,
+        [
+            "vms",
+            "--vcf-url", "https://vcf-ops.local",
+            "--mock-vcf",
+        ],
+    )
+    assert res.exit_code == 0
+    assert "Virtual Machine Inventory" in res.output
+    assert "dbdemo01" in res.output
+    assert "webapp01" in res.output
+
+    # Filter by OS windows
+    res_win = runner.invoke(
+        cli,
+        [
+            "vms",
+            "--vcf-url", "https://vcf-ops.local",
+            "--mock-vcf",
+            "--os", "windows",
+        ],
+    )
+    assert res_win.exit_code == 0
+    assert "dbdemo01" in res_win.output
+    assert "webapp01" not in res_win.output
+
+    # Filter by query
+    res_q = runner.invoke(
+        cli,
+        [
+            "vms",
+            "--vcf-url", "https://vcf-ops.local",
+            "--mock-vcf",
+            "--filter", "k8s",
+        ],
+    )
+    assert res_q.exit_code == 0
+    assert "k8s-node01" in res_q.output
+    assert "dbdemo01" not in res_q.output
+
+
+def test_cli_run_ca_cert_and_vm_binding(tmp_path):
+    """Verify run command accepts --ca-cert, --vm-name, and --vm-id options."""
+    ca_file = tmp_path / "custom-ca.pem"
+    ca_file.write_text("-----BEGIN CERTIFICATE-----\nTEST-CA\n-----END CERTIFICATE-----\n")
+
+    runner = CliRunner()
+    res = runner.invoke(
+        cli,
+        [
+            "run",
+            "--vcf-url", "https://vcf-ops.local",
+            "--mock-vcf",
+            "--collector", "10.10.10.50",
+            "--target-host", "10.10.10.101",
+            "--connection", "mock",
+            "--ca-cert", str(ca_file),
+            "--vm-name", "corp-db-01",
+            "--vm-id", "vm-9021",
+            "--preview",
+        ],
+    )
+    assert res.exit_code == 0
+    assert "corp-db-01" in res.output or "10.10.10.101" in res.output
+
+
+def test_cli_run_force_new_cert():
+    """Verify run command accepts --force-new-cert flag and forwards to workflow options."""
+    runner = CliRunner()
+    res = runner.invoke(
+        cli,
+        [
+            "run",
+            "--vcf-url", "https://vcf-ops.local",
+            "--mock-vcf",
+            "--collector", "10.10.10.50",
+            "--target-host", "10.10.10.101",
+            "--connection", "mock",
+            "--force-new-cert",
+            "--preview",
+        ],
+    )
+    assert res.exit_code == 0
+
+
+
 
 
 

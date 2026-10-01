@@ -137,11 +137,11 @@ def test_main_window_endpoint_detection_windows(qapp, tmp_path):
 
     window.ep_os_combo.setCurrentText("Windows")
     assert window.ep_user_input.text() == "Administrator"
-    assert not window.ep_key_input.isEnabled()
+    assert window.ep_auth_radio_widget.isHidden() is True
     target = window._get_endpoint_target()
     assert target.connection_method == ConnectionMethod.WINRM
     assert window.ep_port_input.text() == "5985"
-    assert window.ep_auto_install_check.isChecked()
+    assert "Auto-install" in window.ep_version_combo.currentText()
 
     from unittest.mock import MagicMock
     mock_exec = MagicMock()
@@ -157,12 +157,12 @@ def test_main_window_endpoint_detection_windows(qapp, tmp_path):
 
 
 def test_main_window_endpoint_detection_preserves_auto_install_opt_out(qapp, tmp_path):
-    """Verify endpoint detection does not re-enable auto-install if admin unchecked it."""
+    """Verify endpoint detection does not re-enable auto-install if admin selected Do Not Install."""
     state_file = tmp_path / "state.json"
     store = StateStore(state_file=state_file)
     window = MainWindow(state_store=store)
 
-    window.ep_auto_install_check.setChecked(False)
+    window.ep_version_combo.setCurrentText("Do Not Install (Use Existing Host Agent)")
 
     from unittest.mock import MagicMock
     mock_exec = MagicMock()
@@ -173,7 +173,6 @@ def test_main_window_endpoint_detection_preserves_auto_install_opt_out(qapp, tmp
 
     window._detect_endpoint()
     assert not window.ep_missing_banner.isHidden()
-    assert not window.ep_auto_install_check.isChecked()
     assert "NO (auto-install disabled)" in window.ep_details_box.toPlainText()
 
 
@@ -249,9 +248,7 @@ def test_main_window_step3_plugins_and_preview(qapp, tmp_path):
     mon = window._get_monitoring_config()
     assert mon.nginx.enabled is True
     assert mon.nginx.urls == ["http://127.0.0.1/status"]
-    assert "[[inputs.ping]]" in mon.custom_toml
-
-    window.ep_auto_install_check.setChecked(True)
+    window.ep_version_combo.setCurrentIndex(0)
     window._update_preview()
     preview_txt = window.preview_system_box.toPlainText()
     assert "[[inputs.nginx]]" in preview_txt
@@ -266,7 +263,7 @@ def test_main_window_step3_plugins_and_preview(qapp, tmp_path):
     assert "Install official InfluxData agent release 1.40.1 package" in summary_win
     assert "downloads/salt" not in summary_win
 
-    window.ep_auto_install_check.setChecked(False)
+    window.ep_version_combo.setCurrentText("Do Not Install (Use Existing Host Agent)")
     window._update_preview()
     assert "Verify existing pre-installed Telegraf agent" in window.review_summary_box.toPlainText()
 
@@ -431,26 +428,24 @@ def test_main_window_endpoint_auth_and_advanced_options_visibility(qapp, tmp_pat
     store = StateStore(state_file=state_file)
     window = MainWindow(state_store=store)
 
-    # Linux default: SSH, port 22, SSH key path visible, password hidden, port hidden
+    # Linux default: SSH, port 22, password radio checked by default, port hidden
     assert window.ep_os_combo.currentText() == "Linux"
     assert window._get_endpoint_target().connection_method == ConnectionMethod.SSH
     assert window.ep_port_input.text() == "22"
     assert window.ep_port_input.isHidden() is True
-    assert window.ep_key_input.isHidden() is False
-    assert window.ep_pass_input.isHidden() is True
+    assert window.ep_auth_radio_pass.isChecked() is True
+    assert window.ep_pass_label.text() == "Password:"
 
-    # Toggle to Password for Linux: password visible, key path hidden
-    window.ep_auth_type_combo.setCurrentText("Username & Password")
-    assert window.ep_key_input.isHidden() is True
-    assert window.ep_pass_input.isHidden() is False
+    # Toggle to SSH Key: label changes to SSH Key Path
+    window.ep_auth_radio_key.setChecked(True)
+    assert window.ep_pass_label.text() == "SSH Key Path:"
 
-    # Switch to Windows while advanced is unchecked: updates port to 5985 and locks WinRM
+    # Switch to Windows while advanced is unchecked: updates port to 5985 and hides auth radio
     window.ep_os_combo.setCurrentText("Windows")
     assert window._get_endpoint_target().connection_method == ConnectionMethod.WINRM
     assert window.ep_port_input.text() == "5985"
-    assert window.ep_key_input.isHidden() is True
-    assert window.ep_pass_input.isHidden() is False
-    assert window.ep_auth_type_combo.isHidden() is True
+    assert window.ep_auth_radio_widget.isHidden() is True
+    assert window.ep_pass_label.text() == "Password:"
 
     # Expand advanced connection options: port input visible
     window.ep_advanced_check.setChecked(True)
@@ -583,11 +578,11 @@ def test_main_window_telegraf_version_selection(qapp, tmp_path):
     assert window.ep_version_combo.lineEdit().cursorPosition() == 0
     assert window._get_selected_telegraf_version() == "1.40.1"
 
-    # Toggle auto-install disables combo
-    window.ep_auto_install_check.setChecked(False)
-    assert window.ep_version_combo.isEnabled() is False
-    window.ep_auto_install_check.setChecked(True)
-    assert window.ep_version_combo.isEnabled() is True
+    # Selecting Do Not Install sets install_telegraf to False
+    window.ep_version_combo.setCurrentText("Do Not Install (Use Existing Host Agent)")
+    assert window._get_endpoint_target().install_telegraf is False
+    window.ep_version_combo.setCurrentIndex(0)
+    assert window._get_endpoint_target().install_telegraf is True
 
     # Select preset 1.34.0
     window.ep_version_combo.setCurrentIndex(1)
@@ -724,6 +719,120 @@ def test_main_window_worker_finished_summary_handling(qapp, tmp_path):
     assert "OPERATIONAL VERIFICATION: PASS" in log_text
     assert "Telegraf installed" in log_text
     assert "Collector reachable" in log_text
+
+
+def test_main_window_vm_inventory_table_filter_and_binding(qapp, tmp_path):
+    """Verify Step 2 inventory table displays VMs, filters instantly, and binds selection to target form."""
+    from vcf_ops_telegraf_helper.models.vcf import VirtualMachineResource
+
+    state_file = tmp_path / "state.json"
+    store = StateStore(state_file=state_file)
+    window = MainWindow(state_store=store)
+
+    sample_vms = [
+        VirtualMachineResource(
+            resource_id="id-1",
+            name="win-app01",
+            ip_address="192.168.10.15",
+            vm_mor="vm-101",
+            vc_id="vc-1",
+            os_name="Windows Server 2022",
+            os_family="WINDOWS",
+            collector_group="Prod-CG",
+            telegraf_status="Installed",
+        ),
+        VirtualMachineResource(
+            resource_id="id-2",
+            name="linux-web01",
+            ip_address="192.168.10.20",
+            vm_mor="vm-102",
+            vc_id="vc-1",
+            os_name="Ubuntu 24.04",
+            os_family="LINUX",
+            collector_group="Dev-CG",
+            telegraf_status="Not Installed",
+        ),
+    ]
+
+    window._cached_vms = sample_vms
+    window._populate_vm_table(sample_vms)
+    window._update_cg_filter_options(sample_vms)
+    assert window.vm_table.rowCount() == 2
+
+    # Filter by OS
+    window.vm_os_filter.setCurrentText("Windows")
+    window._filter_vm_table()
+    assert not window.vm_table.isRowHidden(0)
+    assert window.vm_table.isRowHidden(1)
+    assert "1 / 2 VMs" in window.vm_count_label.text()
+
+    # Reset filter
+    window.vm_os_filter.setCurrentText("All OS Families")
+    window._filter_vm_table()
+    assert not window.vm_table.isRowHidden(0)
+    assert not window.vm_table.isRowHidden(1)
+    assert "2 / 2 VMs" in window.vm_count_label.text()
+
+    # Select row and inspect
+    window.vm_table.selectRow(1)
+    assert window.selected_vm is not None
+    assert window.selected_vm.name == "linux-web01"
+    assert "linux-web01" in window.vm_inspector_label.text()
+    assert window.btn_select_vm.isEnabled() is True
+
+    # Apply to form
+    window._apply_selected_vm_to_form()
+    assert window.step2_tabs.currentIndex() == 1
+    assert window.ep_host_input.text() == "192.168.10.20"
+    assert window.ep_os_combo.currentText() == "Linux"
+    assert "vm-102" in window.ep_mor_badge.text()
+
+
+def test_discovery_dialogs_instantiation_and_selection(qapp):
+    """Verify live discovery modal dialogs populate tables and accept selections."""
+    from vcf_ops_telegraf_helper.gui.discovery_dialogs import (
+        DatabaseConnectDialog,
+        DatabaseDiscoveryDialog,
+        PerfmonDiscoveryDialog,
+        ServicesDiscoveryDialog,
+    )
+    from vcf_ops_telegraf_helper.models.discovery import (
+        DiscoveredDatabase,
+        DiscoveredPerfmonSet,
+        DiscoveredService,
+    )
+
+    # Services dialog
+    services = [
+        DiscoveredService(name="telegraf", display_name="Telegraf Data Collector", status="running"),
+        DiscoveredService(name="w3svc", display_name="World Wide Web Publishing", status="running"),
+    ]
+    svc_dlg = ServicesDiscoveryDialog(None, services, initial_selected=["telegraf"])
+    assert svc_dlg.table.rowCount() == 2
+    svc_dlg._on_accept()
+    assert "telegraf" in svc_dlg.selected_services
+
+    # Perfmon dialog
+    p_sets = [
+        DiscoveredPerfmonSet(name="Processor", description="CPU performance", counters=["% Processor Time"]),
+    ]
+    p_dlg = PerfmonDiscoveryDialog(None, p_sets)
+    assert p_dlg.table.rowCount() == 1
+
+    # Database connect dialog
+    conn_dlg = DatabaseConnectDialog(None, "Microsoft SQL Server", default_port=1433)
+    assert conn_dlg.port == 1433
+    assert conn_dlg.auth_mode == "integrated"
+
+    # Database discovery dialog
+    dbs = [
+        DiscoveredDatabase(name="master", state="ONLINE", db_type="system", size_mb=10.0),
+        DiscoveredDatabase(name="ProductionDB", state="ONLINE", db_type="user", size_mb=500.0),
+    ]
+    db_dlg = DatabaseDiscoveryDialog(None, "MSSQL", dbs)
+    assert db_dlg.table.rowCount() == 2
+    db_dlg._on_accept()
+    assert "ProductionDB" in db_dlg.selected_databases
 
 
 

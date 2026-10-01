@@ -4,6 +4,11 @@ from __future__ import annotations
 
 from typing import Dict, List, Optional, Union
 from vcf_ops_telegraf_helper.executors.base import CommandResult, EndpointExecutor
+from vcf_ops_telegraf_helper.models.discovery import (
+    DiscoveredDatabase,
+    DiscoveredPerfmonSet,
+    DiscoveredService,
+)
 
 
 class MockExecutor(EndpointExecutor):
@@ -166,5 +171,44 @@ class MockExecutor(EndpointExecutor):
         norm = path.rstrip("/\\")
         return any(k == norm or k.startswith(f"{norm}/") or k.startswith(f"{norm}\\") for k in self.uploaded_files)
 
+    def discover_services(self) -> list[DiscoveredService]:
+        """Return simulated running services for mock testing."""
+        return [
+            DiscoveredService(name="telegraf", display_name="Telegraf Data Collector Service", status="Running", start_type="Automatic"),
+            DiscoveredService(name="MSSQLSERVER", display_name="SQL Server (MSSQLSERVER)", status="Running", start_type="Automatic"),
+            DiscoveredService(name="SQLServerAgent", display_name="SQL Server Agent (MSSQLSERVER)", status="Running", start_type="Manual"),
+            DiscoveredService(name="W3SVC", display_name="World Wide Web Publishing Service", status="Running", start_type="Automatic"),
+            DiscoveredService(name="WinRM", display_name="Windows Remote Management (WS-Management)", status="Running", start_type="Automatic"),
+        ]
+
+    def discover_perfmon_sets(self) -> list[DiscoveredPerfmonSet]:
+        """Return simulated Perfmon counter sets for mock testing."""
+        return [
+            DiscoveredPerfmonSet(name="Processor", description="CPU core and package utilization", counters=["% Processor Time", "% Privileged Time", "% User Time"]),
+            DiscoveredPerfmonSet(name="Memory", description="Physical and virtual RAM counters", counters=["Available Bytes", "Committed Bytes", "% Committed Bytes In Use"]),
+            DiscoveredPerfmonSet(name="LogicalDisk", description="Storage volume metrics per drive letter", counters=["% Free Space", "Free Megabytes", "Current Disk Queue Length"]),
+            DiscoveredPerfmonSet(name="SQLServer:General Statistics", description="Database engine connections and logins", counters=["User Connections", "Logical Connections", "Logins/sec"]),
+        ]
+
+    def discover_databases(
+        self,
+        db_type: str = "mssql",
+        auth_mode: str = "integrated",
+        username: Optional[str] = None,
+        password: Optional[str] = None,
+        port: int = 1433,
+    ) -> list[DiscoveredDatabase]:
+        """Return simulated database catalogs for mock testing."""
+        return [
+            DiscoveredDatabase(name="master", state="ONLINE", db_type="system", size_mb=12.0),
+            DiscoveredDatabase(name="OperationsDB", state="ONLINE", db_type="user", size_mb=25000.0),
+            DiscoveredDatabase(name="BillingDB", state="ONLINE", db_type="user", size_mb=120000.0),
+        ]
+
+    def get_free_disk_space_mb(self, path: Optional[str] = None) -> int:
+        """Return simulated free disk space in megabytes."""
+        return 20480
+
     def close(self) -> None:
         pass
+

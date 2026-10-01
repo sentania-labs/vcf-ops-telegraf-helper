@@ -85,3 +85,47 @@ def test_winrm_executor_file_exists():
 
     with patch.object(executor, "_get_session", return_value=mock_session):
         assert executor.file_exists("C:/telegraf/telegraf.exe") is True
+
+
+def test_winrm_discover_databases_escapes_single_quotes():
+    """Verify single quotes in credentials are escaped against PowerShell script injection."""
+    executor = WinRMExecutor(hostname="win-host.local", username="admin", password="secret")
+    mock_session = MagicMock()
+    mock_res = MagicMock()
+    mock_res.status_code = 0
+    mock_res.std_out = b'[{"name":"master","state":"ONLINE"}]\r\n'
+    mock_res.std_err = b""
+    mock_session.run_ps.return_value = mock_res
+
+    with patch.object(executor, "_get_session", return_value=mock_session):
+        dbs = executor.discover_databases(
+            db_type="mssql",
+            auth_mode="sql",
+            username="sa'--",
+            password="pass'word",
+            port=1433,
+        )
+
+    called_cmd = mock_session.run_ps.call_args[0][0]
+    assert "sa''--" in called_cmd
+    assert "pass''word" in called_cmd
+    assert len(dbs) == 1
+    assert dbs[0].name == "master"
+
+
+def test_winrm_discover_perfmon_sets_default_counters():
+    """Verify discovered counter sets default to wildcard counters instead of empty list."""
+    executor = WinRMExecutor(hostname="win-host.local", username="admin", password="secret")
+    mock_session = MagicMock()
+    mock_res = MagicMock()
+    mock_res.status_code = 0
+    mock_res.std_out = b'[{"CounterSetName":"Web Service","Description":"Web Service Counters"}]\r\n'
+    mock_res.std_err = b""
+    mock_session.run_ps.return_value = mock_res
+
+    with patch.object(executor, "_get_session", return_value=mock_session):
+        sets = executor.discover_perfmon_sets()
+
+    assert len(sets) == 1
+    assert sets[0].name == "Web Service"
+    assert sets[0].counters == ["*"]

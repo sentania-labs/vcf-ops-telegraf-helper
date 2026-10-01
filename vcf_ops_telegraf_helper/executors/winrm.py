@@ -3,9 +3,15 @@
 from __future__ import annotations
 
 import base64
+import json
 from typing import Optional, Union
 
 from vcf_ops_telegraf_helper.executors.base import CommandResult, EndpointExecutor
+from vcf_ops_telegraf_helper.models.discovery import (
+    DiscoveredDatabase,
+    DiscoveredPerfmonSet,
+    DiscoveredService,
+)
 
 
 class WinRMExecutor(EndpointExecutor):
@@ -138,6 +144,129 @@ class WinRMExecutor(EndpointExecutor):
         res = self.execute(f"Test-Path -Path '{safe_path}'", timeout=10)
         return res.success and "True" in res.stdout.strip()
 
+    def discover_services(self) -> list[DiscoveredService]:
+        """Discover installed or running services on Windows endpoint."""
+        script = (
+            "Get-Service | Select-Object -Property Name, DisplayName, Status, StartType "
+            "| ConvertTo-Json -Compress"
+        )
+        res = self.execute(script, timeout=15)
+        if not res.success or not res.stdout.strip():
+            return []
+
+        services: list[DiscoveredService] = []
+        try:
+            raw = json.loads(res.stdout)
+            items = raw if isinstance(raw, list) else [raw]
+            for item in items:
+                name = item.get("Name")
+                if not name:
+                    continue
+                disp = item.get("DisplayName")
+                status = "Running" if item.get("Status") in (4, "Running") else "Stopped"
+                start = str(item.get("StartType", "Automatic"))
+                services.append(DiscoveredService(
+                    name=name,
+                    display_name=disp,
+                    status=status,
+                    start_type=start,
+                ))
+        except Exception:
+            pass
+        return services
+
+    def discover_perfmon_sets(self) -> list[DiscoveredPerfmonSet]:
+        """Discover Windows Perfmon counter sets on Windows endpoint."""
+        script = (
+            "Get-Counter -ListSet * | Select-Object -Property CounterSetName, Description "
+            "| ConvertTo-Json -Compress"
+        )
+        res = self.execute(script, timeout=20)
+        if not res.success or not res.stdout.strip():
+            return []
+
+        perf_sets: list[DiscoveredPerfmonSet] = []
+        try:
+            raw = json.loads(res.stdout)
+            items = raw if isinstance(raw, list) else [raw]
+            for item in items:
+                name = item.get("CounterSetName")
+                if not name:
+                    continue
+                desc = item.get("Description")
+                perf_sets.append(DiscoveredPerfmonSet(
+                    name=name,
+                    description=desc,
+                    counters=["*"],
+                ))
+        except Exception:
+            pass
+        return perf_sets
+
+    def discover_databases(
+        self,
+        db_type: str = "mssql",
+        auth_mode: str = "integrated",
+        username: Optional[str] = None,
+        password: Optional[str] = None,
+        port: int = 1433,
+    ) -> list[DiscoveredDatabase]:
+        """Discover online database catalogs from SQL Server instance."""
+        if db_type.lower() != "mssql":
+            return []
+
+        auth_clause = "Integrated Security=SSPI;" if auth_mode == "integrated" else f"User Id={username or ''};Password={password or ''};"
+        conn_str = f"Server=127.0.0.1,{port};{auth_clause}TrustServerCertificate=True;Connect Timeout=5;"
+        safe_conn_str = conn_str.replace("'", "''")
+        script = (
+            f"$connStr = '{safe_conn_str}'; "
+            "$conn = New-Object System.Data.SqlClient.SqlConnection($connStr); "
+            "try { "
+            "$conn.Open(); "
+            "$cmd = $conn.CreateCommand(); "
+            "$cmd.CommandText = 'SELECT name, state_desc FROM sys.databases'; "
+            "$r = $cmd.ExecuteReader(); "
+            "$dbs = @(); "
+            "while ($r.Read()) { $dbs += @{ name=$r[0]; state=$r[1] } }; "
+            "$conn.Close(); "
+            "$dbs | ConvertTo-Json -Compress; "
+            "} catch { Write-Error $_.Exception.Message }"
+        )
+        res = self.execute(script, timeout=15)
+        if not res.success or not res.stdout.strip():
+            return []
+
+        dbs: list[DiscoveredDatabase] = []
+        try:
+            raw = json.loads(res.stdout)
+            items = raw if isinstance(raw, list) else [raw]
+            for item in items:
+                name = item.get("name")
+                if not name:
+                    continue
+                state = item.get("state", "ONLINE")
+                db_type_label = "system" if name in ("master", "tempdb", "model", "msdb") else "user"
+                dbs.append(DiscoveredDatabase(
+                    name=name,
+                    state=state,
+                    db_type=db_type_label,
+                ))
+        except Exception:
+            pass
+        return dbs
+
+    def get_free_disk_space_mb(self, path: Optional[str] = None) -> int:
+        """Return free disk space in megabytes on target Windows volume."""
+        script = (
+            "[int]((Get-PSDrive -PSProvider FileSystem | "
+            "Where-Object { $_.Free -gt 0 } | Sort-Object Free)[0].Free / 1MB)"
+        )
+        res = self.execute(script, timeout=10)
+        if res.success and res.stdout.strip().isdigit():
+            return int(res.stdout.strip())
+        return 1000
+
     def close(self) -> None:
         """Clean up WinRM session resources."""
         self._session = None
+

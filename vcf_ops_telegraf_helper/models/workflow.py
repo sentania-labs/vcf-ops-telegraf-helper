@@ -89,6 +89,7 @@ class WorkflowOptions(BaseModel):
     preview_only: bool = False
     install_telegraf: bool = False
     telegraf_version: Optional[str] = None
+    force_new_cert: bool = False
 
 
 class RunSummary(BaseModel):

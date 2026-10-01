@@ -371,3 +371,104 @@ def test_vcf91_fetch_mandatory_tag_script_fallback():
     assert "reg query" in script_bat
     assert "BIOS_VERSION" in script_bat
     assert "BOOTSTRAP_FQDN" in script_bat
+
+
+def test_vcf91_list_virtual_machines():
+    """Verify list_virtual_machines parses Suite API resources and identifier properties."""
+    env = VCFEnvironment(
+        name="test",
+        url="https://vcf-ops.corp.local",
+        username="admin",
+        token="test-token-123",
+        collector=CollectorInfo(address="10.10.10.50"),
+    )
+    mock_session = MagicMock(spec=requests.Session)
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.json.return_value = {
+        "resourceList": [
+            {
+                "identifier": "res-uuid-001",
+                "resourceKey": {
+                    "name": "win-app01",
+                    "adapterKindKey": "VMWARE",
+                    "resourceKindKey": "VirtualMachine",
+                    "resourceIdentifiers": [
+                        {"identifierType": {"name": "VMEntityName"}, "value": "win-app01"},
+                        {"identifierType": {"name": "VMEntityObjectID"}, "value": "vm-201"},
+                        {"identifierType": {"name": "VMEntityVCID"}, "value": "vc-uuid-1"},
+                    ],
+                },
+                "resourceProperties": [
+                    {"name": "summary|guest|operatingSystem", "value": "Microsoft Windows Server 2022"},
+                    {"name": "summary|guest|ipAddress", "value": "192.168.1.100"},
+                ],
+            }
+        ]
+    }
+    mock_session.get.return_value = mock_resp
+
+    adapter = VCF91OpenTelegrafIntegration(env, session=mock_session)
+    vms = adapter.list_virtual_machines()
+
+    assert len(vms) == 1
+    assert vms[0].resource_id == "res-uuid-001"
+    assert vms[0].name == "win-app01"
+    assert vms[0].ip_address == "192.168.1.100"
+    assert vms[0].vm_mor == "vm-201"
+    assert vms[0].vc_id == "vc-uuid-1"
+    assert vms[0].os_family == "WINDOWS"
+
+
+def test_vcf91_reuse_existing_cert_bundle():
+    """Verify prepare_telegraf_integration reuses valid existing cert bundle to avoid cert minting."""
+    env = VCFEnvironment(
+        name="test",
+        url="https://vcf-ops.corp.local",
+        username="admin",
+        token="test-token-123",
+        collector=CollectorInfo(address="10.10.10.50"),
+    )
+    mock_session = MagicMock(spec=requests.Session)
+    adapter = VCF91OpenTelegrafIntegration(env, session=mock_session)
+
+    existing = {
+        "client_cert": "-----BEGIN CERTIFICATE-----\nEXISTING-CERT\n-----END CERTIFICATE-----\n",
+        "client_key": "-----BEGIN RSA PRIVATE KEY-----\nEXISTING-KEY\n-----END RSA PRIVATE KEY-----\n",
+        "ca_cert": "-----BEGIN CERTIFICATE-----\nCA-BUNDLE\n-----END CERTIFICATE-----\n",
+        "master_pub": "ssh-rsa PUBKEY",
+        "vip": "10.10.10.50",
+        "mutual_auth": True,
+    }
+
+    artifacts = adapter.prepare_telegraf_integration(
+        os_family="linux",
+        target_ip="172.16.1.10",
+        target_hostname="host10",
+        existing_cert_bundle=existing,
+    )
+
+    assert artifacts.client_cert_content == existing["client_cert"]
+    assert artifacts.client_key_content == existing["client_key"]
+    assert artifacts.ca_cert_content == existing["ca_cert"]
+    assert artifacts.mutual_auth is True
+    # Ensure Suite API cert bundle endpoint was not called
+    assert not any("collector-certificate" in str(c) for c in mock_session.get.call_args_list)
+
+
+def test_mock_adapter_vm_inventory():
+    """Verify MockVCFOpsIntegration returns simulated VM resources."""
+    from vcf_ops_telegraf_helper.adapters.mock import MockVCFOpsIntegration
+
+    env = VCFEnvironment(
+        name="test",
+        url="https://vcf-ops.local",
+        username="admin",
+        collector=CollectorInfo(address="10.10.10.50"),
+    )
+    adapter = MockVCFOpsIntegration(env)
+    vms = adapter.list_virtual_machines()
+    assert len(vms) >= 3
+    assert any(vm.os_family == "WINDOWS" for vm in vms)
+    assert any(vm.os_family == "LINUX" for vm in vms)
+    assert any(vm.vm_mor == "vm-1042" for vm in vms)
