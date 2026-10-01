@@ -679,6 +679,14 @@ def test_main_window_deployment_mode_toggle(qapp, tmp_path):
 
     cmd = window._build_cli_command()
     assert "--mode script" in cmd
+    assert "--os linux" in cmd
+
+    # Switch OS to Windows in script mode
+    window.ep_os_combo.setCurrentText("Windows")
+    cmd_win = window._build_cli_command()
+    assert "--mode script" in cmd_win
+    assert "--os windows" in cmd_win
+
 
 
 def test_main_window_worker_finished_summary_handling(qapp, tmp_path):

@@ -1973,6 +1973,7 @@ class MainWindow(QMainWindow):
         parts.append(f"--target-host {shlex.quote(target.hostname)}")
         if mode != DeploymentMode.PUSH:
             parts.append(f"--mode {mode.value}")
+            parts.append(f"--os {target.os_family.value}")
             out_dir = (
                 self.bundle_dir_input.text().strip()
                 if hasattr(self, "bundle_dir_input") and self.bundle_dir_input.text().strip()

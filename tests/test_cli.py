@@ -9,6 +9,8 @@ from click.testing import CliRunner
 
 from vcf_ops_telegraf_helper.cli.main import _is_windows_double_click, cli
 from vcf_ops_telegraf_helper.executors.mock import MockExecutor
+from vcf_ops_telegraf_helper.executors.ssh import SSHExecutor
+from vcf_ops_telegraf_helper.executors.winrm import WinRMExecutor
 
 
 def test_cli_help_runner():
@@ -545,6 +547,118 @@ def test_cli_uninstall_password_env_fallback(monkeypatch):
             ],
         )
         assert result.exit_code == 0
+
+
+def test_cli_credential_env_precedence_ssh_vs_winrm(monkeypatch):
+    """Verify WinRM prefers WINRM_PASS and SSH prefers SSH_PASS when both are set."""
+    ssh_init_kwargs = {}
+    orig_ssh_init = SSHExecutor.__init__
+
+    def mock_ssh_init(self, *args, **kwargs):
+        ssh_init_kwargs.update(kwargs)
+        orig_ssh_init(self, *args, **kwargs)
+
+    winrm_init_kwargs = {}
+    orig_winrm_init = WinRMExecutor.__init__
+
+    def mock_winrm_init(self, *args, **kwargs):
+        winrm_init_kwargs.update(kwargs)
+        orig_winrm_init(self, *args, **kwargs)
+
+    monkeypatch.setattr(SSHExecutor, "__init__", mock_ssh_init)
+    monkeypatch.setattr(WinRMExecutor, "__init__", mock_winrm_init)
+    monkeypatch.setenv("SSH_PASS", "LinuxSecretPass123!")
+    monkeypatch.setenv("WINRM_PASS", "WindowsSecretPass456!")
+    monkeypatch.setenv("VCF_PASS", "VcfAdminPass789!")
+
+    runner = CliRunner()
+    # SSH execution should prefer SSH_PASS
+    runner.invoke(
+        cli,
+        [
+            "run",
+            "--vcf-url", "https://vcf.local",
+            "--mock-vcf",
+            "--collector", "10.10.10.50",
+            "--target-host", "linux-host.local",
+            "--connection", "ssh",
+            "--preview",
+        ],
+    )
+    assert ssh_init_kwargs.get("password") == "LinuxSecretPass123!"
+
+    # WinRM execution should prefer WINRM_PASS
+    runner.invoke(
+        cli,
+        [
+            "run",
+            "--vcf-url", "https://vcf.local",
+            "--mock-vcf",
+            "--collector", "10.10.10.50",
+            "--target-host", "win-host.local",
+            "--connection", "winrm",
+            "--preview",
+        ],
+    )
+    assert winrm_init_kwargs.get("password") == "WindowsSecretPass456!"
+
+
+def test_cli_uninstall_credential_env_precedence_ssh_vs_winrm(monkeypatch):
+    """Verify uninstall prefers WINRM_PASS on Windows/WinRM and SSH_PASS on Linux/SSH."""
+    from unittest.mock import MagicMock
+    ssh_init_kwargs = {}
+    orig_ssh_init = SSHExecutor.__init__
+
+    def mock_ssh_init(self, *args, **kwargs):
+        ssh_init_kwargs.update(kwargs)
+        orig_ssh_init(self, *args, **kwargs)
+
+    winrm_init_kwargs = {}
+    orig_winrm_init = WinRMExecutor.__init__
+
+    def mock_winrm_init(self, *args, **kwargs):
+        winrm_init_kwargs.update(kwargs)
+        orig_winrm_init(self, *args, **kwargs)
+
+    monkeypatch.setattr(SSHExecutor, "__init__", mock_ssh_init)
+    monkeypatch.setattr(WinRMExecutor, "__init__", mock_winrm_init)
+    monkeypatch.setenv("SSH_PASS", "LinuxUninstallPass123!")
+    monkeypatch.setenv("WINRM_PASS", "WindowsUninstallPass456!")
+
+    runner = CliRunner()
+    with patch("vcf_ops_telegraf_helper.workflow.uninstall.UninstallEndpointWorkflow.run") as mock_run:
+        mock_run.return_value = MagicMock(
+            success=True,
+            verifications={"Service inactive": "PASS", "Binary absent": "PASS", "Configuration absent": "PASS"},
+        )
+        # SSH / Linux method prefers SSH_PASS
+        res_ssh = runner.invoke(
+            cli,
+            [
+                "uninstall",
+                "--target", "node01.corp.local",
+                "--method", "ssh",
+                "--os", "linux",
+                "--yes",
+            ],
+        )
+        assert res_ssh.exit_code == 0
+        assert ssh_init_kwargs.get("password") == "LinuxUninstallPass123!"
+
+        # WinRM / Windows method prefers WINRM_PASS
+        res_win = runner.invoke(
+            cli,
+            [
+                "uninstall",
+                "--target", "win01.corp.local",
+                "--method", "winrm",
+                "--os", "windows",
+                "--yes",
+            ],
+        )
+        assert res_win.exit_code == 0
+        assert winrm_init_kwargs.get("password") == "WindowsUninstallPass456!"
+
 
 
 

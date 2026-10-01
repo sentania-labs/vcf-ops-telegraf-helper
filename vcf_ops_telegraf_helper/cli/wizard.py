@@ -108,10 +108,10 @@ def run_wizard(console: Optional[Console] = None) -> None:
 
     if conn_method == ConnectionMethod.SSH:
         ssh_user = Prompt.ask("SSH Username", default="root", console=con)
-        env_ssh_pass = os.environ.get("SSH_PASS")
+        env_ssh_pass = os.environ.get("SSH_PASS") or os.environ.get("WINRM_PASS")
         if env_ssh_pass:
             ssh_pass = env_ssh_pass
-            con.print("  [dim]Using SSH password from SSH_PASS environment variable[/dim]")
+            con.print("  [dim]Using SSH password from environment variable[/dim]")
         else:
             use_key = Confirm.ask("Use SSH private key authentication?", default=True, console=con)
             if use_key:

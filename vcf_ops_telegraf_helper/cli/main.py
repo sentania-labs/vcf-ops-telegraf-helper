@@ -329,9 +329,18 @@ def run_cmd(
     """Execute the guided workflow via command-line options."""
     display_banner(console)
 
+    conn_method = ConnectionMethod(connection)
+    if target_os:
+        is_win = target_os.lower() == "windows"
+    else:
+        is_win = conn_method == ConnectionMethod.WINRM
+
     vcf_pass = vcf_pass or os.environ.get("VCF_PASS")
     vcf_token = vcf_token or os.environ.get("VCF_TOKEN")
-    ssh_pass = ssh_pass or os.environ.get("SSH_PASS") or os.environ.get("WINRM_PASS")
+    if is_win or conn_method == ConnectionMethod.WINRM:
+        ssh_pass = ssh_pass or os.environ.get("WINRM_PASS") or os.environ.get("SSH_PASS")
+    else:
+        ssh_pass = ssh_pass or os.environ.get("SSH_PASS") or os.environ.get("WINRM_PASS")
 
     if not mock_vcf and not vcf_token and not vcf_pass:
         if sys.stdin.isatty():
@@ -346,12 +355,6 @@ def run_cmd(
         collector=CollectorInfo(address=collector, name=collector_group),
         verify_ssl=verify_ssl,
     )
-
-    conn_method = ConnectionMethod(connection)
-    if target_os:
-        is_win = target_os.lower() == "windows"
-    else:
-        is_win = conn_method == ConnectionMethod.WINRM
 
     if conn_method in (ConnectionMethod.SSH, ConnectionMethod.WINRM) and not ssh_pass and not ssh_key:
         if sys.stdin.isatty() and mode == "push":
@@ -690,7 +693,10 @@ def uninstall_cmd(
             console.print("[yellow]Uninstallation cancelled by user.[/yellow]")
             return
 
-    password = password or os.environ.get("SSH_PASS") or os.environ.get("WINRM_PASS")
+    if os_fam == OSFamily.WINDOWS or conn_method == ConnectionMethod.WINRM:
+        password = password or os.environ.get("WINRM_PASS") or os.environ.get("SSH_PASS")
+    else:
+        password = password or os.environ.get("SSH_PASS") or os.environ.get("WINRM_PASS")
     target_user = user or ("Administrator" if os_fam == OSFamily.WINDOWS else "root")
     if conn_method in (ConnectionMethod.SSH, ConnectionMethod.WINRM) and not password and not key_path:
         if sys.stdin.isatty():
