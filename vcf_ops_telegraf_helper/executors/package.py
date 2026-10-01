@@ -153,8 +153,8 @@ if (Test-Path $binPath) {{
     $testOutput = & $binPath --test --config $mainConf --config-directory $confDir 2>&1
     if ($LASTEXITCODE -ne 0) {{
         Write-Host ($testOutput | Out-String)
-        Write-Error "Telegraf configuration validation failed. Rolling back changes."
         Invoke-Rollback
+        Write-Error "Telegraf configuration validation failed. Changes were rolled back."
         exit 1
     }}
     Write-Host "  [+] Configuration validated successfully."
@@ -170,9 +170,10 @@ if ($svc) {{
         $svc.Refresh()
         Write-Host "  [+] Telegraf service is $($svc.Status)."
     }} catch {{
-        Write-Error "Failed to restart Telegraf service: $_. Rolling back changes."
+        $restartErr = $_
         Invoke-Rollback
         Restart-Service telegraf -Force -ErrorAction SilentlyContinue
+        Write-Error "Failed to restart Telegraf service: $restartErr. Changes were rolled back."
         exit 1
     }}
 }} else {{

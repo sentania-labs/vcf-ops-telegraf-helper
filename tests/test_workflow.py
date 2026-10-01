@@ -569,4 +569,11 @@ def test_package_executor_deploy_scripts_include_rollback(tmp_path):
     assert "$mainConf.bak" in ps1_txt
     assert "2>&1" in ps1_txt
 
+    # Verify rollback executes BEFORE terminating Write-Error under $ErrorActionPreference = "Stop"
+    val_rollback_pos = ps1_txt.find("Invoke-Rollback\n        Write-Error \"Telegraf configuration validation failed")
+    assert val_rollback_pos != -1
+    svc_rollback_pos = ps1_txt.find("Invoke-Rollback\n        Restart-Service telegraf")
+    assert svc_rollback_pos != -1
+
+
 
