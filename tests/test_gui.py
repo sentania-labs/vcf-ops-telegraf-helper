@@ -622,16 +622,11 @@ def test_main_window_cli_command_cleared_linux_baseline(qapp, tmp_path):
     window.proc_check.setChecked(False)
 
     cmd = window._build_cli_command()
-    assert "--no-cpu" in cmd
-    assert "--no-mem" in cmd
-    assert "--no-disk" in cmd
-    assert "--no-net" in cmd
-    assert "--no-system" in cmd
-    assert "--no-swap" in cmd
+    assert "--no-baseline" in cmd
 
 
 def test_main_window_cli_command_cleared_windows_baseline(qapp, tmp_path):
-    """Verify GUI emits explicit negative flags when Windows core plugins are cleared."""
+    """Verify GUI emits --no-baseline when Windows core plugins are cleared."""
     state_file = tmp_path / "state.json"
     store = StateStore(state_file=state_file)
     window = MainWindow(state_store=store)
@@ -641,8 +636,87 @@ def test_main_window_cli_command_cleared_windows_baseline(qapp, tmp_path):
     window.win_svc_check.setChecked(False)
 
     cmd = window._build_cli_command()
-    assert "--no-win-perf" in cmd
-    assert "--no-win-services" in cmd
+    assert "--no-baseline" in cmd
+
+
+def test_main_window_cli_command_selective_flags(qapp, tmp_path):
+    """Verify GUI emits selective negative and positive flags when some plugins are toggled."""
+    state_file = tmp_path / "state.json"
+    store = StateStore(state_file=state_file)
+    window = MainWindow(state_store=store)
+
+    window.ep_os_combo.setCurrentText("Linux")
+    window.swap_check.setChecked(False)
+    window.diskio_check.setChecked(True)
+
+    cmd = window._build_cli_command()
+    assert "--no-swap" in cmd
+    assert "--diskio" in cmd
+
+
+def test_main_window_deployment_mode_toggle(qapp, tmp_path):
+    """Verify deployment mode dropdown controls bundle visibility and executor creation."""
+    from vcf_ops_telegraf_helper.executors.package import PackageExecutor
+    from vcf_ops_telegraf_helper.models.workflow import DeploymentMode
+
+    state_file = tmp_path / "state.json"
+    store = StateStore(state_file=state_file)
+    window = MainWindow(state_store=store)
+
+    assert window._get_deployment_mode() == DeploymentMode.PUSH
+    assert window.bundle_dir_widget.isHidden()
+
+    # Switch to script mode
+    idx_script = window.deployment_mode_combo.findData("script")
+    window.deployment_mode_combo.setCurrentIndex(idx_script)
+
+    assert window._get_deployment_mode() == DeploymentMode.SCRIPT
+    assert not window.bundle_dir_widget.isHidden()
+
+    target = window._get_endpoint_target()
+    executor = window._create_executor(target)
+    assert isinstance(executor, PackageExecutor)
+
+    cmd = window._build_cli_command()
+    assert "--mode script" in cmd
+
+
+def test_main_window_worker_finished_summary_handling(qapp, tmp_path):
+    """Verify _on_worker_finished handles RunSummary without AttributeError on verifications."""
+    from vcf_ops_telegraf_helper.models.workflow import RunSummary, StageResult, StageStatus, WorkflowStage
+
+    state_file = tmp_path / "state.json"
+    store = StateStore(state_file=state_file)
+    window = MainWindow(state_store=store)
+
+    summary = RunSummary(
+        target_hostname="10.10.10.101",
+        vcf_environment="https://vcf-ops.local",
+        collector_address="10.10.10.50",
+        success=True,
+        stages=[
+            StageResult(stage=WorkflowStage.CONNECT, status=StageStatus.PASS, message="Connected"),
+            StageResult(stage=WorkflowStage.RESTART, status=StageStatus.PASS, message="Restarted"),
+        ],
+        verifications={
+            "Telegraf installed": "PASS",
+            "Config valid": "PASS",
+            "Service running": "PASS",
+            "Collector reachable": "PASS",
+        },
+        managed_files=["/etc/telegraf/telegraf.d/vcf-helper-system.conf"],
+    )
+
+    # Should not raise AttributeError: 'dict' object has no attribute 'collector_reachable'
+    window._on_worker_finished(summary)
+    assert window.execute_btn.isEnabled()
+    assert window.export_md_btn.isEnabled()
+    assert window.export_json_btn.isEnabled()
+    log_text = window.stage_list_box.toPlainText()
+    assert "OPERATIONAL VERIFICATION: PASS" in log_text
+    assert "Telegraf installed" in log_text
+    assert "Collector reachable" in log_text
+
 
 
 

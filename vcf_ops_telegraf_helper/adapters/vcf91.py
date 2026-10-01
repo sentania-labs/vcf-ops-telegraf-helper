@@ -8,6 +8,7 @@ from __future__ import annotations
 import io
 import os
 import re
+import socket
 from typing import Any, Dict, List, Optional, Tuple
 import urllib.parse
 import zipfile
@@ -531,10 +532,67 @@ class VCF91OpenTelegrafIntegration(VCFOpsIntegration):
                 token_obj = self.acquire_token(self.env.username, self.env.password)
                 token = token_obj.token
             else:
-                token = "local-simulated-token"
+                raise RuntimeError(
+                    "VCF Operations credentials required: please specify a valid username and password, or an API token."
+                )
 
         collector_addr = self.env.collector.address
         script_name = "telegraf-utils.ps1" if os_family.lower() == "windows" else "telegraf-utils.sh"
+
+        # Validate collector target against known Ops collectors/groups
+        all_collectors = self.get_collectors()
+        all_groups = self.get_collector_groups()
+        if all_collectors or all_groups:
+            known_targets = set()
+            has_ip_info = False
+            for g in all_groups:
+                for k in ("name", "id", "vip", "virtualIp", "ipAddress", "configuredVip", "fqdn", "hostName"):
+                    val = str(g.get(k, "")).strip().lower()
+                    if val:
+                        clean_v = val.split(":")[0]
+                        known_targets.add(clean_v)
+                        if "." in clean_v:
+                            known_targets.add(clean_v.split(".")[0])
+                if any(g.get(k) for k in ("vip", "virtualIp", "ipAddress", "configuredVip")):
+                    has_ip_info = True
+            for c in all_collectors:
+                for k in ("ipAddress", "name", "hostName"):
+                    val = str(c.get(k, "")).strip().lower()
+                    if val:
+                        clean_v = val.split(":")[0]
+                        known_targets.add(clean_v)
+                        if "." in clean_v:
+                            known_targets.add(clean_v.split(".")[0])
+                if c.get("ipAddress"):
+                    has_ip_info = True
+
+            target_clean = collector_addr.strip().lower().split(":")[0]
+            target_short = target_clean.split(".")[0] if "." in target_clean else target_clean
+
+            is_target_ip = False
+            try:
+                socket.inet_aton(target_clean)
+                is_target_ip = True
+            except OSError:
+                is_target_ip = False
+
+            resolved_ips = set()
+            try:
+                resolved_ips.add(socket.gethostbyname(target_clean))
+            except Exception:
+                pass
+
+            matched = (
+                target_clean in known_targets
+                or target_short in known_targets
+                or bool(resolved_ips.intersection(known_targets))
+                or (is_target_ip and not has_ip_info and len(all_groups) == 1)
+            )
+            if not matched:
+                raise RuntimeError(
+                    f"Collector '{collector_addr}' is not registered in VCF Operations. "
+                    "Please verify the Cloud Proxy address or Collector Group."
+                )
 
         # 1. Detect if target is a managed VM in VCF Operations
         is_managed = False
@@ -549,7 +607,12 @@ class VCF91OpenTelegrafIntegration(VCFOpsIntegration):
         if is_managed and vc_id and vm_mor:
             client_id = f"{vc_id}_{vm_mor}"
         else:
-            client_id = target_uuid or "endpoint-client"
+            clean_uuid = target_uuid.strip() if target_uuid else ""
+            if clean_uuid and not any(ch in clean_uuid for ch in "[] \t\n\r"):
+                client_id = clean_uuid
+            else:
+                clean_host = re.sub(r"[^a-zA-Z0-9_.-]", "_", (target_hostname or target_ip or "endpoint")).strip("_")
+                client_id = f"endpoint_{clean_host or 'client'}"
 
         # 3. Retrieve client certificate bundle
         ca_cert_content = None
@@ -558,49 +621,38 @@ class VCF91OpenTelegrafIntegration(VCFOpsIntegration):
         master_pub_content = None
         vip_content = None
         mutual_auth = True
-        collector_group = None
+        collector_group = self.resolve_collector_group_name(collector_addr)
+        logger.info("Resolved collector group name for %s: %s", collector_addr, collector_group)
 
-        if token == "local-simulated-token":
-            ca_cert_content = "-----BEGIN CERTIFICATE-----\nSIMULATED CA CERT\n-----END CERTIFICATE-----\n"
-            client_cert_content = "-----BEGIN CERTIFICATE-----\nSIMULATED CLIENT CERT\n-----END CERTIFICATE-----\n"
-            client_key_content = "-----BEGIN RSA PRIVATE KEY-----\nSIMULATED KEY\n-----END RSA PRIVATE KEY-----\n"
-            master_pub_content = "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQC simulated"
-            vip_content = collector_addr
-            collector_group = "default-collector-group"
-            mutual_auth = True
-        else:
-            collector_group = self.resolve_collector_group_name(collector_addr)
-            logger.info("Resolved collector group name for %s: %s", collector_addr, collector_group)
+        last_cert_err = None
+        try:
+            bundle = self.fetch_client_certificate_bundle(collector_group, client_id)
+            ca_cert_content = bundle.get("ca_cert")
+            client_cert_content = bundle.get("client_cert")
+            client_key_content = bundle.get("client_key")
+            master_pub_content = bundle.get("master_pub")
+            vip_content = bundle.get("vip")
+            mutual_auth = bundle.get("mutual_auth", True)
+        except Exception as e:
+            last_cert_err = e
+            # If collector group name failed and differs from collector_addr, try collector_addr
+            if collector_group != collector_addr:
+                try:
+                    bundle = self.fetch_client_certificate_bundle(collector_addr, client_id)
+                    ca_cert_content = bundle.get("ca_cert")
+                    client_cert_content = bundle.get("client_cert")
+                    client_key_content = bundle.get("client_key")
+                    master_pub_content = bundle.get("master_pub")
+                    vip_content = bundle.get("vip")
+                    mutual_auth = bundle.get("mutual_auth", True)
+                    last_cert_err = None
+                except Exception as inner_e:
+                    last_cert_err = inner_e
 
-            last_cert_err = None
-            try:
-                bundle = self.fetch_client_certificate_bundle(collector_group, client_id)
-                ca_cert_content = bundle.get("ca_cert")
-                client_cert_content = bundle.get("client_cert")
-                client_key_content = bundle.get("client_key")
-                master_pub_content = bundle.get("master_pub")
-                vip_content = bundle.get("vip")
-                mutual_auth = bundle.get("mutual_auth", True)
-            except Exception as e:
-                last_cert_err = e
-                # If collector group name failed and differs from collector_addr, try collector_addr
-                if collector_group != collector_addr:
-                    try:
-                        bundle = self.fetch_client_certificate_bundle(collector_addr, client_id)
-                        ca_cert_content = bundle.get("ca_cert")
-                        client_cert_content = bundle.get("client_cert")
-                        client_key_content = bundle.get("client_key")
-                        master_pub_content = bundle.get("master_pub")
-                        vip_content = bundle.get("vip")
-                        mutual_auth = bundle.get("mutual_auth", True)
-                        last_cert_err = None
-                    except Exception as inner_e:
-                        last_cert_err = inner_e
-
-            if last_cert_err is not None:
-                raise RuntimeError(
-                    f"Failed to acquire mTLS client certificate bundle from VCF Operations for collector group '{collector_group}' and client '{client_id}': {last_cert_err}"
-                )
+        if last_cert_err is not None:
+            raise RuntimeError(
+                f"Failed to acquire mTLS client certificate bundle from VCF Operations for collector group '{collector_group}' and client '{client_id}': {last_cert_err}"
+            )
 
         # 4. Retrieve mandatory_tags script content
         mandatory_tags_content = self.fetch_mandatory_tag_script(collector_addr, os_family)

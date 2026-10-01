@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 import subprocess
+import sys
 from typing import Union
 
 from vcf_ops_telegraf_helper.executors.base import CommandResult, EndpointExecutor
@@ -18,12 +19,17 @@ class LocalExecutor(EndpointExecutor):
 
     def execute(self, command: str, timeout: int = 30) -> CommandResult:
         try:
+            kwargs = {}
+            if sys.platform == "win32":
+                kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+
             proc = subprocess.run(
                 command,
                 shell=True,
                 capture_output=True,
                 text=True,
                 timeout=timeout,
+                **kwargs,
             )
             return CommandResult(
                 exit_code=proc.returncode,

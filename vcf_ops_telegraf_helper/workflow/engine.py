@@ -116,6 +116,17 @@ class ConfigureEndpointWorkflow:
         start = time.monotonic()
         self.reporter.on_stage_start(WorkflowStage.CONNECT)
 
+        if self.options.mode in (DeploymentMode.SCRIPT, DeploymentMode.CONFIG_ONLY):
+            dur = int((time.monotonic() - start) * 1000)
+            res = StageResult(
+                stage=WorkflowStage.CONNECT,
+                status=StageStatus.SKIPPED,
+                message=f"Target connection skipped for {self.options.mode.value} deployment mode",
+                duration_ms=dur,
+            )
+            self.reporter.on_stage_complete(res)
+            return res
+
         try:
             connected = self.executor.test_connection()
             dur = int((time.monotonic() - start) * 1000)
@@ -150,6 +161,38 @@ class ConfigureEndpointWorkflow:
         """Stage 2: Inspect remote OS, architecture, and existing Telegraf installation."""
         start = time.monotonic()
         self.reporter.on_stage_start(WorkflowStage.DETECT)
+
+        if self.options.mode in (DeploymentMode.SCRIPT, DeploymentMode.CONFIG_ONLY):
+            is_win = (self.target.os_family == OSFamily.WINDOWS) or (type(self.executor).__name__ == "WinRMExecutor")
+            dur = int((time.monotonic() - start) * 1000)
+            telegraf_ver = (
+                getattr(self.options, "telegraf_version", None)
+                or getattr(self.target, "telegraf_version", None)
+                or "1.40.1"
+            )
+            self.discovery = EndpointDiscoveryResult(
+                hostname=self.target.hostname,
+                os_name="Windows" if is_win else "Linux",
+                os_version="Windows" if is_win else "Linux",
+                arch="x86_64",
+                telegraf_installed=True,
+                telegraf_version=f"Telegraf {telegraf_ver}",
+                service_state="N/A",
+                config_dir="C:\\telegraf\\telegraf.d" if is_win else "/etc/telegraf/telegraf.d",
+                main_config_path="C:\\telegraf\\telegraf.conf" if is_win else "/etc/telegraf/telegraf.conf",
+                telegraf_bin_path="C:\\telegraf\\telegraf.exe" if is_win else "/usr/bin/telegraf",
+                host_uuid="",
+                host_ip=self.target.hostname,
+            )
+            res = StageResult(
+                stage=WorkflowStage.DETECT,
+                status=StageStatus.PASS,
+                message=f"Configured for target OS: {'Windows' if is_win else 'Linux'} (offline bundle generation)",
+                details="Offline staging mode; target inspection skipped",
+                duration_ms=dur,
+            )
+            self.reporter.on_stage_complete(res)
+            return res
 
         try:
             is_win = (self.target.os_family == OSFamily.WINDOWS) or (type(self.executor).__name__ == "WinRMExecutor")
@@ -562,6 +605,41 @@ class ConfigureEndpointWorkflow:
             # Auto-install Telegraf if missing and requested
             auto_install = self.target.install_telegraf or self.options.install_telegraf
             if self.discovery and not self.discovery.telegraf_installed and auto_install:
+                # Pre-flight disk space check: require at least 500 MB free
+                if is_win:
+                    disk_chk = self.executor.execute(
+                        "try { $freeMb = [math]::Round((Get-PSDrive C).Free / 1MB); if ($freeMb -lt 500) { Write-Output \"FAIL: $freeMb\" } else { Write-Output \"OK: $freeMb\" } } catch { Write-Output 'OK: 9999' }",
+                        timeout=10,
+                    )
+                    if disk_chk.success and "FAIL:" in disk_chk.stdout:
+                        free_val = disk_chk.stdout.split("FAIL:")[-1].strip()
+                        dur = int((time.monotonic() - start) * 1000)
+                        res = StageResult(
+                            stage=WorkflowStage.APPLY,
+                            status=StageStatus.FAIL,
+                            message=f"Insufficient disk space on target C: drive ({free_val} MB free, minimum 500 MB required). Auto-install aborted.",
+                            duration_ms=dur,
+                        )
+                        self.reporter.on_stage_complete(res)
+                        return res
+                else:
+                    disk_chk = self.executor.execute(
+                        "min_free=$(df -m -P /var / 2>/dev/null | awk 'NR>1 {print $4}' | sort -n | head -n1); "
+                        "if [ -n \"$min_free\" ] && [ \"$min_free\" -lt 500 ]; then echo \"FAIL: $min_free\"; else echo \"OK\"; fi",
+                        timeout=10,
+                    )
+                    if disk_chk.success and "FAIL:" in disk_chk.stdout:
+                        free_val = disk_chk.stdout.split("FAIL:")[-1].strip()
+                        dur = int((time.monotonic() - start) * 1000)
+                        res = StageResult(
+                            stage=WorkflowStage.APPLY,
+                            status=StageStatus.FAIL,
+                            message=f"Insufficient disk space on target filesystem ({free_val} MB free on / or /var, minimum 500 MB required). Auto-install aborted.",
+                            duration_ms=dur,
+                        )
+                        self.reporter.on_stage_complete(res)
+                        return res
+
                 telegraf_ver = (
                     getattr(self.options, "telegraf_version", None)
                     or getattr(self.target, "telegraf_version", None)
@@ -680,21 +758,31 @@ class ConfigureEndpointWorkflow:
                     self.discovery.main_config_path = "/etc/telegraf/telegraf.conf"
                     self.discovery.config_dir = "/etc/telegraf/telegraf.d"
 
-            # Create destination directory
+            # Create destination directory and backup existing fragments/certs
             if is_win:
                 self.executor.execute(
                     f"if (-not (Test-Path '{config_dir}')) {{ New-Item -ItemType Directory -Path '{config_dir}' -Force | Out-Null }}"
                 )
-                if self.executor.file_exists(system_file):
-                    self.executor.execute(f"Copy-Item -Path '{system_file}' -Destination '{system_file}.bak' -Force")
-                if self.executor.file_exists(vcf_file):
-                    self.executor.execute(f"Copy-Item -Path '{vcf_file}' -Destination '{vcf_file}.bak' -Force")
+                for f_name in (
+                    "vcf-helper-system.conf", "cloudproxy-http.conf",
+                    "ca.pem", "cert.pem", "key.pem",
+                    "master.pub", "IP", "MUTUAL_AUTHENTICATION",
+                    "mandatory_tags.bat"
+                ):
+                    f_dest = f"{config_dir}\\{f_name}"
+                    if self.executor.file_exists(f_dest):
+                        self.executor.execute(f"Copy-Item -Path '{f_dest}' -Destination '{f_dest}.bak' -Force")
             else:
-                self.executor.execute(f"mkdir -p {config_dir}")
-                if self.executor.file_exists(system_file):
-                    self.executor.execute(f"cp {system_file} {system_file}.bak")
-                if self.executor.file_exists(vcf_file):
-                    self.executor.execute(f"cp {vcf_file} {vcf_file}.bak")
+                self.executor.execute(f"mkdir -p {shlex.quote(config_dir)}")
+                for f_name in (
+                    "vcf-helper-system.conf", "cloudproxy-http.conf",
+                    "ca.pem", "cert.pem", "key.pem",
+                    "master.pub", "IP", "MUTUAL_AUTHENTICATION",
+                    "mandatory_tags.sh"
+                ):
+                    f_dest = f"{config_dir}/{f_name}"
+                    if self.executor.file_exists(f_dest):
+                        self.executor.execute(f"cp {shlex.quote(f_dest)} {shlex.quote(f'{f_dest}.bak')}")
 
             # Upload managed fragments
             self.executor.upload(self.system_conf_content, system_file)
@@ -746,6 +834,11 @@ class ConfigureEndpointWorkflow:
             )
             if self.base_stub_content:
                 exists = self.executor.file_exists(main_cfg)
+                if exists:
+                    if is_win:
+                        self.executor.execute(f"Copy-Item -Path '{main_cfg}' -Destination '{main_cfg}.bak' -Force")
+                    else:
+                        self.executor.execute(f"cp {shlex.quote(main_cfg)} {shlex.quote(f'{main_cfg}.bak')}")
                 if exists and not self.executor.file_exists(f"{main_cfg}.orig"):
                     if is_win and (isinstance(self.executor, WinRMExecutor) or type(self.executor).__name__ == "WinRMExecutor"):
                         escaped_cfg = main_cfg.replace("'", "''")
@@ -793,13 +886,13 @@ class ConfigureEndpointWorkflow:
                 if self.artifacts and self.artifacts.mandatory_tags_content:
                     self.executor.execute(f"chmod 755 {shlex.quote(config_dir)}/mandatory_tags.sh 2>/dev/null || true")
 
-            if hasattr(self.executor, "generate_deploy_script"):
+            if self.options.mode == DeploymentMode.SCRIPT and hasattr(self.executor, "generate_deploy_script"):
                 telegraf_bin = (
                     self.discovery.telegraf_bin_path
                     if self.discovery
                     else ("/usr/bin/telegraf" if not is_win else "C:\\telegraf\\telegraf.exe")
                 )
-                script_path = self.executor.generate_deploy_script(telegraf_bin=telegraf_bin)
+                script_path = self.executor.generate_deploy_script(is_windows=is_win, telegraf_bin=telegraf_bin)
                 self.managed_files.append(str(script_path))
 
             dur = int((time.monotonic() - start) * 1000)
@@ -821,6 +914,55 @@ class ConfigureEndpointWorkflow:
 
         self.reporter.on_stage_complete(res)
         return res
+
+    def _rollback_configs(self, config_dir: str, is_win: bool) -> None:
+        """Restore previous configuration from .bak files if apply/restart fails."""
+        files_to_restore = [
+            "vcf-helper-system.conf",
+            "cloudproxy-http.conf",
+            "ca.pem",
+            "cert.pem",
+            "key.pem",
+            "master.pub",
+            "IP",
+            "MUTUAL_AUTHENTICATION",
+            "mandatory_tags.bat" if is_win else "mandatory_tags.sh",
+        ]
+        main_cfg = (
+            self.discovery.main_config_path
+            if self.discovery
+            else ("C:\\telegraf\\telegraf.conf" if is_win else "/etc/telegraf/telegraf.conf")
+        )
+        if is_win:
+            parts = []
+            for f in files_to_restore:
+                fpath = f"{config_dir}\\{f}"
+                parts.append(
+                    f"if (Test-Path '{fpath}.bak') {{ Move-Item -Path '{fpath}.bak' -Destination '{fpath}' -Force }} "
+                    f"else {{ Remove-Item -Path '{fpath}' -Force -ErrorAction SilentlyContinue }};"
+                )
+            parts.append(
+                f"if (Test-Path '{main_cfg}.bak') {{ Move-Item -Path '{main_cfg}.bak' -Destination '{main_cfg}' -Force }} "
+                f"elseif (-not (Test-Path '{main_cfg}.orig')) {{ Remove-Item -Path '{main_cfg}' -Force -ErrorAction SilentlyContinue }};"
+            )
+            rollback_script = " ".join(parts)
+            self.executor.execute(rollback_script, timeout=15)
+        else:
+            sudo_pfx = "sudo -n " if getattr(self.executor, "use_sudo", False) else ""
+            bash_cmds = []
+            for f in files_to_restore:
+                fpath = f"{config_dir}/{f}"
+                bash_cmds.append(
+                    f"if [ -f {shlex.quote(f'{fpath}.bak')} ]; then mv -f {shlex.quote(f'{fpath}.bak')} {shlex.quote(fpath)}; "
+                    f"else rm -f {shlex.quote(fpath)}; fi;"
+                )
+            bash_cmds.append(
+                f"if [ -f {shlex.quote(f'{main_cfg}.bak')} ]; then mv -f {shlex.quote(f'{main_cfg}.bak')} {shlex.quote(main_cfg)}; "
+                f"elif [ ! -f {shlex.quote(f'{main_cfg}.orig')} ]; then rm -f {shlex.quote(main_cfg)}; fi;"
+            )
+            inner_cmd = " ".join(bash_cmds)
+            rollback_script = f"{sudo_pfx}bash -c '{inner_cmd}'"
+            self.executor.execute(rollback_script, timeout=15)
 
     def restart_if_needed(self) -> StageResult:
         """Stage 7: Test configuration on endpoint and restart Telegraf service."""
@@ -869,12 +1011,14 @@ class ConfigureEndpointWorkflow:
 
             test_res = self.executor.execute(test_cmd, timeout=15)
             if not test_res.success:
+                self._rollback_configs(config_dir, is_win)
                 dur = int((time.monotonic() - start) * 1000)
                 res = StageResult(
                     stage=WorkflowStage.RESTART,
                     status=StageStatus.FAIL,
-                    message="Telegraf config validation failed on endpoint. Aborting restart to prevent outage.",
+                    message="Telegraf config validation failed on endpoint. Restored previous configuration (.bak) to prevent outage.",
                     details=self._sanitize(test_res.stderr or test_res.stdout),
+                    command_output=f"Validation Command: {test_cmd}\nExit Code: {test_res.exit_code}\nOutput:\n{test_res.stdout}\nErrors:\n{test_res.stderr}",
                     duration_ms=dur,
                 )
                 self.reporter.on_stage_complete(res)
@@ -882,9 +1026,11 @@ class ConfigureEndpointWorkflow:
 
             # Restart service
             if is_win:
-                restart_res = self.executor.execute("Restart-Service telegraf -Force", timeout=15)
+                restart_cmd = "Restart-Service telegraf -Force"
+                restart_res = self.executor.execute(restart_cmd, timeout=15)
             else:
-                restart_res = self.executor.execute("systemctl restart telegraf", timeout=15)
+                restart_cmd = "systemctl restart telegraf"
+                restart_res = self.executor.execute(restart_cmd, timeout=15)
             dur = int((time.monotonic() - start) * 1000)
 
             if restart_res.success:
@@ -892,14 +1038,22 @@ class ConfigureEndpointWorkflow:
                     stage=WorkflowStage.RESTART,
                     status=StageStatus.PASS,
                     message="Telegraf service restarted successfully",
+                    command_output=f"Restart Command: {restart_cmd}\nExit Code: {restart_res.exit_code}",
                     duration_ms=dur,
                 )
             else:
+                self._rollback_configs(config_dir, is_win)
+                # Attempt to restart with restored backup
+                if is_win:
+                    self.executor.execute("Restart-Service telegraf -Force", timeout=15)
+                else:
+                    self.executor.execute("systemctl restart telegraf", timeout=15)
                 res = StageResult(
                     stage=WorkflowStage.RESTART,
                     status=StageStatus.FAIL,
-                    message="Failed to restart Telegraf service",
+                    message="Failed to restart Telegraf service. Restored previous configuration (.bak).",
                     details=self._sanitize(restart_res.stderr or restart_res.stdout),
+                    command_output=f"Restart Command: {restart_cmd}\nExit Code: {restart_res.exit_code}\nOutput:\n{restart_res.stdout}\nErrors:\n{restart_res.stderr}",
                     duration_ms=dur,
                 )
         except Exception as e:
@@ -998,18 +1152,35 @@ class ConfigureEndpointWorkflow:
                 ingestion_status = self.adapter.verify_ingestion(short_host)
                 if ingestion_status == "UNKNOWN" and short_host != self.target.hostname:
                     ingestion_status = self.adapter.verify_ingestion(self.target.hostname)
-                self.verifications["VCF Ops ingestion"] = ingestion_status
+                if ingestion_status == "UNKNOWN":
+                    self.verifications["VCF Ops ingestion"] = "PENDING (Ops processing typically requires 5 to 15 minutes)"
+                else:
+                    self.verifications["VCF Ops ingestion"] = ingestion_status
 
                 # Verify metrics transmission either via authenticated probe or confirmed VCF Ops ingestion
+                is_schannel_err = is_win and (
+                    "schannel" in (str(probe_val.message) + " " + str(probe_val.details)).lower()
+                    or "0x80092002" in (str(probe_val.message) + " " + str(probe_val.details)).lower()
+                )
                 if probe_val.is_valid:
                     self.verifications["Metrics transmission"] = "PASS"
-                elif is_win and "schannel" in (str(probe_val.message) + " " + str(probe_val.details)).lower() and ingestion_status == "PASS":
-                    self.verifications["Metrics transmission"] = "PASS (verified via VCF Ops ingestion)"
+                elif is_schannel_err:
+                    collector_ok = self.verifications.get("Collector reachable") != "FAIL"
+                    if ingestion_status == "PASS":
+                        self.verifications["Metrics transmission"] = "PASS (verified via VCF Ops ingestion)"
+                    elif (
+                        collector_ok
+                        and self.verifications.get("Service running") == "PASS"
+                        and self.verifications.get("Local metrics generated") == "PASS"
+                    ):
+                        self.verifications["Metrics transmission"] = "PENDING (Windows Schannel PEM limitation; service and port 443 verified)"
+                    else:
+                        self.verifications["Metrics transmission"] = f"FAIL ({probe_val.message})"
                 else:
                     self.verifications["Metrics transmission"] = f"FAIL ({probe_val.message})"
 
                 # Also inspect recent service log for output errors on Linux and Windows
-                if self.verifications["Metrics transmission"].startswith("PASS"):
+                if self.verifications["Metrics transmission"].startswith("PASS") or self.verifications["Metrics transmission"].startswith("PENDING"):
                     if is_win:
                         win_log_cmd = (
                             "$t = (Get-Date).AddMinutes(-2); "

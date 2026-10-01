@@ -84,7 +84,7 @@ class WinServicesInputConfig(BaseModel):
     """Configuration for Windows Services status plugin."""
 
     enabled: bool = False
-    service_names: List[str] = Field(default_factory=lambda: ["*"])
+    service_names: List[str] = Field(default_factory=lambda: ["telegraf"])
 
 
 class NginxInputConfig(BaseModel):
@@ -175,7 +175,7 @@ class MonitoringConfig(BaseModel):
                 system=SystemInputConfig(enabled=False),
                 swap=SwapInputConfig(enabled=False),
                 win_perf_counters=WinPerfCountersInputConfig(enabled=True),
-                win_services=WinServicesInputConfig(enabled=True, service_names=["*"]),
+                win_services=WinServicesInputConfig(enabled=True, service_names=["telegraf"]),
             )
         return cls(
             cpu=CpuInputConfig(enabled=True),

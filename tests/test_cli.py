@@ -338,3 +338,214 @@ def test_cli_render_all_windows_baseline_cleared():
     assert "[[inputs.win_services]]" not in result.output
 
 
+def test_cli_render_no_baseline():
+    """Verify render with --no-baseline produces empty inputs canvas."""
+    runner = CliRunner()
+    result = runner.invoke(cli, ["render", "--no-baseline"])
+    assert result.exit_code == 0
+    assert "[[inputs.cpu]]" not in result.output
+    assert "[[inputs.mem]]" not in result.output
+    assert "[[inputs.win_perf_counters]]" not in result.output
+
+
+def test_cli_render_no_baseline_with_plugin():
+    """Verify render with --no-baseline and selective flags enables only requested plugins."""
+    runner = CliRunner()
+    result = runner.invoke(cli, ["render", "--no-baseline", "--diskio", "--processes"])
+    assert result.exit_code == 0
+    assert "[[inputs.cpu]]" not in result.output
+    assert "[[inputs.diskio]]" in result.output
+    assert "[[inputs.processes]]" in result.output
+
+
+def test_cli_render_raw_unpadded_default():
+    """Verify default render command outputs raw unpadded TOML suitable for file redirection."""
+    runner = CliRunner()
+    result = runner.invoke(cli, ["render"])
+    assert result.exit_code == 0
+    assert "╭" not in result.output
+    assert "─" not in result.output
+    assert "[[inputs.cpu]]" in result.output
+
+
+def test_cli_render_pretty_option():
+    """Verify render --pretty includes styled container."""
+    runner = CliRunner()
+    result = runner.invoke(cli, ["render", "--pretty"])
+    assert result.exit_code == 0
+    assert "# vcf-helper-system.conf" in result.output
+    assert "# cloudproxy-http.conf" in result.output
+    assert "[[inputs.cpu]]" in result.output
+
+
+def test_cli_run_no_baseline():
+    """Verify run command accepts --no-baseline and executes in dry-run mode."""
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        [
+            "run",
+            "--vcf-url", "https://vcf.local",
+            "--mock-vcf",
+            "--collector", "10.10.10.50",
+            "--target-host", "10.10.10.101",
+            "--connection", "mock",
+            "--no-baseline",
+            "--diskio",
+            "--dry-run",
+            "--preview",
+        ],
+    )
+    assert result.exit_code == 0
+    assert "[[inputs.diskio]]" in result.output
+    assert "[[inputs.cpu]]" not in result.output
+
+
+def test_cli_password_env_fallbacks(monkeypatch):
+    """Verify CLI reads passwords from environment variables when not specified in options."""
+    monkeypatch.setenv("VCF_PASS", "SecretVcfEnvPass123!")
+    monkeypatch.setenv("SSH_PASS", "SecretSshEnvPass123!")
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        [
+            "run",
+            "--vcf-url", "https://vcf.local",
+            "--vcf-user", "admin",
+            "--mock-vcf",
+            "--collector", "10.10.10.50",
+            "--target-host", "10.10.10.101",
+            "--connection", "mock",
+            "--dry-run",
+        ],
+    )
+    assert result.exit_code == 0
+
+
+def test_cli_run_mode_script_generates_bundle(tmp_path):
+    """Verify --mode script writes deploy-telegraf.sh and bundle files to output-dir without remote connection."""
+    bundle_out = tmp_path / "test-script-bundle"
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        [
+            "run",
+            "--vcf-url", "https://vcf.local",
+            "--mock-vcf",
+            "--collector", "10.10.10.50",
+            "--target-host", "node01.corp.local",
+            "--mode", "script",
+            "--output-dir", str(bundle_out),
+        ],
+    )
+    assert result.exit_code == 0
+    assert (bundle_out / "deploy-telegraf.sh").exists()
+    script_txt = (bundle_out / "deploy-telegraf.sh").read_text(encoding="utf-8")
+    assert "systemctl restart telegraf" in script_txt
+    assert "MUTUAL_AUTHENTICATION" in script_txt
+    assert (bundle_out / "etc" / "telegraf" / "telegraf.d" / "vcf-helper-system.conf").exists()
+    assert (bundle_out / "etc" / "telegraf" / "telegraf.d" / "cloudproxy-http.conf").exists()
+
+
+def test_cli_run_mode_config_only_generates_bundle(tmp_path):
+    """Verify --mode config_only writes configuration files without deploy scripts."""
+    bundle_out = tmp_path / "test-cfg-bundle"
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        [
+            "run",
+            "--vcf-url", "https://vcf.local",
+            "--mock-vcf",
+            "--collector", "10.10.10.50",
+            "--target-host", "node01.corp.local",
+            "--mode", "config_only",
+            "--output-dir", str(bundle_out),
+        ],
+    )
+    assert result.exit_code == 0
+    assert not (bundle_out / "deploy-telegraf.sh").exists()
+    assert (bundle_out / "etc" / "telegraf" / "telegraf.d" / "vcf-helper-system.conf").exists()
+    assert (bundle_out / "etc" / "telegraf" / "telegraf.d" / "cloudproxy-http.conf").exists()
+
+
+def test_cli_ssh_and_winrm_default_users(monkeypatch):
+    """Verify CLI instantiates SSH and WinRM executors with correct default usernames."""
+    from vcf_ops_telegraf_helper.executors.ssh import SSHExecutor
+    from vcf_ops_telegraf_helper.executors.winrm import WinRMExecutor
+
+    ssh_init_kwargs = {}
+    orig_ssh_init = SSHExecutor.__init__
+
+    def mock_ssh_init(self, *args, **kwargs):
+        ssh_init_kwargs.update(kwargs)
+        orig_ssh_init(self, *args, **kwargs)
+
+    winrm_init_kwargs = {}
+    orig_winrm_init = WinRMExecutor.__init__
+
+    def mock_winrm_init(self, *args, **kwargs):
+        winrm_init_kwargs.update(kwargs)
+        orig_winrm_init(self, *args, **kwargs)
+
+    monkeypatch.setattr(SSHExecutor, "__init__", mock_ssh_init)
+    monkeypatch.setattr(WinRMExecutor, "__init__", mock_winrm_init)
+    monkeypatch.setenv("SSH_PASS", "Secret123")
+    monkeypatch.setenv("VCF_PASS", "Secret123")
+
+    runner = CliRunner()
+    # Test Linux / SSH default user is root
+    runner.invoke(
+        cli,
+        [
+            "run",
+            "--vcf-url", "https://vcf.local",
+            "--mock-vcf",
+            "--collector", "10.10.10.50",
+            "--target-host", "linux-host.local",
+            "--connection", "ssh",
+            "--preview",
+        ],
+    )
+    assert ssh_init_kwargs.get("username") == "root"
+
+    # Test Windows / WinRM default user is Administrator
+    runner.invoke(
+        cli,
+        [
+            "run",
+            "--vcf-url", "https://vcf.local",
+            "--mock-vcf",
+            "--collector", "10.10.10.50",
+            "--target-host", "win-host.local",
+            "--connection", "winrm",
+            "--preview",
+        ],
+    )
+    assert winrm_init_kwargs.get("username") == "Administrator"
+
+
+def test_cli_uninstall_password_env_fallback(monkeypatch):
+    """Verify uninstall command uses SSH_PASS when password option is omitted."""
+    from unittest.mock import MagicMock
+    monkeypatch.setenv("SSH_PASS", "EnvUninstallPass123!")
+    runner = CliRunner()
+    with patch("vcf_ops_telegraf_helper.workflow.uninstall.UninstallEndpointWorkflow.run") as mock_run:
+        mock_run.return_value = MagicMock(
+            success=True,
+            verifications={"Service inactive": "PASS", "Binary absent": "PASS", "Configuration absent": "PASS"},
+        )
+        result = runner.invoke(
+            cli,
+            [
+                "uninstall",
+                "--target", "node01.corp.local",
+                "--method", "ssh",
+                "--yes",
+            ],
+        )
+        assert result.exit_code == 0
+
+
+
+

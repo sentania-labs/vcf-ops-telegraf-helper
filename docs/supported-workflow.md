@@ -28,10 +28,12 @@ The helper orchestrates these steps from an administrator workstation without re
   Produces clean, standalone input fragments (e.g. `vcf-helper-system.conf`) for CPU, Memory, Disk, and Network monitoring with Broadcom-recommended field options.
 * **Validation at Multiple Boundaries**:
   Tests generated TOML syntax locally, validates Telegraf configuration syntax on the remote endpoint prior to applying, and confirms network path reachability to the Cloud Proxy.
-* **Safe Application**:
-  Writes isolated fragments into `telegraf.d/` rather than modifying the vendor or user `telegraf.conf` file directly.
+* **Safe Application and Base Stubbing**:
+  Writes isolated fragments into `telegraf.d/` rather than modifying existing user configs. If a base `telegraf.conf` does not exist on the endpoint, creates a minimal stub containing standard `[agent]` settings, backing up any pre-existing configuration to `.bak` first.
 * **Service Restart and Telemetry Check**:
-  Restarts the service via systemd, tests local metric generation with `--test`, and inspects service status.
+  Restarts the service via systemd or Windows Service Manager, tests local metric generation with `--test`, and inspects service status.
+* **Automatic Rollback**:
+  If configuration validation fails during `telegraf --test` or the service fails to restart, the engine automatically rolls back changes, restoring the original configuration files from their `.bak` copies.
 * **Audit and Run Reporting**:
   Exports an honest stage-by-stage Markdown or JSON report showing exact commands executed, exit codes, and verification outcomes.
 
@@ -42,6 +44,7 @@ The helper orchestrates these steps from an administrator workstation without re
 * **Drift Management**:
   Configuration generation is idempotent. Running the utility multiple times produces identical fragments and reports whether files changed.
 * **Recovery Mechanism**:
-  Because configuration is modularized into drop-in fragments under `telegraf.d/`, rolling back changes requires only removing the managed `.conf` files and restarting Telegraf.
+  Because configuration is modularized into drop-in fragments under `telegraf.d/`, rolling back changes requires only removing the managed `.conf` files and restarting Telegraf. In automated deployments, the helper restores `.bak` configuration automatically upon validation failure.
 * **Deployment Modes**:
-  For environments where direct SSH push is restricted by security policy, the utility supports `generate script` and `config only` modes to produce auditable bash scripts and configuration bundles for local execution through existing change-management channels.
+  For environments where direct remote push (SSH or WinRM) is restricted by security policy, the utility supports `script` (`--mode script`) and `config_only` (`--mode config_only`) modes. Script mode generates an auditable, self-extracting bundle containing `deploy-telegraf.sh` (Linux) or `deploy-telegraf.ps1` (Windows) and all required configurations and certificates with zero remote connection required.
+
