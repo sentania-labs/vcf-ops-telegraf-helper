@@ -83,18 +83,28 @@ class UninstallEndpointWorkflow:
             is_win = (self.target.os_family == OSFamily.WINDOWS) or (type(self.executor).__name__ == "WinRMExecutor")
 
             if is_win:
-                self.executor.execute("Stop-Service -Name telegraf -Force -ErrorAction SilentlyContinue", timeout=15)
-                self.executor.execute("& 'C:\\telegraf\\telegraf.exe' --service uninstall 2>$null", timeout=15)
-                self.executor.execute("sc.exe delete telegraf 2>$null", timeout=10)
+                check_svc = self.executor.execute("Get-Service -Name telegraf -ErrorAction SilentlyContinue", timeout=5)
+                if check_svc.success and "telegraf" in check_svc.stdout.lower():
+                    self.executor.execute("Stop-Service -Name telegraf -Force -ErrorAction SilentlyContinue", timeout=15)
+                    self.executor.execute("& 'C:\\telegraf\\telegraf.exe' --service uninstall 2>$null", timeout=15)
+                    self.executor.execute("sc.exe delete telegraf 2>$null", timeout=10)
+                    msg = "Telegraf service stopped and unregistered"
+                else:
+                    msg = "Telegraf service was not installed (nothing to stop)"
             else:
-                self.executor.execute("systemctl stop telegraf 2>/dev/null || true", timeout=15)
-                self.executor.execute("systemctl disable telegraf 2>/dev/null || true", timeout=15)
+                check_svc = self.executor.execute("systemctl list-unit-files telegraf.service 2>/dev/null", timeout=5)
+                if check_svc.success and "telegraf.service" in check_svc.stdout:
+                    self.executor.execute("systemctl stop telegraf 2>/dev/null || true", timeout=15)
+                    self.executor.execute("systemctl disable telegraf 2>/dev/null || true", timeout=15)
+                    msg = "Telegraf service stopped and disabled"
+                else:
+                    msg = "Telegraf service was not installed (nothing to stop)"
 
             dur = int((time.monotonic() - start) * 1000)
             res = StageResult(
                 stage=UninstallStage.STOP_SERVICE,
                 status=StageStatus.PASS,
-                message="Telegraf service stopped and disabled",
+                message=msg,
                 duration_ms=dur,
             )
         except Exception as e:
@@ -119,29 +129,39 @@ class UninstallEndpointWorkflow:
 
             if is_win:
                 cfg_path = "C:\\telegraf"
-                self.executor.execute(
-                    f"Remove-Item -Path '{cfg_path}\\telegraf.d' -Recurse -Force -ErrorAction SilentlyContinue",
-                    timeout=15,
-                )
-                self.executor.execute(
-                    f"Remove-Item -Path '{cfg_path}\\*.conf*' -Force -ErrorAction SilentlyContinue",
-                    timeout=15,
-                )
-                self.executor.execute(
-                    f"Remove-Item -Path '{cfg_path}\\*.pem' -Force -ErrorAction SilentlyContinue",
-                    timeout=15,
-                )
-                self.purged_paths.append("C:\\telegraf configuration and certs")
+                exists = self.executor.file_exists(cfg_path)
+                if exists:
+                    self.executor.execute(
+                        f"Remove-Item -Path '{cfg_path}\\telegraf.d' -Recurse -Force -ErrorAction SilentlyContinue",
+                        timeout=15,
+                    )
+                    self.executor.execute(
+                        f"Remove-Item -Path '{cfg_path}\\*.conf*' -Force -ErrorAction SilentlyContinue",
+                        timeout=15,
+                    )
+                    self.executor.execute(
+                        f"Remove-Item -Path '{cfg_path}\\*.pem' -Force -ErrorAction SilentlyContinue",
+                        timeout=15,
+                    )
+                    self.purged_paths.append("C:\\telegraf configuration and certs")
+                    msg = f"Removed Telegraf configuration directory ({cfg_path})"
+                else:
+                    msg = f"Telegraf configuration directory was not present ({cfg_path})"
             else:
                 cfg_path = "/etc/telegraf"
-                self.executor.execute(f"rm -rf {cfg_path}", timeout=15)
-                self.purged_paths.append(cfg_path)
+                check_dir = self.executor.execute(f"test -d {cfg_path}", timeout=5)
+                if check_dir.success:
+                    self.executor.execute(f"rm -rf {cfg_path}", timeout=15)
+                    self.purged_paths.append(cfg_path)
+                    msg = f"Removed Telegraf configuration directory ({cfg_path})"
+                else:
+                    msg = f"Telegraf configuration directory was not present ({cfg_path})"
 
             dur = int((time.monotonic() - start) * 1000)
             res = StageResult(
                 stage=UninstallStage.REMOVE_CONFIG,
                 status=StageStatus.PASS,
-                message=f"Removed Telegraf configuration directory ({cfg_path})",
+                message=msg,
                 duration_ms=dur,
             )
         except Exception as e:
@@ -182,9 +202,13 @@ class UninstallEndpointWorkflow:
                         "(dnf remove -y -q telegraf 2>/dev/null || yum remove -y -q telegraf 2>/dev/null) || true",
                         timeout=90,
                     )
-                    # Binary & systemd files
+                    # Binary & systemd files and residual directories
                     self.executor.execute(
                         "rm -f /usr/bin/telegraf /usr/local/bin/telegraf /lib/systemd/system/telegraf.service /etc/systemd/system/telegraf.service 2>/dev/null || true",
+                        timeout=15,
+                    )
+                    self.executor.execute(
+                        "rm -rf /etc/default/telegraf /usr/lib/telegraf 2>/dev/null || true",
                         timeout=15,
                     )
                     self.purged_paths.append("Telegraf package and binary")
@@ -234,17 +258,28 @@ class UninstallEndpointWorkflow:
                     timeout=5,
                 )
                 svc_absent = (svc_res.stdout.strip() == "ABSENT") or (not svc_res.success)
-                bin_absent = not self.executor.file_exists("C:\\telegraf\\telegraf.exe")
-                cfg_absent = not self.executor.file_exists("C:\\telegraf")
+                if self.options.purge_packages:
+                    bin_absent = not self.executor.file_exists("C:\\telegraf\\telegraf.exe")
+                    cfg_absent = not self.executor.file_exists("C:\\telegraf")
+                else:
+                    bin_absent = True
+                    cfg_absent = not self.executor.file_exists("C:\\telegraf\\telegraf.d")
             else:
                 svc_res = self.executor.execute("systemctl is-active telegraf 2>/dev/null", timeout=5)
                 svc_absent = svc_res.stdout.strip() not in ("active", "activating")
-                which_res = self.executor.execute("which telegraf 2>/dev/null", timeout=5)
-                bin_absent = not which_res.success or not which_res.stdout.strip()
-                cfg_absent = not self.executor.file_exists("/etc/telegraf")
+                if self.options.purge_packages:
+                    which_res = self.executor.execute("which telegraf 2>/dev/null", timeout=5)
+                    bin_absent = not which_res.success or not which_res.stdout.strip()
+                    cfg_absent = not self.executor.file_exists("/etc/telegraf")
+                else:
+                    bin_absent = True
+                    cfg_absent = not self.executor.file_exists("/etc/telegraf/telegraf.d")
 
             self.verifications["Service inactive"] = "PASS" if svc_absent else "FAIL"
-            self.verifications["Binary absent"] = "PASS" if bin_absent else "FAIL"
+            if self.options.purge_packages:
+                self.verifications["Binary absent"] = "PASS" if bin_absent else "FAIL"
+            else:
+                self.verifications["Binary absent"] = "SKIPPED (packages preserved)"
             self.verifications["Configuration absent"] = "PASS" if cfg_absent else "FAIL"
 
             all_clean = svc_absent and bin_absent and cfg_absent

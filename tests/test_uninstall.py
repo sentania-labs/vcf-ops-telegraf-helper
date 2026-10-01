@@ -6,6 +6,7 @@ from unittest.mock import MagicMock
 from click.testing import CliRunner
 
 from vcf_ops_telegraf_helper.cli.main import cli
+from vcf_ops_telegraf_helper.executors.base import CommandResult
 from vcf_ops_telegraf_helper.executors.mock import MockExecutor
 from vcf_ops_telegraf_helper.models.endpoint import (
     ConnectionMethod,
@@ -153,3 +154,30 @@ def test_cli_uninstall_with_yes_flag(monkeypatch):
         assert result.exit_code == 0
         assert "Telegraf uninstalled successfully" in result.output
         assert "Service inactive: PASS" in result.output
+
+
+def test_uninstall_workflow_packages_preserved():
+    """Verify uninstall verification passes when purge_packages is False and packages are preserved."""
+    target = EndpointTarget(
+        hostname="linux-srv02.corp.local",
+        os_family=OSFamily.LINUX,
+        connection_method=ConnectionMethod.MOCK,
+    )
+    executor = MockExecutor(connected=True, telegraf_installed=True)
+    # telegraf binary is intentionally still present
+    executor.custom_responses["which telegraf 2>/dev/null"] = CommandResult(
+        exit_code=0, stdout="/usr/bin/telegraf", command="which"
+    )
+
+    workflow = UninstallEndpointWorkflow(
+        target=target,
+        executor=executor,
+        options=UninstallOptions(purge_packages=False, purge_repositories=False),
+    )
+    summary = workflow.run()
+
+    assert summary.success is True
+    assert summary.verifications["Service inactive"] == "PASS"
+    assert "packages preserved" in summary.verifications["Binary absent"]
+    assert summary.verifications["Configuration absent"] == "PASS"
+

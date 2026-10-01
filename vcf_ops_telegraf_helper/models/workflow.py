@@ -98,7 +98,7 @@ class RunSummary(BaseModel):
     target_hostname: str
     vcf_environment: str
     collector_address: str
-    deployment_mode: str
+    deployment_mode: str = "push"
     success: bool
     stages: List[StageResult] = Field(default_factory=list)
     verifications: Dict[str, str] = Field(default_factory=dict)

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "vcf-ops-telegraf-helper"
-version = "0.6.0"
+version = "0.6.1"
 description = "Local administrator utility for VCF Operations open-source Telegraf onboarding"
 authors = [{ name = "Scott" }]
 readme = "README.md"
@@ -27,6 +27,9 @@ gui = ["PySide6>=6.7.2"]
 
 [project.scripts]
 vcf-telegraf-helper = "vcf_ops_telegraf_helper.cli.main:cli"
+
+[project.gui-scripts]
+vcf-telegraf-helper-gui = "vcf_ops_telegraf_helper.gui.app:run_gui"
 
 [tool.setuptools.packages.find]
 where = ["."]

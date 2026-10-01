@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import os
 from typing import Optional
 from rich.console import Console
 from rich.prompt import Confirm, Prompt
@@ -59,9 +60,14 @@ def run_wizard(console: Optional[Console] = None) -> None:
 
     vcf_url = Prompt.ask("VCF Operations URL", default=default_url, console=con)
     vcf_user = Prompt.ask("VCF Operations Username", default="admin", console=con)
-    vcf_pass = Prompt.ask("VCF Operations Password", password=True, console=con)
+    env_vcf_pass = os.environ.get("VCF_PASS")
+    if env_vcf_pass:
+        con.print("  [dim]Using VCF password from VCF_PASS environment variable[/dim]")
+        vcf_pass = env_vcf_pass
+    else:
+        vcf_pass = Prompt.ask("VCF Operations Password", password=True, console=con)
     collector_ip = Prompt.ask("Cloud Proxy / Collector IP or FQDN", default=default_collector, console=con)
-    verify_ssl = Confirm.ask("Verify TLS/SSL certificates?", default=False, console=con)
+    verify_ssl = Confirm.ask("Verify TLS/SSL certificates?", default=True, console=con)
 
     vcf_env = VCFEnvironment(
         name="current",
@@ -102,15 +108,25 @@ def run_wizard(console: Optional[Console] = None) -> None:
 
     if conn_method == ConnectionMethod.SSH:
         ssh_user = Prompt.ask("SSH Username", default="root", console=con)
-        use_key = Confirm.ask("Use SSH private key authentication?", default=True, console=con)
-        if use_key:
-            default_key = str(Path.home() / ".ssh" / "id_rsa")
-            ssh_key = Prompt.ask("SSH Key Path", default=default_key, console=con)
+        env_ssh_pass = os.environ.get("SSH_PASS") or os.environ.get("WINRM_PASS")
+        if env_ssh_pass:
+            ssh_pass = env_ssh_pass
+            con.print("  [dim]Using SSH password from environment variable[/dim]")
         else:
-            ssh_pass = Prompt.ask("SSH Password", password=True, console=con)
+            use_key = Confirm.ask("Use SSH private key authentication?", default=True, console=con)
+            if use_key:
+                default_key = str(Path.home() / ".ssh" / "id_rsa")
+                ssh_key = Prompt.ask("SSH Key Path", default=default_key, console=con)
+            else:
+                ssh_pass = Prompt.ask("SSH Password", password=True, console=con)
     elif conn_method == ConnectionMethod.WINRM:
         ssh_user = Prompt.ask("WinRM Username", default="Administrator", console=con)
-        ssh_pass = Prompt.ask("WinRM Password", password=True, console=con)
+        env_winrm_pass = os.environ.get("WINRM_PASS") or os.environ.get("SSH_PASS")
+        if env_winrm_pass:
+            ssh_pass = env_winrm_pass
+            con.print("  [dim]Using WinRM password from environment variable[/dim]")
+        else:
+            ssh_pass = Prompt.ask("WinRM Password", password=True, console=con)
         winrm_ssl = Confirm.ask("Use HTTPS for WinRM (port 5986)?", default=False, console=con)
 
     telegraf_ver = "1.40.1"
@@ -163,9 +179,18 @@ def run_wizard(console: Optional[Console] = None) -> None:
     # -------------------------------------------------------------------------
     con.print("\n[bold blue]Step 3: Monitoring Selection[/bold blue]")
     is_win = target.os_family == OSFamily.WINDOWS
+    apply_baseline = Confirm.ask("Apply recommended OS baseline metrics?", default=True, console=con)
+
     if is_win:
-        enable_win_perf = Confirm.ask("Enable Windows Performance Counters (Broadcom template)?", default=True, console=con)
-        enable_win_svc = Confirm.ask("Enable Windows Services monitoring?", default=True, console=con)
+        if apply_baseline:
+            enable_win_perf = True
+            enable_win_svc = True
+            svc_names = ["telegraf"]
+        else:
+            enable_win_perf = Confirm.ask("Enable Windows Performance Counters (Broadcom template)?", default=True, console=con)
+            enable_win_svc = Confirm.ask("Enable Windows Services monitoring?", default=True, console=con)
+            svc_input = Prompt.ask("Service names to monitor (comma-separated)", default="telegraf", console=con)
+            svc_names = [s.strip() for s in svc_input.split(",") if s.strip()] or ["telegraf"]
 
         monitoring = MonitoringConfig(
             cpu=CpuInputConfig(enabled=False),
@@ -175,15 +200,23 @@ def run_wizard(console: Optional[Console] = None) -> None:
             system=SystemInputConfig(enabled=False),
             swap=SwapInputConfig(enabled=False),
             win_perf_counters=WinPerfCountersInputConfig(enabled=enable_win_perf),
-            win_services=WinServicesInputConfig(enabled=enable_win_svc, service_names=["*"]),
+            win_services=WinServicesInputConfig(enabled=enable_win_svc, service_names=svc_names),
         )
     else:
-        enable_cpu = Confirm.ask("Enable CPU monitoring?", default=True, console=con)
-        enable_mem = Confirm.ask("Enable Memory monitoring?", default=True, console=con)
-        enable_disk = Confirm.ask("Enable Disk monitoring?", default=True, console=con)
-        enable_net = Confirm.ask("Enable Network monitoring?", default=True, console=con)
-        enable_sys = Confirm.ask("Enable System load and uptime monitoring?", default=True, console=con)
-        enable_swap = Confirm.ask("Enable Swap monitoring?", default=True, console=con)
+        if apply_baseline:
+            enable_cpu = True
+            enable_mem = True
+            enable_disk = True
+            enable_net = True
+            enable_sys = True
+            enable_swap = True
+        else:
+            enable_cpu = Confirm.ask("Enable CPU monitoring?", default=True, console=con)
+            enable_mem = Confirm.ask("Enable Memory monitoring?", default=True, console=con)
+            enable_disk = Confirm.ask("Enable Disk monitoring?", default=True, console=con)
+            enable_net = Confirm.ask("Enable Network monitoring?", default=True, console=con)
+            enable_sys = Confirm.ask("Enable System load and uptime monitoring?", default=True, console=con)
+            enable_swap = Confirm.ask("Enable Swap monitoring?", default=True, console=con)
 
         monitoring = MonitoringConfig(
             cpu=CpuInputConfig(enabled=enable_cpu),

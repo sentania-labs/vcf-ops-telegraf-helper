@@ -5,6 +5,7 @@ from __future__ import annotations
 from vcf_ops_telegraf_helper.adapters.mock import MockVCFOpsIntegration
 from vcf_ops_telegraf_helper.executors.base import CommandResult
 from vcf_ops_telegraf_helper.executors.mock import MockExecutor
+from vcf_ops_telegraf_helper.executors.package import PackageExecutor
 from vcf_ops_telegraf_helper.models.endpoint import (
     ConnectionMethod,
     EndpointTarget,
@@ -13,6 +14,7 @@ from vcf_ops_telegraf_helper.models.endpoint import (
 from vcf_ops_telegraf_helper.models.monitoring import MonitoringConfig
 from vcf_ops_telegraf_helper.models.vcf import CollectorInfo, VCFEnvironment
 from vcf_ops_telegraf_helper.models.workflow import (
+    DeploymentMode,
     StageStatus,
     WorkflowOptions,
     WorkflowStage,
@@ -137,7 +139,8 @@ def test_workflow_honest_unknown_telemetry():
         adapter=adapter,
     )
     summary = wf.run()
-    assert summary.verifications["VCF Ops ingestion"] == "UNKNOWN"
+    assert "PENDING" in summary.verifications["VCF Ops ingestion"]
+    assert "5 to 15 minutes" in summary.verifications["VCF Ops ingestion"]
 
 
 def test_workflow_windows_schannel_with_confirmed_ingestion():
@@ -199,8 +202,8 @@ def test_workflow_windows_schannel_with_confirmed_ingestion():
     assert summary.verifications["Metrics transmission"] == "PASS (verified via VCF Ops ingestion)"
 
 
-def test_workflow_windows_schannel_with_unknown_ingestion_fails():
-    """Verify Windows Schannel limitation fails Stage 8 when VCF Ops ingestion cannot be confirmed."""
+def test_workflow_windows_schannel_with_unknown_ingestion_reports_pending():
+    """Verify Windows Schannel limitation reports PENDING and avoids false failure when service and port 443 are verified."""
     from unittest.mock import MagicMock
     from vcf_ops_telegraf_helper.executors.base import CommandResult
 
@@ -255,9 +258,9 @@ def test_workflow_windows_schannel_with_unknown_ingestion_fails():
         adapter=adapter,
     )
     summary = wf.run()
-    assert summary.success is False
-    assert "FAIL" in summary.verifications["Metrics transmission"]
-    assert "Schannel backend cannot load detached PEM" in summary.verifications["Metrics transmission"]
+    assert summary.success is True
+    assert "PENDING (Windows Schannel PEM limitation; service and port 443 verified)" in summary.verifications["Metrics transmission"]
+    assert "PENDING" in summary.verifications["VCF Ops ingestion"]
 
 
 def test_workflow_options_telegraf_version_precedence():
@@ -433,3 +436,144 @@ def test_workflow_prepare_telegraf_integration_passes_shortname_for_vm_matching(
     called_kwargs = mock_prepare.call_args.kwargs
     assert called_kwargs["target_hostname"] == "mssqldemo"
     assert called_kwargs["target_ip"] == "172.16.3.80"
+
+
+def test_workflow_rollback_on_test_validation_failure():
+    """Verify that when telegraf --test fails on the endpoint, rollback restores .bak files."""
+    env = VCFEnvironment(
+        name="test-env",
+        url="https://vcf-ops.local",
+        username="admin",
+        collector=CollectorInfo(address="10.10.10.50"),
+    )
+    target = EndpointTarget(
+        hostname="node01.corp.local",
+        os_family=OSFamily.LINUX,
+        connection_method=ConnectionMethod.MOCK,
+    )
+    executor = MockExecutor(connected=True, telegraf_installed=True)
+    # Simulate telegraf --test syntax validation failure
+    executor.custom_responses["/usr/bin/telegraf --test --config /etc/telegraf/telegraf.conf --config-directory /etc/telegraf/telegraf.d"] = CommandResult(
+        exit_code=1,
+        stdout="",
+        stderr="Error parsing /etc/telegraf/telegraf.d/vcf-helper-system.conf: line 5: syntax error",
+        command="telegraf --test",
+    )
+
+    wf = ConfigureEndpointWorkflow(
+        environment=env,
+        target=target,
+        monitoring=MonitoringConfig(),
+        executor=executor,
+        adapter=MockVCFOpsIntegration(env=env, connected=True),
+        options=WorkflowOptions(restart_service=True),
+    )
+    summary = wf.run()
+
+    assert not summary.success
+    # Stage 7 should fail and report rollback
+    restart_stage = next(s for s in summary.stages if s.stage == WorkflowStage.RESTART)
+    assert restart_stage.status == StageStatus.FAIL
+    assert "Restored previous configuration (.bak)" in restart_stage.message
+    # Check that rollback script command was executed
+    assert any("mv -f" in cmd or ".bak" in cmd for cmd in executor.executed_commands)
+
+
+def test_workflow_script_mode_skips_remote_connection():
+    """Verify that deployment mode SCRIPT skips target connection and detection stages."""
+    env = VCFEnvironment(
+        name="test-env",
+        url="https://vcf-ops.local",
+        username="admin",
+        collector=CollectorInfo(address="10.10.10.50"),
+    )
+    target = EndpointTarget(
+        hostname="node01.corp.local",
+        os_family=OSFamily.LINUX,
+        connection_method=ConnectionMethod.MOCK,
+    )
+    executor = MockExecutor(connected=False, telegraf_installed=False)
+
+    wf = ConfigureEndpointWorkflow(
+        environment=env,
+        target=target,
+        monitoring=MonitoringConfig(),
+        executor=executor,
+        adapter=MockVCFOpsIntegration(env=env, connected=True),
+        options=WorkflowOptions(mode=DeploymentMode.SCRIPT),
+    )
+    # Stage 1 and 2 should be skipped rather than failing due to connected=False
+    conn_res = wf.detect_target()
+    assert conn_res.status == StageStatus.SKIPPED
+    assert "skipped for script deployment mode" in conn_res.message
+
+    detect_res = wf.detect_telegraf()
+    assert detect_res.status == StageStatus.PASS
+    assert "offline bundle generation" in detect_res.message
+    assert "target inspection skipped" in detect_res.details
+
+
+def test_workflow_linux_preflight_disk_check_var_and_root():
+    """Verify Linux pre-flight disk check inspects /var and / before auto-install."""
+    env = VCFEnvironment(
+        name="test-env",
+        url="https://vcf-ops.local",
+        username="admin",
+        collector=CollectorInfo(address="10.10.10.50"),
+    )
+    target = EndpointTarget(
+        hostname="node01.corp.local",
+        os_family=OSFamily.LINUX,
+        connection_method=ConnectionMethod.MOCK,
+        install_telegraf=True,
+    )
+    executor = MockExecutor(connected=True, telegraf_installed=False)
+    # Simulate df -m -P reporting 320 MB free on /var
+    executor.custom_responses["min_free=$(df -m -P /var / 2>/dev/null | awk 'NR>1 {print $4}' | sort -n | head -n1); if [ -n \"$min_free\" ] && [ \"$min_free\" -lt 500 ]; then echo \"FAIL: $min_free\"; else echo \"OK\"; fi"] = CommandResult(
+        exit_code=0, stdout="FAIL: 320", command="df"
+    )
+
+    wf = ConfigureEndpointWorkflow(
+        environment=env,
+        target=target,
+        monitoring=MonitoringConfig(),
+        executor=executor,
+        adapter=MockVCFOpsIntegration(env=env, connected=True),
+        options=WorkflowOptions(install_telegraf=True),
+    )
+    wf.detect_target()
+    wf.detect_telegraf()
+    wf.configure_vcf_output()
+    wf.render_inputs()
+
+    apply_res = wf.apply()
+    assert apply_res.status == StageStatus.FAIL
+    assert "Insufficient disk space on target filesystem (320 MB free on / or /var, minimum 500 MB required)" in apply_res.message
+
+
+def test_package_executor_deploy_scripts_include_rollback(tmp_path):
+    """Verify package deploy scripts include backup and rollback routines."""
+    pkg = PackageExecutor(output_dir=tmp_path / "bundle")
+
+    # Linux deploy script
+    sh_path = pkg.generate_deploy_script(is_windows=False)
+    sh_txt = sh_path.read_text(encoding="utf-8")
+    assert "rollback()" in sh_txt
+    assert "$MAIN_CONF.bak" in sh_txt
+    assert "$CONF_DIR" in sh_txt
+
+    # Windows deploy script
+    ps1_path = pkg.generate_deploy_script(is_windows=True)
+    ps1_txt = ps1_path.read_text(encoding="utf-8")
+    assert "Invoke-Rollback" in ps1_txt
+    assert "$mainConf.bak" in ps1_txt
+    assert "2>&1" in ps1_txt
+
+    # Verify rollback executes BEFORE terminating Write-Error under $ErrorActionPreference = "Stop"
+    val_rollback_pos = ps1_txt.find("Invoke-Rollback\n        Write-Error \"Telegraf configuration validation failed")
+    assert val_rollback_pos != -1
+    svc_rollback_pos = ps1_txt.find("Invoke-Rollback\n        Restart-Service telegraf")
+    assert svc_rollback_pos != -1
+
+
+

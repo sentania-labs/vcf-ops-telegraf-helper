@@ -20,6 +20,8 @@ from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
     QComboBox,
+    QDialog,
+    QDialogButtonBox,
     QFileDialog,
     QFrame,
     QGridLayout,
@@ -185,8 +187,8 @@ class MainWindow(QMainWindow):
         self._updating_catalog = False
 
         self.setWindowTitle("VCF Operations Open Telegraf Helper")
-        self.resize(1020, 720)
-        self.setMinimumSize(880, 600)
+        self.resize(1150, 840)
+        self.setMinimumSize(960, 680)
 
         self._init_ui()
         self._apply_theme()
@@ -208,14 +210,25 @@ class MainWindow(QMainWindow):
         if log_path.exists():
             try:
                 lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
-                content = "\n".join(lines[-200:])
+                content = "\n".join(lines[-250:])
             except Exception as exc:
                 content = f"Error reading log file: {exc}"
 
-        dlg = QMessageBox(self)
+        dlg = QDialog(self)
         dlg.setWindowTitle("Application Log")
-        dlg.setText(f"Log file: {log_path}")
-        dlg.setDetailedText(content)
+        dlg.resize(900, 600)
+        vbox = QVBoxLayout(dlg)
+        lbl = QLabel(f"Log file: {log_path} (most recent 250 lines)")
+        lbl.setProperty("class", "lattice-section-label")
+        vbox.addWidget(lbl)
+        edit = QPlainTextEdit(dlg)
+        edit.setProperty("class", "code-block")
+        edit.setReadOnly(True)
+        edit.setPlainText(content)
+        vbox.addWidget(edit, 1)
+        btn_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        btn_box.rejected.connect(dlg.reject)
+        vbox.addWidget(btn_box)
         dlg.exec()
 
     def _init_ui(self) -> None:
@@ -381,8 +394,9 @@ class MainWindow(QMainWindow):
         grid.addWidget(self.vcf_user_label, 5, 0)
         grid.addWidget(self.vcf_user_input, 5, 1)
 
-        self.vcf_pass_label = QLabel("Password:")
+        self.vcf_pass_label = QLabel("Password: *")
         self.vcf_pass_input = QLineEdit()
+        self.vcf_pass_input.setPlaceholderText("Required for username authentication")
         self.vcf_pass_input.setEchoMode(QLineEdit.Password)
         grid.addWidget(self.vcf_pass_label, 6, 0)
         grid.addWidget(self.vcf_pass_input, 6, 1)
@@ -391,31 +405,40 @@ class MainWindow(QMainWindow):
         self._update_vcf_auth_visibility()
 
         self.vcf_ssl_check = QCheckBox("Verify TLS certificates (disable for self-signed lab certs)")
+        self.vcf_ssl_check.setChecked(True)
         c_layout.addWidget(self.vcf_ssl_check)
 
-        btn_row = QHBoxLayout()
+        test_row = QHBoxLayout()
         self.test_vcf_btn = QPushButton("Validate VCF Connection")
         self.test_vcf_btn.clicked.connect(self._test_vcf_connection)
-        btn_row.addWidget(self.test_vcf_btn)
+        test_row.addWidget(self.test_vcf_btn)
 
         self.vcf_status_label = QLabel("Status: Not checked")
         self.vcf_status_label.setProperty("class", "lattice-caption")
-        btn_row.addWidget(self.vcf_status_label)
-        btn_row.addStretch()
+        test_row.addWidget(self.vcf_status_label)
+        test_row.addStretch()
+        c_layout.addLayout(test_row)
 
-        next_btn = QPushButton("Next: Endpoint Target ->")
-        next_btn.setProperty("class", "primary")
-        next_btn.clicked.connect(lambda: self.step_list.setCurrentRow(1))
-        btn_row.addWidget(next_btn)
-
-        c_layout.addLayout(btn_row)
         layout.addWidget(card)
         layout.addStretch()
 
         scroll.setWidget(content)
+
+        nav_frame = QFrame()
+        nav_frame.setProperty("class", "lattice-card")
+        nav_layout = QHBoxLayout(nav_frame)
+        nav_layout.setContentsMargins(16, 10, 16, 10)
+        nav_layout.addStretch()
+        next_btn = QPushButton("Next: Endpoint Target ->")
+        next_btn.setProperty("class", "primary")
+        next_btn.clicked.connect(lambda: self.step_list.setCurrentRow(1))
+        nav_layout.addWidget(next_btn)
+
         v = QVBoxLayout(page)
         v.setContentsMargins(0, 0, 0, 0)
-        v.addWidget(scroll)
+        v.setSpacing(0)
+        v.addWidget(scroll, 1)
+        v.addWidget(nav_frame)
         return page
 
     def _test_vcf_connection(self) -> None:
@@ -480,6 +503,7 @@ class MainWindow(QMainWindow):
 
         grid.addWidget(QLabel("Hostname or IP Address:"), 1, 0)
         self.ep_host_input = QLineEdit("10.10.10.101")
+        self.ep_host_input.textChanged.connect(self._on_target_host_changed)
         grid.addWidget(self.ep_host_input, 1, 1)
 
         self.ep_auth_type_label = QLabel("Authentication:")
@@ -595,25 +619,30 @@ class MainWindow(QMainWindow):
         self.ep_details_box.setPlainText("Endpoint details will appear here after detection.")
         c_layout.addWidget(self.ep_details_box)
 
-        btn_row = QHBoxLayout()
-        back_btn = QPushButton("<- Back: VCF Ops")
-        back_btn.clicked.connect(lambda: self.step_list.setCurrentRow(0))
-        btn_row.addWidget(back_btn)
-        btn_row.addStretch()
-
-        next_btn = QPushButton("Next: Monitoring Inputs ->")
-        next_btn.setProperty("class", "primary")
-        next_btn.clicked.connect(lambda: self.step_list.setCurrentRow(2))
-        btn_row.addWidget(next_btn)
-        c_layout.addLayout(btn_row)
-
         layout.addWidget(card)
         layout.addStretch()
 
         scroll.setWidget(content)
+
+        nav_frame = QFrame()
+        nav_frame.setProperty("class", "lattice-card")
+        nav_layout = QHBoxLayout(nav_frame)
+        nav_layout.setContentsMargins(16, 10, 16, 10)
+        back_btn = QPushButton("<- Back: VCF Ops")
+        back_btn.clicked.connect(lambda: self.step_list.setCurrentRow(0))
+        nav_layout.addWidget(back_btn)
+        nav_layout.addStretch()
+
+        next_btn = QPushButton("Next: Monitoring Inputs ->")
+        next_btn.setProperty("class", "primary")
+        next_btn.clicked.connect(lambda: self.step_list.setCurrentRow(2))
+        nav_layout.addWidget(next_btn)
+
         v = QVBoxLayout(page)
         v.setContentsMargins(0, 0, 0, 0)
-        v.addWidget(scroll)
+        v.setSpacing(0)
+        v.addWidget(scroll, 1)
+        v.addWidget(nav_frame)
         return page
 
     def _update_auth_and_endpoint_visibility(self) -> None:
@@ -661,7 +690,16 @@ class MainWindow(QMainWindow):
         if hasattr(self, "state_store"):
             self.state_store.save_preference("vcf_auth_mode", text)
 
+    def _on_target_host_changed(self, text: str) -> None:
+        if hasattr(self, "ep_status_label"):
+            self.ep_status_label.setText("Not detected yet")
+        if hasattr(self, "ep_details_box"):
+            self.ep_details_box.setPlainText("Endpoint details will appear here after detection.")
+        if hasattr(self, "ep_missing_banner"):
+            self.ep_missing_banner.setVisible(False)
+
     def _on_os_changed(self, os_name: str) -> None:
+        self._on_target_host_changed("")
         is_win = os_name.lower().startswith("win")
         if is_win:
             if not self.ep_advanced_check.isChecked() or self.ep_port_input.text() == "22":
@@ -716,14 +754,17 @@ class MainWindow(QMainWindow):
             return
 
         target = self._get_endpoint_target()
+        is_win = target.os_family == OSFamily.WINDOWS
+        cfg_loc = "C:\\telegraf" if is_win else "/etc/telegraf"
+        bin_desc = "C:\\telegraf binaries and Windows service" if is_win else "Telegraf package binaries and InfluxData repositories"
         reply = QMessageBox.question(
             self,
             "Confirm Telegraf Uninstallation",
             f"Are you sure you want to completely uninstall Telegraf from {target.hostname}?\n\n"
             "This will:\n"
-            "* Stop and disable the Telegraf service\n"
-            "* Remove /etc/telegraf configuration fragments and certificates\n"
-            "* Purge Telegraf package binaries and InfluxData repositories\n\n"
+            f"* Stop and disable the Telegraf service\n"
+            f"* Remove {cfg_loc} configuration fragments and certificates\n"
+            f"* Purge {bin_desc}\n\n"
             "This action cannot be undone.",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
@@ -971,6 +1012,43 @@ class MainWindow(QMainWindow):
         desc.setWordWrap(True)
         c_layout.addWidget(desc)
 
+        # Deployment Mode Selection Card
+        mode_card = QFrame()
+        mode_card.setProperty("class", "lattice-card")
+        mc_layout = QVBoxLayout(mode_card)
+        mc_layout.setContentsMargins(12, 10, 12, 10)
+        mc_layout.setSpacing(8)
+
+        mc_title = QLabel("DEPLOYMENT MODE")
+        mc_title.setProperty("class", "lattice-section-label")
+        mc_layout.addWidget(mc_title)
+
+        mode_row = QHBoxLayout()
+        mode_row.addWidget(QLabel("Target Mode:"))
+        self.deployment_mode_combo = QComboBox()
+        self.deployment_mode_combo.addItem("Direct Push (Deploy remotely via SSH / WinRM)", "push")
+        self.deployment_mode_combo.addItem("Standalone Script (Generate offline bundle with deploy script)", "script")
+        self.deployment_mode_combo.addItem("Configuration Only (Generate TOML config bundle without scripts)", "config_only")
+        self.deployment_mode_combo.currentIndexChanged.connect(self._on_deployment_mode_changed)
+        mode_row.addWidget(self.deployment_mode_combo, 1)
+        mc_layout.addLayout(mode_row)
+
+        self.bundle_dir_widget = QWidget()
+        bd_layout = QHBoxLayout(self.bundle_dir_widget)
+        bd_layout.setContentsMargins(0, 0, 0, 0)
+        bd_layout.setSpacing(8)
+        bd_layout.addWidget(QLabel("Bundle Directory:"))
+        self.bundle_dir_input = QLineEdit("./vcf-telegraf-bundle")
+        self.bundle_dir_input.textChanged.connect(self._update_cli_command)
+        bd_layout.addWidget(self.bundle_dir_input, 1)
+        self.bundle_browse_btn = QPushButton("Browse...")
+        self.bundle_browse_btn.clicked.connect(self._browse_bundle_dir)
+        bd_layout.addWidget(self.bundle_browse_btn)
+        mc_layout.addWidget(self.bundle_dir_widget)
+        self.bundle_dir_widget.setVisible(False)
+
+        c_layout.addWidget(mode_card)
+
         sec_in = QLabel("PLUGIN SELECTION & CONFIGURATION")
         sec_in.setProperty("class", "lattice-section-label")
         c_layout.addWidget(sec_in)
@@ -1026,7 +1104,7 @@ class MainWindow(QMainWindow):
 
         self.win_svc_check = QCheckBox("Enable Windows Services")
         self.win_svc_check.setChecked(False)
-        self.win_svc_names_input = QLineEdit("*")
+        self.win_svc_names_input = QLineEdit("telegraf")
 
         self.nginx_check = QCheckBox("Enable NGINX Monitoring")
         self.nginx_check.setChecked(False)
@@ -1094,7 +1172,7 @@ class MainWindow(QMainWindow):
 
         # Left pane: Catalog list
         left_box = QFrame()
-        left_box.setFixedWidth(290)
+        left_box.setFixedWidth(320)
         left_box.setProperty("class", "lattice-card")
         left_layout = QVBoxLayout(left_box)
         left_layout.setContentsMargins(10, 10, 10, 10)
@@ -1316,25 +1394,29 @@ class MainWindow(QMainWindow):
 
         c_layout.addLayout(pane_layout)
 
-        btn_row = QHBoxLayout()
-        back_btn = QPushButton("<- Back: Endpoint")
-        back_btn.clicked.connect(lambda: self.step_list.setCurrentRow(1))
-        btn_row.addWidget(back_btn)
-        btn_row.addStretch()
-
-        next_btn = QPushButton("Next: Review & Preview ->")
-        next_btn.setProperty("class", "primary")
-        next_btn.clicked.connect(lambda: self.step_list.setCurrentRow(3))
-        btn_row.addWidget(next_btn)
-        c_layout.addLayout(btn_row)
-
         layout.addWidget(card)
         layout.addStretch()
 
         scroll.setWidget(content)
+
+        nav_frame = QFrame()
+        nav_frame.setProperty("class", "lattice-card")
+        nav_layout = QHBoxLayout(nav_frame)
+        nav_layout.setContentsMargins(16, 10, 16, 10)
+        back_btn = QPushButton("<- Back: Endpoint Target")
+        back_btn.clicked.connect(lambda: self.step_list.setCurrentRow(1))
+        nav_layout.addWidget(back_btn)
+        nav_layout.addStretch()
+        next_btn = QPushButton("Next: Review & Preview ->")
+        next_btn.setProperty("class", "primary")
+        next_btn.clicked.connect(lambda: self.step_list.setCurrentRow(3))
+        nav_layout.addWidget(next_btn)
+
         v = QVBoxLayout(page)
         v.setContentsMargins(0, 0, 0, 0)
-        v.addWidget(scroll)
+        v.setSpacing(0)
+        v.addWidget(scroll, 1)
+        v.addWidget(nav_frame)
         return page
 
     def _create_plugin_card(
@@ -1432,6 +1514,32 @@ class MainWindow(QMainWindow):
                     self.custom_toml_check.setChecked(False)
             elif not self.custom_toml_check.isChecked() and not getattr(self, "_custom_toml_manually_unchecked", False) and not self._updating_catalog:
                 self.custom_toml_check.setChecked(True)
+
+    def _on_deployment_mode_changed(self) -> None:
+        if not hasattr(self, "deployment_mode_combo"):
+            return
+        mode_data = self.deployment_mode_combo.currentData()
+        is_bundle = mode_data in ("script", "config_only")
+        if hasattr(self, "bundle_dir_widget"):
+            self.bundle_dir_widget.setVisible(is_bundle)
+        if hasattr(self, "cli_command_box"):
+            self._update_cli_command()
+        if hasattr(self, "review_summary_box"):
+            self._update_preview()
+
+    def _browse_bundle_dir(self) -> None:
+        init_dir = (
+            self.bundle_dir_input.text().strip()
+            if hasattr(self, "bundle_dir_input") and self.bundle_dir_input.text().strip()
+            else "."
+        )
+        selected_dir = QFileDialog.getExistingDirectory(
+            self,
+            "Select Bundle Output Directory",
+            init_dir,
+        )
+        if selected_dir:
+            self.bundle_dir_input.setText(selected_dir)
 
     def _apply_baseline_preset(self) -> None:
         is_win = bool(
@@ -1575,29 +1683,34 @@ class MainWindow(QMainWindow):
         self.preview_output_box.setMinimumHeight(160)
         c_layout.addWidget(self.preview_output_box)
 
-        btn_row = QHBoxLayout()
-        back_btn = QPushButton("<- Back: Inputs")
-        back_btn.clicked.connect(lambda: self.step_list.setCurrentRow(2))
-        btn_row.addWidget(back_btn)
-
-        refresh_btn = QPushButton("Refresh Preview")
-        refresh_btn.clicked.connect(self._update_preview)
-        btn_row.addWidget(refresh_btn)
-        btn_row.addStretch()
-
-        next_btn = QPushButton("Proceed to Execution ->")
-        next_btn.setProperty("class", "primary")
-        next_btn.clicked.connect(lambda: self.step_list.setCurrentRow(4))
-        btn_row.addWidget(next_btn)
-        c_layout.addLayout(btn_row)
-
         layout.addWidget(card)
         layout.addStretch()
 
         scroll.setWidget(content)
+
+        nav_frame = QFrame()
+        nav_frame.setProperty("class", "lattice-card")
+        nav_layout = QHBoxLayout(nav_frame)
+        nav_layout.setContentsMargins(16, 10, 16, 10)
+        back_btn = QPushButton("<- Back: Monitoring Inputs")
+        back_btn.clicked.connect(lambda: self.step_list.setCurrentRow(2))
+        nav_layout.addWidget(back_btn)
+
+        refresh_btn = QPushButton("Refresh Preview")
+        refresh_btn.clicked.connect(self._update_preview)
+        nav_layout.addWidget(refresh_btn)
+        nav_layout.addStretch()
+
+        next_btn = QPushButton("Proceed to Execution ->")
+        next_btn.setProperty("class", "primary")
+        next_btn.clicked.connect(lambda: self.step_list.setCurrentRow(4))
+        nav_layout.addWidget(next_btn)
+
         v = QVBoxLayout(page)
         v.setContentsMargins(0, 0, 0, 0)
-        v.addWidget(scroll)
+        v.setSpacing(0)
+        v.addWidget(scroll, 1)
+        v.addWidget(nav_frame)
         return page
 
     def _update_preview(self) -> None:
@@ -1669,20 +1782,45 @@ class MainWindow(QMainWindow):
         else:
             install_desc = "Verify existing pre-installed Telegraf agent"
 
+        mode = self._get_deployment_mode()
+        bundle_dir = (
+            self.bundle_dir_input.text().strip()
+            if hasattr(self, "bundle_dir_input") and self.bundle_dir_input.text().strip()
+            else "./vcf-telegraf-bundle"
+        )
+
         plan_lines = [
             f"Target Endpoint: {target.hostname} ({target.connection_method.value.upper()}, OS: {target.os_family.value}, Port: {target.port})",
             f"VCF Collector:   {env.collector.address} (SSL Verify: {env.verify_ssl})",
-            "",
-            "PLANNED EXECUTION STAGES:",
-            f"1. Validate Connectivity: Test connection to {target.hostname} via {target.connection_method.value.upper()} (port {target.port}) and verify VCF Ops Collector reachability.",
-            f"2. Acquire Certificates: Connect to VCF Operations Suite API ({env.url}) to acquire mTLS client certificates (ca.cert, client.cert, client.key).",
-            f"3. Agent Provisioning: {install_desc}.",
-            f"4. Monitoring Configuration: Deploy {conf_dir}/vcf-helper-system.conf ({len(active_plugins)} active plugins: {', '.join(active_plugins)}).",
-            f"5. Output Pipeline: Deploy {conf_dir}/cloudproxy-http.conf targeting {env.collector.address} with mTLS authentication.",
-            f"6. Mandatory Metadata: Deploy {'mandatory_tags.bat' if is_win else 'mandatory_tags.sh'} to inject VCF Operations resource tags.",
-            f"7. Syntax Verification: Run telegraf --test on {target.hostname} to ensure valid configuration syntax before starting service.",
-            f"8. Service Activation: Enable and restart Telegraf service ({'Windows Service' if is_win else 'systemd unit'}) and verify telemetry ingestion.",
+            f"Deployment Mode: {mode.value.upper()}",
         ]
+        if mode in (DeploymentMode.SCRIPT, DeploymentMode.CONFIG_ONLY):
+            plan_lines.append(f"Output Directory: {bundle_dir}")
+        plan_lines.append("")
+        plan_lines.append("PLANNED EXECUTION STAGES:")
+        if mode in (DeploymentMode.SCRIPT, DeploymentMode.CONFIG_ONLY):
+            script_name = "deploy-telegraf.ps1" if is_win else "deploy-telegraf.sh"
+            plan_lines.extend([
+                "1. Validate Connectivity: Skipped (offline bundle generation).",
+                f"2. Acquire Certificates: Connect to VCF Operations Suite API ({env.url}) to acquire mTLS client certificates.",
+                "3. Agent Provisioning: Skipped (handled locally by standalone deploy script or existing tooling).",
+                f"4. Monitoring Configuration: Generate {conf_dir}/vcf-helper-system.conf ({len(active_plugins)} active plugins: {', '.join(active_plugins)}).",
+                f"5. Output Pipeline: Generate {conf_dir}/cloudproxy-http.conf targeting {env.collector.address} with mTLS authentication.",
+                f"6. Mandatory Metadata: Generate {'mandatory_tags.bat' if is_win else 'mandatory_tags.sh'} to inject VCF Operations resource tags.",
+                "7. Bundle Packaging: Write artifacts" + (f" and {script_name} installer" if mode == DeploymentMode.SCRIPT else "") + f" to {bundle_dir}.",
+                f"8. Verification: Ready for offline deployment on {target.hostname}.",
+            ])
+        else:
+            plan_lines.extend([
+                f"1. Validate Connectivity: Test connection to {target.hostname} via {target.connection_method.value.upper()} (port {target.port}) and verify VCF Ops Collector reachability.",
+                f"2. Acquire Certificates: Connect to VCF Operations Suite API ({env.url}) to acquire mTLS client certificates (ca.cert, client.cert, client.key).",
+                f"3. Agent Provisioning: {install_desc}.",
+                f"4. Monitoring Configuration: Deploy {conf_dir}/vcf-helper-system.conf ({len(active_plugins)} active plugins: {', '.join(active_plugins)}).",
+                f"5. Output Pipeline: Deploy {conf_dir}/cloudproxy-http.conf targeting {env.collector.address} with mTLS authentication.",
+                f"6. Mandatory Metadata: Deploy {'mandatory_tags.bat' if is_win else 'mandatory_tags.sh'} to inject VCF Operations resource tags.",
+                f"7. Syntax Verification: Run telegraf --test on {target.hostname} to ensure valid configuration syntax before starting service.",
+                f"8. Service Activation: Enable and restart Telegraf service ({'Windows Service' if is_win else 'systemd unit'}) and verify telemetry ingestion.",
+            ])
         self.review_summary_box.setPlainText("\n".join(plan_lines))
         self.preview_system_box.setPlainText(sys_toml)
         self.preview_output_box.setPlainText(out_toml)
@@ -1783,9 +1921,21 @@ class MainWindow(QMainWindow):
         layout.addStretch()
 
         scroll.setWidget(content)
+
+        nav_frame = QFrame()
+        nav_frame.setProperty("class", "lattice-card")
+        nav_layout = QHBoxLayout(nav_frame)
+        nav_layout.setContentsMargins(16, 10, 16, 10)
+        back_btn = QPushButton("<- Back: Review & Preview")
+        back_btn.clicked.connect(lambda: self.step_list.setCurrentRow(3))
+        nav_layout.addWidget(back_btn)
+        nav_layout.addStretch()
+
         v = QVBoxLayout(page)
         v.setContentsMargins(0, 0, 0, 0)
-        v.addWidget(scroll)
+        v.setSpacing(0)
+        v.addWidget(scroll, 1)
+        v.addWidget(nav_frame)
         return page
 
     def _copy_cli_command(self) -> None:
@@ -1802,6 +1952,7 @@ class MainWindow(QMainWindow):
         env = self._get_vcf_env()
         mon = self._get_monitoring_config()
         dry_run = getattr(self, "dry_run_check", None) and self.dry_run_check.isChecked()
+        mode = self._get_deployment_mode()
 
         parts = ["vcf-telegraf-helper run"]
         parts.append(f"--vcf-url {shlex.quote(env.url)}")
@@ -1820,21 +1971,32 @@ class MainWindow(QMainWindow):
             parts.append(f"--collector-group {shlex.quote(env.collector.name)}")
 
         parts.append(f"--target-host {shlex.quote(target.hostname)}")
-        parts.append(f"--connection {shlex.quote(target.connection_method.value)}")
-
-        std_port = 5985 if target.os_family == OSFamily.WINDOWS else 22
-        if target.port != std_port:
-            parts.append(f"--port {target.port}")
-
-        if target.username:
-            parts.append(f"--ssh-user {shlex.quote(target.username)}")
-        if target.key_filename:
-            parts.append(f"--ssh-key {shlex.quote(target.key_filename)}")
+        if mode != DeploymentMode.PUSH:
+            parts.append(f"--mode {mode.value}")
+            parts.append(f"--os {target.os_family.value}")
+            out_dir = (
+                self.bundle_dir_input.text().strip()
+                if hasattr(self, "bundle_dir_input") and self.bundle_dir_input.text().strip()
+                else "./vcf-telegraf-bundle"
+            )
+            if out_dir != "./vcf-telegraf-bundle":
+                parts.append(f"--output-dir {shlex.quote(out_dir)}")
         else:
-            parts.append('--ssh-pass "<password>"')
+            parts.append(f"--connection {shlex.quote(target.connection_method.value)}")
+            std_port = 5985 if target.os_family == OSFamily.WINDOWS else 22
+            if target.port != std_port:
+                parts.append(f"--port {target.port}")
 
-        if target.winrm_use_ssl:
-            parts.append("--winrm-ssl")
+            if target.username:
+                parts.append(f"--ssh-user {shlex.quote(target.username)}")
+            if target.key_filename:
+                parts.append(f"--ssh-key {shlex.quote(target.key_filename)}")
+            else:
+                parts.append('--ssh-pass "<password>"')
+
+            if target.winrm_use_ssl:
+                parts.append("--winrm-ssl")
+
         if target.install_telegraf:
             parts.append("--install-telegraf")
             if target.telegraf_version and target.telegraf_version != "1.40.1":
@@ -1846,50 +2008,42 @@ class MainWindow(QMainWindow):
 
         if target.os_family == OSFamily.WINDOWS:
             has_win_core = mon.win_perf_counters.enabled or (mon.win_services.enabled and bool(mon.win_services.service_names))
-            if mon.win_perf_counters.enabled:
-                parts.append("--win-perf")
-            if mon.win_services.enabled and mon.win_services.service_names:
-                svcs = ",".join(mon.win_services.service_names)
-                parts.append(f"--win-services {shlex.quote(svcs)}")
             if not has_win_core:
-                parts.append("--no-win-perf")
-                parts.append("--no-win-services")
+                parts.append("--no-baseline")
+            else:
+                if not mon.win_perf_counters.enabled:
+                    parts.append("--no-win-perf")
+                if not mon.win_services.enabled:
+                    parts.append("--no-win-services")
+                elif mon.win_services.service_names != ["telegraf"]:
+                    svcs = ",".join(mon.win_services.service_names)
+                    parts.append(f"--win-services {shlex.quote(svcs)}")
         else:
-            has_linux_core = any([
-                mon.cpu.enabled,
-                mon.mem.enabled,
-                mon.disk.enabled,
-                mon.net.enabled,
-                mon.system.enabled,
-                mon.swap.enabled,
-                mon.diskio.enabled,
-                mon.processes.enabled,
-            ])
-            if mon.cpu.enabled:
-                parts.append("--cpu")
-            if mon.mem.enabled:
-                parts.append("--mem")
-            if mon.disk.enabled:
-                parts.append("--disk")
-            if mon.net.enabled:
-                parts.append("--net")
-            if mon.system.enabled:
-                parts.append("--system")
-            if mon.swap.enabled:
-                parts.append("--swap")
+            core_plugins = [
+                ("cpu", mon.cpu.enabled),
+                ("mem", mon.mem.enabled),
+                ("disk", mon.disk.enabled),
+                ("net", mon.net.enabled),
+                ("system", mon.system.enabled),
+                ("swap", mon.swap.enabled),
+            ]
+            enabled_cores = [name for name, en in core_plugins if en]
+            if len(enabled_cores) == 0:
+                parts.append("--no-baseline")
+            elif len(enabled_cores) <= 2:
+                parts.append("--no-baseline")
+                for name in enabled_cores:
+                    parts.append(f"--{name}")
+            else:
+                for name, en in core_plugins:
+                    if not en:
+                        parts.append(f"--no-{name}")
+
             if mon.diskio.enabled:
                 parts.append("--diskio")
             if mon.processes.enabled:
                 parts.append("--processes")
-            if not has_linux_core:
-                parts.extend([
-                    "--no-cpu",
-                    "--no-mem",
-                    "--no-disk",
-                    "--no-net",
-                    "--no-system",
-                    "--no-swap",
-                ])
+
         if mon.nginx.enabled and mon.nginx.urls:
             parts.append(f"--nginx {shlex.quote(mon.nginx.urls[0])}")
         if mon.apache.enabled and mon.apache.urls:
@@ -1925,12 +2079,17 @@ class MainWindow(QMainWindow):
         env = self._get_vcf_env()
         mon = self._get_monitoring_config()
         mode = self._get_deployment_mode()
+        out_dir = (
+            self.bundle_dir_input.text().strip()
+            if hasattr(self, "bundle_dir_input") and self.bundle_dir_input.text().strip()
+            else "./vcf-telegraf-bundle"
+        )
 
         opts = WorkflowOptions(
-            deployment_mode=mode,
+            mode=mode,
             dry_run=self.dry_run_check.isChecked(),
+            output_dir=out_dir if mode in (DeploymentMode.SCRIPT, DeploymentMode.CONFIG_ONLY) else None,
             restart_service=(mode == DeploymentMode.PUSH and not self.dry_run_check.isChecked()),
-            verify_telemetry=True,
             install_telegraf=target.install_telegraf,
             telegraf_version=target.telegraf_version,
         )
@@ -1968,20 +2127,21 @@ class MainWindow(QMainWindow):
         self.export_md_btn.setEnabled(True)
         self.export_json_btn.setEnabled(True)
 
-        chk = summary.verification
         v_lines = [
             "",
             "============================================================",
             f"OPERATIONAL VERIFICATION: {'PASS' if summary.success else 'FAIL'}",
             "============================================================",
-            f"Collector Reachable:     {chk.collector_reachable.value}",
-            f"Telegraf Installed:      {chk.telegraf_installed.value}",
-            f"Config Valid:            {chk.config_valid.value}",
-            f"Service Running:         {chk.service_running.value}",
-            f"Local Metrics Generated: {chk.local_metrics_generated.value}",
-            f"VCF Ops Ingestion:       {chk.vcf_ops_ingestion.value}",
-            "============================================================",
         ]
+        if summary.verifications:
+            for check, status in summary.verifications.items():
+                v_lines.append(f"{check:<26}: {status}")
+        v_lines.append("============================================================")
+        if summary.managed_files:
+            v_lines.append("Managed Files:")
+            for mf in summary.managed_files:
+                v_lines.append(f"  * {mf}")
+            v_lines.append("============================================================")
         self.stage_list_box.appendPlainText("\n".join(v_lines))
         self._update_cli_command()
 
@@ -2136,14 +2296,29 @@ class MainWindow(QMainWindow):
         )
 
     def _get_deployment_mode(self) -> DeploymentMode:
+        if not hasattr(self, "deployment_mode_combo"):
+            return DeploymentMode.PUSH
+        data = self.deployment_mode_combo.currentData()
+        if data == "script":
+            return DeploymentMode.SCRIPT
+        if data == "config_only":
+            return DeploymentMode.CONFIG_ONLY
         return DeploymentMode.PUSH
 
     def _create_executor(self, target: EndpointTarget) -> Any:
+        mode = self._get_deployment_mode()
+        out_dir = (
+            self.bundle_dir_input.text().strip()
+            if hasattr(self, "bundle_dir_input") and self.bundle_dir_input.text().strip()
+            else "./vcf-telegraf-bundle"
+        )
+        if mode in (DeploymentMode.SCRIPT, DeploymentMode.CONFIG_ONLY):
+            return PackageExecutor(output_dir=out_dir)
         m = target.connection_method.value
         if m == "local":
             return LocalExecutor()
         if m == "package":
-            return PackageExecutor(output_dir="./vcf-telegraf-bundle")
+            return PackageExecutor(output_dir=out_dir)
         if m == "winrm":
             return WinRMExecutor(
                 hostname=target.hostname,
