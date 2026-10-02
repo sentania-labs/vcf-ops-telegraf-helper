@@ -6,6 +6,7 @@ Implements the official Broadcom workflow for VCF Operations 9.1 open-source Tel
 from __future__ import annotations
 
 import io
+import ipaddress
 import os
 import re
 import socket
@@ -66,6 +67,20 @@ class VCF91OpenTelegrafIntegration(VCFOpsIntegration):
                 return resp.status_code in (200, 301, 302, 401)
             except Exception:
                 return False
+
+    def verify_credentials(self) -> None:
+        """Confirm the token, or the username and password, are accepted by the Suite API."""
+        if not self.env.token:
+            if not (self.env.username and self.env.password):
+                raise RuntimeError("No API token or username and password supplied")
+            self.acquire_token(self.env.username, self.env.password)
+        resp = self.session.get(
+            f"{self.base_url}/suite-api/api/versions/current", headers=self._api_headers(), timeout=10
+        )
+        if resp.status_code in (401, 403):
+            raise RuntimeError(f"VCF Operations rejected the credentials (HTTP {resp.status_code})")
+        if resp.status_code != 200:
+            raise RuntimeError(f"Credential check failed with HTTP {resp.status_code}")
 
     def detect_version(self) -> str:
         """Detect remote release version using Suite API versions endpoint."""
@@ -632,14 +647,14 @@ class VCF91OpenTelegrafIntegration(VCFOpsIntegration):
             known_targets = set()
             has_ip_info = False
             for g in all_groups:
-                for k in ("name", "id", "vip", "virtualIp", "ipAddress", "configuredVip", "fqdn", "hostName"):
+                for k in ("name", "id", "vip", "virtualIP", "virtualIp", "ipAddress", "configuredVip", "fqdn", "hostName"):
                     val = str(g.get(k, "")).strip().lower()
                     if val:
                         clean_v = val.split(":")[0]
                         known_targets.add(clean_v)
-                        if "." in clean_v:
+                        if "." in clean_v and not self._looks_like_ip(clean_v):
                             known_targets.add(clean_v.split(".")[0])
-                if any(g.get(k) for k in ("vip", "virtualIp", "ipAddress", "configuredVip")):
+                if any(g.get(k) for k in ("vip", "virtualIP", "virtualIp", "ipAddress", "configuredVip")):
                     has_ip_info = True
             for c in all_collectors:
                 for k in ("ipAddress", "name", "hostName"):
@@ -647,13 +662,16 @@ class VCF91OpenTelegrafIntegration(VCFOpsIntegration):
                     if val:
                         clean_v = val.split(":")[0]
                         known_targets.add(clean_v)
-                        if "." in clean_v:
+                        if "." in clean_v and not self._looks_like_ip(clean_v):
                             known_targets.add(clean_v.split(".")[0])
                 if c.get("ipAddress"):
                     has_ip_info = True
 
             target_clean = collector_addr.strip().lower().split(":")[0]
-            target_short = target_clean.split(".")[0] if "." in target_clean else target_clean
+            # Short names only apply to FQDNs; shortening an IP would match on its first octet
+            target_short = (
+                target_clean.split(".")[0] if "." in target_clean and not self._looks_like_ip(target_clean) else target_clean
+            )
 
             is_target_ip = False
             try:
@@ -924,6 +942,14 @@ class VCF91OpenTelegrafIntegration(VCFOpsIntegration):
         return collectors, group_of, groups
 
     @staticmethod
+    def _looks_like_ip(value: str) -> bool:
+        try:
+            ipaddress.ip_address(value)
+            return True
+        except ValueError:
+            return False
+
+    @staticmethod
     def _group_vip(group: Dict[str, Any]) -> Optional[str]:
         for key in ("virtualIP", "virtualIp", "vip", "configuredVip"):
             if group.get(key):
@@ -949,7 +975,7 @@ class VCF91OpenTelegrafIntegration(VCFOpsIntegration):
         registrations: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
         for res in resources:
             res_key = res.get("resourceKey", {})
-            if res_key.get("resourceKindKey") not in ("linux", "win"):
+            if res_key.get("resourceKindKey") not in ("linux", "win") or self._is_stale(res):
                 continue
             ids = {i.get("identifierType", {}).get("name"): i.get("value") for i in res_key.get("resourceIdentifiers", [])}
             key = (ids.get("VCID"), ids.get("VMMOR"))

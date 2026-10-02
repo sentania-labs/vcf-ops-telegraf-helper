@@ -594,6 +594,8 @@ class MainWindow(QMainWindow):
             adapter = get_adapter(env)
             valid = adapter.validate_connection()
             if valid:
+                # Reachability alone is not enough: an HTTP 401 still counts as reachable
+                adapter.verify_credentials()
                 self.logger.info("VCF connection validated successfully to %s", env.url)
                 self.vcf_status_label.setText("Status: PASS (Connected)")
                 self.vcf_status_label.setStyleSheet("color: #199e70; font-weight: 600;")

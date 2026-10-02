@@ -785,3 +785,81 @@ def test_vcf91_agent_status_uses_agent_adapter_state():
     assert win.telegraf_status == "Reporting"
     assert win.collector_address == "10.0.0.52"
 
+
+def test_vcf91_verify_credentials_rejects_401():
+    """A reachable API that answers 401 must not count as validated credentials."""
+    import pytest
+
+    adapter = VCF91OpenTelegrafIntegration(_api_env(), session=_patched_api({"/versions/current": (401, {})}))
+    with pytest.raises(RuntimeError, match="rejected the credentials"):
+        adapter.verify_credentials()
+
+    ok = VCF91OpenTelegrafIntegration(_api_env(), session=_patched_api({"/versions/current": (200, {})}))
+    ok.verify_credentials()
+
+
+def test_vcf91_stale_agent_object_is_not_a_registration():
+    """An agent object whose states are all NOT_EXISTING does not count as an installed agent."""
+    agent = {
+        "identifier": "a-1",
+        "resourceKey": {
+            "name": "Windows OS on win-app01", "resourceKindKey": "win",
+            "resourceIdentifiers": [
+                {"identifierType": {"name": "VCID"}, "value": "vc-1"},
+                {"identifierType": {"name": "VMMOR"}, "value": "vm-201"},
+            ],
+        },
+        "resourceStatusStates": [{"resourceState": "NOT_EXISTING", "resourceStatus": "NO_DATA_RECEIVING", "adapterInstanceId": "ai-1"}],
+    }
+    apposucp = lambda url, params: url.endswith("/resources") and (params or {}).get("adapterKind") == "APPOSUCP"  # noqa: E731
+    adapter = VCF91OpenTelegrafIntegration(_api_env(), session=_patched_api({apposucp: (200, {"resourceList": [agent]})}))
+    win = next(vm for vm in adapter.list_virtual_machines() if vm.name == "win-app01")
+    assert win.telegraf_status == "Not installed"
+    assert win.agent_registrations == 0
+    assert win.collector_address is None
+
+
+def test_vcf91_collector_group_virtualIP_accepted_at_enrollment():
+    """A group VIP reported as virtualIP (the 9.1 spelling) is a valid collector target when enrolling."""
+    env = VCFEnvironment(
+        name="test",
+        url="https://vcf-ops.corp.local",
+        username="admin",
+        token="test-token-123",
+        collector=CollectorInfo(address="10.0.0.54"),
+    )
+    adapter = VCF91OpenTelegrafIntegration(env, session=MagicMock(spec=requests.Session))
+    adapter.get_collector_groups = MagicMock(return_value=[
+        {"name": "CP Group 1", "collectorId": [3, 4], "virtualIP": "10.0.0.54"},
+        {"name": "CP Group 2", "collectorId": [7], "virtualIP": "10.0.1.54"},
+    ])
+    adapter.get_collectors = MagicMock(return_value=[{"id": "3", "name": "cp01", "hostName": "10.0.0.52"}])
+    adapter.resolve_collector_group_name = MagicMock(return_value="CP Group 1")
+    adapter.detect_managed_vm = MagicMock(return_value=(False, None, None, None))
+    adapter.fetch_mandatory_tag_script = MagicMock(return_value="#!/bin/sh\n")
+    adapter.fetch_client_certificate_bundle = MagicMock(return_value=dict(_BUNDLE))
+
+    artifacts = adapter.prepare_telegraf_integration(target_ip="172.16.1.10", target_hostname="host10")
+    assert artifacts.collector_address == "10.0.0.54"
+
+
+def test_vcf91_unregistered_ip_not_matched_by_first_octet():
+    """An address that only shares a first octet with a known collector is not accepted."""
+    import pytest
+
+    env = VCFEnvironment(
+        name="test",
+        url="https://vcf-ops.corp.local",
+        username="admin",
+        token="test-token-123",
+        collector=CollectorInfo(address="10.9.9.9"),
+    )
+    adapter = VCF91OpenTelegrafIntegration(env, session=MagicMock(spec=requests.Session))
+    adapter.get_collector_groups = MagicMock(return_value=[
+        {"name": "CP Group 1", "collectorId": [3], "virtualIP": "10.0.0.54"},
+        {"name": "CP Group 2", "collectorId": [7], "virtualIP": "10.0.1.54"},
+    ])
+    adapter.get_collectors = MagicMock(return_value=[{"id": "3", "name": "cp01", "hostName": "10.0.0.52"}])
+    with pytest.raises(RuntimeError, match="is not registered"):
+        adapter.prepare_telegraf_integration(target_ip="172.16.1.10", target_hostname="host10")
+

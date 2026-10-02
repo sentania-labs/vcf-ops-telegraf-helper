@@ -91,6 +91,14 @@ class VCFOpsIntegration(ABC):
         """Discover candidate virtual machines (no templates or deleted VMs) from VCF Operations inventory."""
         pass
 
+    def verify_credentials(self) -> None:
+        """Confirm the configured credentials are accepted; raise RuntimeError if not.
+
+        validate_connection() only proves the API is reachable. Adapters that talk to a real
+        instance override this.
+        """
+        return None
+
     @abstractmethod
     def list_collector_targets(self) -> list[CollectorInfo]:
         """List collector groups with cloud proxies, and the individual cloud proxies, an agent can report to."""

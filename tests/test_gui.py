@@ -895,3 +895,20 @@ def test_main_window_inventory_error_is_shown_not_empty(qapp, tmp_path, monkeypa
     assert "Query error" in window.vm_count_label.text()
     assert "503" in window.vm_count_label.text()
 
+
+def test_main_window_rejected_credentials_do_not_unlock(qapp, tmp_path, monkeypatch):
+    """A reachable instance that rejects the credentials leaves Step 2 locked."""
+    from vcf_ops_telegraf_helper.adapters.mock import MockVCFOpsIntegration
+    from vcf_ops_telegraf_helper.gui import main_window as mw
+
+    class Rejecting(MockVCFOpsIntegration):
+        def verify_credentials(self):
+            raise RuntimeError("VCF Operations rejected the credentials (HTTP 401)")
+
+    monkeypatch.setattr(mw, "get_adapter", lambda env, session=None: Rejecting(env=env, connected=True))
+    window = MainWindow(state_store=StateStore(state_file=tmp_path / "state.json"))
+    window._test_vcf_connection()
+    assert window._vcf_validated is False
+    assert "rejected the credentials" in window.vcf_status_label.text()
+    assert window._max_unlocked_step() == window.STEP_CONNECT
+
