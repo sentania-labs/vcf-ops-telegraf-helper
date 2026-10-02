@@ -57,41 +57,6 @@ def test_theme_generation():
     assert "chevron_down_light.svg" in light_qss
 
 
-def test_main_window_initialization(qapp, tmp_path):
-    """Verify MainWindow initializes with all 5 steps and defaults."""
-    state_file = tmp_path / "state.json"
-    store = StateStore(state_file=state_file)
-
-    window = MainWindow(state_store=store)
-    assert window.windowTitle() == "VCF Operations Open Telegraf Helper"
-    labels = [lbl.text() for lbl in window.findChildren(QLabel)]
-    assert f"VCF Operations Open Telegraf Helper v{__version__}" in labels
-    assert window.step_list.count() == 5
-    assert window.page_stack.count() == 5
-    assert window.current_theme == "dark"
-
-
-def test_main_window_step_navigation(qapp, tmp_path):
-    """Verify navigating through steps changes active page and updates preview."""
-    state_file = tmp_path / "state.json"
-    store = StateStore(state_file=state_file)
-    window = MainWindow(state_store=store)
-
-    # Step 1 -> Step 2
-    window.step_list.setCurrentRow(1)
-    assert window.page_stack.currentIndex() == 1
-
-    # Step 2 -> Step 3
-    window.step_list.setCurrentRow(2)
-    assert window.page_stack.currentIndex() == 2
-
-    # Step 3 -> Step 4 (triggers preview update)
-    window.step_list.setCurrentRow(3)
-    assert window.page_stack.currentIndex() == 3
-    assert "[[inputs.cpu]]" in window.preview_system_box.toPlainText()
-    assert "[[outputs.http]]" in window.preview_output_box.toPlainText()
-
-
 def test_main_window_theme_toggle(qapp, tmp_path):
     """Verify toggling theme alternates between dark and light."""
     state_file = tmp_path / "state.json"
@@ -422,78 +387,6 @@ def test_main_window_endpoint_detection_installed_hides_banner(qapp, tmp_path):
     assert window.ep_missing_banner.isHidden() is True
 
 
-def test_main_window_endpoint_auth_and_advanced_options_visibility(qapp, tmp_path):
-    """Verify endpoint target UI toggles authentication modes and hides port by default."""
-    state_file = tmp_path / "state.json"
-    store = StateStore(state_file=state_file)
-    window = MainWindow(state_store=store)
-
-    # Linux default: SSH, port 22, password radio checked by default, port hidden
-    assert window.ep_os_combo.currentText() == "Linux"
-    assert window._get_endpoint_target().connection_method == ConnectionMethod.SSH
-    assert window.ep_port_input.text() == "22"
-    assert window.ep_port_input.isHidden() is True
-    assert window.ep_auth_radio_pass.isChecked() is True
-    assert window.ep_pass_label.text() == "Password:"
-
-    # Toggle to SSH Key: label changes to SSH Key Path
-    window.ep_auth_radio_key.setChecked(True)
-    assert window.ep_pass_label.text() == "SSH Key Path:"
-
-    # Switch to Windows while advanced is unchecked: updates port to 5985 and hides auth radio
-    window.ep_os_combo.setCurrentText("Windows")
-    assert window._get_endpoint_target().connection_method == ConnectionMethod.WINRM
-    assert window.ep_port_input.text() == "5985"
-    assert window.ep_auth_radio_widget.isHidden() is True
-    assert window.ep_pass_label.text() == "Password:"
-
-    # Expand advanced connection options: port input visible
-    window.ep_advanced_check.setChecked(True)
-    assert window.ep_port_input.isHidden() is False
-
-    # Custom port preservation when advanced options is open
-    window.ep_port_input.setText("5986")
-    window.ep_os_combo.setCurrentText("Linux")
-    assert window.ep_port_input.text() == "5986"
-
-
-def test_main_window_step5_cli_command_generation_and_copy(qapp, tmp_path):
-    """Verify Step 5 generates exact repeatable CLI command and supports copying to clipboard."""
-    state_file = tmp_path / "state.json"
-    store = StateStore(state_file=state_file)
-    window = MainWindow(state_store=store)
-
-    cmd = window.cli_command_box.toPlainText()
-    assert "vcf-telegraf-helper run" in cmd
-    assert "--target-host 10.10.10.101" in cmd or '--target-host "10.10.10.101"' in cmd
-    assert "--connection ssh" in cmd or '--connection "ssh"' in cmd
-    assert "--install-telegraf" in cmd
-    assert "--dry-run" not in cmd
-
-    # Toggling dry run updates the CLI command box immediately
-    window.dry_run_check.setChecked(True)
-    cmd_dry = window.cli_command_box.toPlainText()
-    assert "--dry-run" in cmd_dry
-
-    # Test copy command
-    window._copy_cli_command()
-    clipboard = QApplication.clipboard()
-    if clipboard:
-        assert clipboard.text() == cmd_dry
-
-    # Non-standard port emits --port
-    window.ep_port_input.setText("2222")
-    window._update_cli_command()
-    cmd_custom_port = window.cli_command_box.toPlainText()
-    assert "--port 2222" in cmd_custom_port
-
-    # API token mode emits --vcf-token placeholder
-    window.vcf_auth_type_combo.setCurrentText("API Token / Key")
-    window._update_cli_command()
-    cmd_token = window.cli_command_box.toPlainText()
-    assert '--vcf-token "<token>"' in cmd_token
-
-
 def test_main_window_vcf_auth_toggle(qapp, tmp_path):
     """Verify Step 1 VCF Operations authentication toggle between API Token/Key and Username/Password."""
     state_file = tmp_path / "state.json"
@@ -649,41 +542,6 @@ def test_main_window_cli_command_selective_flags(qapp, tmp_path):
     assert "--diskio" in cmd
 
 
-def test_main_window_deployment_mode_toggle(qapp, tmp_path):
-    """Verify deployment mode dropdown controls bundle visibility and executor creation."""
-    from vcf_ops_telegraf_helper.executors.package import PackageExecutor
-    from vcf_ops_telegraf_helper.models.workflow import DeploymentMode
-
-    state_file = tmp_path / "state.json"
-    store = StateStore(state_file=state_file)
-    window = MainWindow(state_store=store)
-
-    assert window._get_deployment_mode() == DeploymentMode.PUSH
-    assert window.bundle_dir_widget.isHidden()
-
-    # Switch to script mode
-    idx_script = window.deployment_mode_combo.findData("script")
-    window.deployment_mode_combo.setCurrentIndex(idx_script)
-
-    assert window._get_deployment_mode() == DeploymentMode.SCRIPT
-    assert not window.bundle_dir_widget.isHidden()
-
-    target = window._get_endpoint_target()
-    executor = window._create_executor(target)
-    assert isinstance(executor, PackageExecutor)
-
-    cmd = window._build_cli_command()
-    assert "--mode script" in cmd
-    assert "--os linux" in cmd
-
-    # Switch OS to Windows in script mode
-    window.ep_os_combo.setCurrentText("Windows")
-    cmd_win = window._build_cli_command()
-    assert "--mode script" in cmd_win
-    assert "--os windows" in cmd_win
-
-
-
 def test_main_window_worker_finished_summary_handling(qapp, tmp_path):
     """Verify _on_worker_finished handles RunSummary without AttributeError on verifications."""
     from vcf_ops_telegraf_helper.models.workflow import RunSummary, StageResult, StageStatus, WorkflowStage
@@ -719,99 +577,6 @@ def test_main_window_worker_finished_summary_handling(qapp, tmp_path):
     assert "OPERATIONAL VERIFICATION: PASS" in log_text
     assert "Telegraf installed" in log_text
     assert "Collector reachable" in log_text
-
-
-def test_main_window_vm_inventory_table_filter_and_binding(qapp, tmp_path):
-    """Verify Step 2 inventory table displays VMs, filters instantly, and binds selection to target form."""
-    from vcf_ops_telegraf_helper.models.vcf import VirtualMachineResource
-
-    state_file = tmp_path / "state.json"
-    store = StateStore(state_file=state_file)
-    window = MainWindow(state_store=store)
-
-    sample_vms = [
-        VirtualMachineResource(
-            resource_id="id-1",
-            name="win-app01",
-            ip_address="192.168.10.15",
-            vm_mor="vm-101",
-            vc_id="vc-1",
-            os_name="Windows Server 2022",
-            os_family="WINDOWS",
-            collector_group="Prod-CG",
-            telegraf_status="Installed",
-        ),
-        VirtualMachineResource(
-            resource_id="id-2",
-            name="linux-web01",
-            ip_address="192.168.10.20",
-            vm_mor="vm-102",
-            vc_id="vc-1",
-            os_name="Ubuntu 24.04",
-            os_family="LINUX",
-            collector_group="Dev-CG",
-            telegraf_status="Not Installed",
-        ),
-    ]
-
-    window._cached_vms = sample_vms
-    window._populate_vm_table(sample_vms)
-    window._update_cg_filter_options(sample_vms)
-    assert window.vm_table.rowCount() == 2
-
-    # Filter by OS
-    window.vm_os_filter.setCurrentText("Windows")
-    window._filter_vm_table()
-    assert not window.vm_table.isRowHidden(0)
-    assert window.vm_table.isRowHidden(1)
-    assert "1 / 2 VMs" in window.vm_count_label.text()
-
-    # Reset filter
-    window.vm_os_filter.setCurrentText("All OS Families")
-    window._filter_vm_table()
-    assert not window.vm_table.isRowHidden(0)
-    assert not window.vm_table.isRowHidden(1)
-    assert "2 / 2 VMs" in window.vm_count_label.text()
-
-    # Select row and inspect
-    window.vm_table.selectRow(1)
-    assert window.selected_vm is not None
-    assert window.selected_vm.name == "linux-web01"
-    assert "linux-web01" in window.vm_inspector_label.text()
-    assert window.btn_select_vm.isEnabled() is True
-
-    # Apply to form
-    window._apply_selected_vm_to_form()
-    assert window.step2_tabs.currentIndex() == 1
-    assert window.ep_host_input.text() == "192.168.10.20"
-    assert window.ep_os_combo.currentText() == "Linux"
-    assert "vm-102" in window.ep_mor_badge.text()
-
-    # Applying a Windows VM switches the OS combo; the binding must survive that switch
-    window.vm_table.selectRow(0)
-    window._apply_selected_vm_to_form()
-    assert window.ep_os_combo.currentText() == "Windows"
-    assert window.selected_vm_mor == "vm-101"
-    assert window.selected_vc_id == "vc-1"
-    target = window._get_endpoint_target()
-    assert target.vm_mor == "vm-101"
-    assert target.vc_id == "vc-1"
-    assert "vm-101" in window.ep_mor_badge.text()
-
-    # Highlighting another row without applying it must not let that host inherit the binding
-    window.vm_table.selectRow(1)
-    assert window.selected_vm.name == "linux-web01"
-    window.ep_host_input.setText("192.168.10.20")
-    assert window.selected_vm_mor is None
-    assert "Unmanaged" in window.ep_mor_badge.text()
-
-    # Re-apply the Windows VM; typing a different host still clears the binding
-    window.vm_table.selectRow(0)
-    window._apply_selected_vm_to_form()
-    assert window.selected_vm_mor == "vm-101"
-    window.ep_host_input.setText("10.99.99.99")
-    assert window.selected_vm_mor is None
-    assert "Unmanaged" in window.ep_mor_badge.text()
 
 
 def test_discovery_dialogs_instantiation_and_selection(qapp):
@@ -869,6 +634,264 @@ def test_discovery_dialogs_instantiation_and_selection(qapp):
     assert "ProductionDB" in db_dlg.selected_databases
 
 
+def _mock_window(qapp, tmp_path, monkeypatch):
+    """MainWindow wired to the mock VCF adapter and a mock endpoint executor."""
+    from vcf_ops_telegraf_helper.adapters.mock import MockVCFOpsIntegration
+    from vcf_ops_telegraf_helper.executors.mock import MockExecutor
+    from vcf_ops_telegraf_helper.gui import main_window as mw
+
+    monkeypatch.setattr(mw, "get_adapter", lambda env, session=None: MockVCFOpsIntegration(env=env, connected=True))
+    window = MainWindow(state_store=StateStore(state_file=tmp_path / "state.json"))
+    window._create_executor = lambda target: MockExecutor(connected=True, telegraf_installed=True)
+    return window
 
 
+def _select_vm(window, name):
+    row = next(r for r in range(window.vm_table.rowCount()) if window.vm_table.item(r, 0).text() == name)
+    window.vm_table.selectRow(row)
+
+
+def _unlock_all(window):
+    window._test_vcf_connection()
+    _select_vm(window, "oraclesrv01")
+    window.ep_pass_input.setText("secret")
+    window._detect_endpoint()
+
+
+def test_main_window_initialization(qapp, tmp_path):
+    """MainWindow starts with six steps, push-only, and only Step 1 unlocked."""
+    window = MainWindow(state_store=StateStore(state_file=tmp_path / "state.json"))
+    assert window.windowTitle() == "VCF Operations Open Telegraf Helper"
+    labels = [lbl.text() for lbl in window.findChildren(QLabel)]
+    assert f"VCF Operations Open Telegraf Helper v{__version__}" in labels
+    assert window.step_list.count() == 6
+    assert window.page_stack.count() == 6
+    assert window.current_theme == "dark"
+    assert not hasattr(window, "deployment_mode_combo")
+    assert window._max_unlocked_step() == window.STEP_CONNECT
+
+
+def test_main_window_step_gating(qapp, tmp_path, monkeypatch):
+    """Each step stays locked until the one before it has what it needs."""
+    window = _mock_window(qapp, tmp_path, monkeypatch)
+
+    window.step_list.setCurrentRow(1)
+    assert window.page_stack.currentIndex() == 0
+    assert window._next_buttons[0].isEnabled() is False
+
+    window._test_vcf_connection()
+    assert window._max_unlocked_step() == window.STEP_SELECT_VM
+    window.step_list.setCurrentRow(2)
+    assert window.page_stack.currentIndex() == 0
+
+    _select_vm(window, "oraclesrv01")
+    assert window._max_unlocked_step() == window.STEP_TARGET
+    window.step_list.setCurrentRow(3)
+    assert window.page_stack.currentIndex() == 0
+
+    window.ep_pass_input.setText("secret")
+    window._detect_endpoint()
+    assert window._max_unlocked_step() == window.STEP_EXECUTE
+
+    # Changing how we reach the endpoint re-locks everything after Step 3
+    window.ep_pass_input.setText("other")
+    assert window._max_unlocked_step() == window.STEP_TARGET
+    window._detect_endpoint()
+
+    # No monitoring inputs locks Review and Execute
+    for *_, chk in window.catalog_items:
+        chk.setChecked(False)
+    assert window._max_unlocked_step() == window.STEP_MONITORING
+    assert "monitoring input" in window._next_buttons[window.STEP_MONITORING].toolTip()
+    window._apply_baseline_preset()
+
+    window.step_list.setCurrentRow(window.STEP_REVIEW)
+    assert window.page_stack.currentIndex() == window.STEP_REVIEW
+    assert "[[inputs.cpu]]" in window.preview_system_box.toPlainText()
+    assert "[[outputs.http]]" in window.preview_output_box.toPlainText()
+
+    # Editing the connection settings re-locks everything after Step 1
+    window.vcf_url_input.setText("https://other.example")
+    assert window._max_unlocked_step() == window.STEP_CONNECT
+
+
+def test_main_window_ca_bundle_follows_tls_verification(qapp, tmp_path):
+    """The enterprise CA bundle field is only shown when certificate verification is on."""
+    window = MainWindow(state_store=StateStore(state_file=tmp_path / "state.json"))
+    window.vcf_ssl_check.setChecked(True)
+    assert window.vcf_ca_widget.isHidden() is False
+    window.vcf_ssl_check.setChecked(False)
+    assert window.vcf_ca_widget.isHidden() is True
+
+
+def test_main_window_endpoint_auth_and_advanced_options_visibility(qapp, tmp_path):
+    """Target page toggles auth modes, WinRM SSL, and hides the port by default."""
+    window = MainWindow(state_store=StateStore(state_file=tmp_path / "state.json"))
+
+    assert window.ep_os_combo.currentText() == "Linux"
+    assert window._get_endpoint_target().connection_method == ConnectionMethod.SSH
+    assert window.ep_port_input.text() == "22"
+    assert window.ep_port_input.isHidden() is True
+    assert window.ep_winrm_ssl_check.isHidden() is True
+    assert window.ep_auth_radio_pass.isChecked() is True
+    assert window.ep_pass_label.text() == "Password:"
+
+    window.ep_auth_radio_key.setChecked(True)
+    assert window.ep_pass_label.text() == "SSH Key Path:"
+
+    window.ep_os_combo.setCurrentText("Windows")
+    assert window._get_endpoint_target().connection_method == ConnectionMethod.WINRM
+    assert window.ep_port_input.text() == "5985"
+    assert window.ep_auth_radio_widget.isHidden() is True
+    assert window.ep_winrm_ssl_check.isHidden() is False
+
+    window.ep_winrm_ssl_check.setChecked(True)
+    assert window.ep_port_input.text() == "5986"
+    assert window._get_endpoint_target().winrm_use_ssl is True
+    window.ep_winrm_ssl_check.setChecked(False)
+    assert window.ep_port_input.text() == "5985"
+    assert window._get_endpoint_target().winrm_use_ssl is False
+
+    window.ep_advanced_check.setChecked(True)
+    assert window.ep_port_input.isHidden() is False
+
+    # A custom port survives an OS switch while advanced options are open
+    window.ep_port_input.setText("2222")
+    window.ep_os_combo.setCurrentText("Linux")
+    assert window.ep_port_input.text() == "2222"
+
+
+def test_main_window_cli_command_generation_and_copy(qapp, tmp_path, monkeypatch):
+    """Step 6 shows a push-only CLI command matching the selections, and copies it."""
+    window = _mock_window(qapp, tmp_path, monkeypatch)
+    _unlock_all(window)
+    window._update_cli_command()
+
+    cmd = window.cli_command_box.toPlainText()
+    assert "vcf-telegraf-helper run" in cmd
+    assert "--target-host 172.18.2.14" in cmd
+    assert "--connection ssh" in cmd
+    assert "--collector 10.10.10.50" in cmd
+    assert "--collector-group 'Simulated CP Group'" in cmd
+    assert "--vm-id vm-1004" in cmd
+    assert "--install-telegraf" in cmd
+    assert "--mode" not in cmd and "--output-dir" not in cmd
+    assert "--dry-run" not in cmd
+
+    window.dry_run_check.setChecked(True)
+    cmd_dry = window.cli_command_box.toPlainText()
+    assert "--dry-run" in cmd_dry
+
+    window._copy_cli_command()
+    clipboard = QApplication.clipboard()
+    if clipboard:
+        assert clipboard.text() == cmd_dry
+
+    window.ep_port_input.setText("2222")
+    window._update_cli_command()
+    assert "--port 2222" in window.cli_command_box.toPlainText()
+
+    window.vcf_auth_type_combo.setCurrentText("API Token / Key")
+    window._update_cli_command()
+    assert '--vcf-token "<token>"' in window.cli_command_box.toPlainText()
+
+
+def test_main_window_vm_inventory_filter_and_binding(qapp, tmp_path, monkeypatch):
+    """Inventory hides powered-off VMs by default, filters by agent state, and binds the selection."""
+    window = _mock_window(qapp, tmp_path, monkeypatch)
+    window._test_vcf_connection()
+
+    assert window.vm_table.rowCount() == 6
+    assert window.vm_table.columnCount() == 6
+    headers = [window.vm_table.horizontalHeaderItem(c).text() for c in range(6)]
+    assert "Collector Group" not in headers and "Power" in headers
+    assert "5 / 6 VMs" in window.vm_count_label.text()
+
+    window.vm_show_off_check.setChecked(True)
+    assert "6 / 6 VMs" in window.vm_count_label.text()
+    window.vm_show_off_check.setChecked(False)
+
+    window.vm_status_filter.setCurrentText("Reporting")
+    assert "1 / 6 VMs" in window.vm_count_label.text()
+    window.vm_status_filter.setCurrentText("All Agent States")
+
+    window.vm_os_filter.setCurrentText("Windows")
+    assert "2 / 6 VMs" in window.vm_count_label.text()
+    window.vm_os_filter.setCurrentText("All OS Families")
+
+    # Selecting a Windows VM binds it and sets OS and address from VCF Operations
+    _select_vm(window, "mssqldemo2")
+    assert window.bound_vm.name == "mssqldemo2"
+    assert window.ep_os_combo.currentText() == "Windows"
+    assert window.ep_host_input.text() == "172.16.3.80"
+    target = window._get_endpoint_target()
+    assert target.vm_mor == "vm-1042"
+    assert target.vc_id == "423b-81f0-91a2-0002"
+
+    # Editing the address keeps the binding: the VM identity comes from Step 2
+    window.ep_host_input.setText("mssqldemo2.corp.local")
+    assert window._get_endpoint_target().vm_mor == "vm-1042"
+
+    # A VM with an existing agent preselects the collector group it reports through
+    _select_vm(window, "webapp01")
+    assert window._selected_collector().is_collector_group is True
+    assert window._selected_collector().name == "Simulated CP Group"
+    window._update_target_summary()
+    assert "webapp01" in window.target_summary_label.text()
+    assert "10.10.10.51" in window.target_summary_label.text()
+
+
+def test_main_window_switching_vcf_instance_clears_vm(qapp, tmp_path, monkeypatch):
+    """Validating a different VCF Operations URL drops the VM bound against the previous one."""
+    window = _mock_window(qapp, tmp_path, monkeypatch)
+    _unlock_all(window)
+    assert window._max_unlocked_step() == window.STEP_EXECUTE
+
+    window.vcf_url_input.setText("https://other-ops.example")
+    window._test_vcf_connection()
+    assert window.bound_vm is None
+    assert window._get_endpoint_target().vm_mor is None
+    assert window._max_unlocked_step() == window.STEP_SELECT_VM
+
+
+def test_main_window_revalidation_keeps_collector_choice(qapp, tmp_path, monkeypatch):
+    """Re-validating the same instance must not silently move the chosen collector."""
+    window = _mock_window(qapp, tmp_path, monkeypatch)
+    _unlock_all(window)
+    window.ep_collector_combo.setCurrentIndex(2)
+    chosen = window._selected_collector().address
+
+    window._test_vcf_connection()
+    assert window._selected_collector().address == chosen
+    assert window.bound_vm is not None and window.bound_vm.name == "oraclesrv01"
+
+
+def test_main_window_refresh_drops_vm_missing_from_inventory(qapp, tmp_path, monkeypatch):
+    """If the bound VM disappears from a refreshed inventory, the binding and later steps are cleared."""
+    from vcf_ops_telegraf_helper.adapters.mock import MockVCFOpsIntegration
+
+    window = _mock_window(qapp, tmp_path, monkeypatch)
+    _unlock_all(window)
+    remaining = [vm for vm in MockVCFOpsIntegration(env=window._get_vcf_env()).list_virtual_machines() if vm.name != "oraclesrv01"]
+    adapter = MockVCFOpsIntegration(env=window._get_vcf_env())
+    adapter._vms = remaining
+    window._fetch_vcf_inventory(adapter)
+    assert window.bound_vm is None
+    assert window._max_unlocked_step() == window.STEP_SELECT_VM
+
+
+def test_main_window_inventory_error_is_shown_not_empty(qapp, tmp_path, monkeypatch):
+    """An inventory failure is reported in the UI rather than shown as zero VMs."""
+    window = _mock_window(qapp, tmp_path, monkeypatch)
+    window._test_vcf_connection()
+
+    class Broken:
+        inventory_warning = None
+
+        def list_virtual_machines(self, strict=False):
+            raise RuntimeError("inventory query failed on page 1 with HTTP 503")
+
+    window._fetch_vcf_inventory(Broken())
+    assert "Query error" in window.vm_count_label.text()
+    assert "503" in window.vm_count_label.text()
 

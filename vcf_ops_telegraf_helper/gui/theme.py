@@ -410,4 +410,10 @@ QListWidget.step-list::item:hover:!selected {{
     background-color: {t["surface-sunken"]};
     color: {t["ink"]};
 }}
+
+QListWidget.step-list::item:disabled {{
+    color: {t["ink-subtle"]};
+    font-style: italic;
+    background-color: transparent;
+}}
 """

@@ -45,6 +45,6 @@ The helper orchestrates these steps from an administrator workstation without re
   Configuration generation is idempotent. Running the utility multiple times produces identical fragments and reports whether files changed.
 * **Recovery Mechanism**:
   Because configuration is modularized into drop-in fragments under `telegraf.d/`, rolling back changes requires only removing the managed `.conf` files and restarting Telegraf. In automated deployments, the helper restores `.bak` configuration automatically upon validation failure.
-* **Deployment Modes**:
-  For environments where direct remote push (SSH or WinRM) is restricted by security policy, the utility supports `script` (`--mode script`) and `config_only` (`--mode config_only`) modes. Script mode generates an auditable, self-extracting bundle containing `deploy-telegraf.sh` (Linux) or `deploy-telegraf.ps1` (Windows) and all required configurations and certificates with zero remote connection required.
+* **Deployment Mode**:
+  The utility deploys by direct push only, over SSH (Linux) or WinRM (Windows). Where push needs adapting to local policy, the GUI's Execute step shows the equivalent `vcf-telegraf-helper run` command, which can be copied and modified.
 

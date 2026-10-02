@@ -36,6 +36,9 @@ class IntegrationArtifacts(BaseModel):
 class VCFOpsIntegration(ABC):
     """Abstract boundary for VCF Operations release-specific integration logic."""
 
+    # Set by list_virtual_machines when part of the inventory (such as agent status) could not be read
+    inventory_warning: Optional[str] = None
+
     @abstractmethod
     def validate_connection(self) -> bool:
         """Validate API reachability and TLS connectivity to VCF Operations."""
@@ -85,6 +88,11 @@ class VCFOpsIntegration(ABC):
 
     @abstractmethod
     def list_virtual_machines(self, strict: bool = False) -> list[VirtualMachineResource]:
-        """Discover virtual machines from VCF Operations inventory."""
+        """Discover candidate virtual machines (no templates or deleted VMs) from VCF Operations inventory."""
+        pass
+
+    @abstractmethod
+    def list_collector_targets(self) -> list[CollectorInfo]:
+        """List collector groups with cloud proxies, and the individual cloud proxies, an agent can report to."""
         pass
 

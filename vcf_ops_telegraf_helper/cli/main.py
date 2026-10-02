@@ -22,7 +22,6 @@ from vcf_ops_telegraf_helper.cli.display import (
 from vcf_ops_telegraf_helper.cli.wizard import run_wizard
 from vcf_ops_telegraf_helper.executors.local import LocalExecutor
 from vcf_ops_telegraf_helper.executors.mock import MockExecutor
-from vcf_ops_telegraf_helper.executors.package import PackageExecutor
 from vcf_ops_telegraf_helper.executors.ssh import SSHExecutor
 from vcf_ops_telegraf_helper.executors.winrm import WinRMExecutor
 from vcf_ops_telegraf_helper.models.endpoint import (
@@ -51,7 +50,7 @@ from vcf_ops_telegraf_helper.models.monitoring import (
     WinServicesInputConfig,
 )
 from vcf_ops_telegraf_helper.models.vcf import CollectorInfo, VCFEnvironment
-from vcf_ops_telegraf_helper.models.workflow import DeploymentMode, WorkflowOptions
+from vcf_ops_telegraf_helper.models.workflow import WorkflowOptions
 from vcf_ops_telegraf_helper.renderer.renderer import TelegrafRenderer
 from vcf_ops_telegraf_helper.storage.state import StateStore
 from vcf_ops_telegraf_helper.validation.validator import Validator
@@ -239,7 +238,7 @@ def resolve_monitoring_config(
 @click.option("--target-host", required=True, help="Target hostname or IP address")
 @click.option(
     "--connection",
-    type=click.Choice(["ssh", "winrm", "mock", "local", "package"]),
+    type=click.Choice(["ssh", "winrm", "mock", "local"]),
     default="ssh",
     help="Endpoint connection method",
 )
@@ -273,13 +272,6 @@ def resolve_monitoring_config(
 @click.option("--ping", default=None, help="Ping target IP or hostname")
 @click.option("--preview", is_flag=True, help="Show preview before execution")
 @click.option("--dry-run", is_flag=True, help="Simulate execution without modifying target")
-@click.option(
-    "--mode",
-    type=click.Choice(["push", "script", "config_only"]),
-    default="push",
-    help="Deployment mode",
-)
-@click.option("--output-dir", default="./vcf-telegraf-bundle", help="Output directory for script/bundle")
 @click.option("--export-md", default=None, help="Export summary to Markdown file")
 @click.option("--export-json", default=None, help="Export summary to JSON file")
 @click.option(
@@ -333,8 +325,6 @@ def run_cmd(
     ping: Optional[str],
     preview: bool,
     dry_run: bool,
-    mode: str,
-    output_dir: str,
     export_md: Optional[str],
     export_json: Optional[str],
     ca_cert: Optional[Path] = None,
@@ -378,7 +368,7 @@ def run_cmd(
     )
 
     if conn_method in (ConnectionMethod.SSH, ConnectionMethod.WINRM) and not ssh_pass and not ssh_key:
-        if sys.stdin.isatty() and mode == "push":
+        if sys.stdin.isatty():
             target_user = ssh_user or ("Administrator" if is_win else "root")
             ssh_pass = click.prompt(f"Password for {target_user}@{target_host}", hide_input=True)
 
@@ -423,9 +413,7 @@ def run_cmd(
         ping=ping,
     )
 
-    if mode in ("script", "config_only") or conn_method == ConnectionMethod.PACKAGE:
-        executor = PackageExecutor(output_dir=output_dir)
-    elif conn_method == ConnectionMethod.MOCK:
+    if conn_method == ConnectionMethod.MOCK:
         executor = MockExecutor(connected=True, telegraf_installed=True)
     elif conn_method == ConnectionMethod.LOCAL:
         executor = LocalExecutor()
@@ -487,9 +475,7 @@ def run_cmd(
 
     reporter = RichTerminalProgressReporter(console)
     wf_options = WorkflowOptions(
-        mode=DeploymentMode(mode),
         dry_run=dry_run,
-        output_dir=output_dir,
         restart_service=True,
         install_telegraf=install_telegraf,
         telegraf_version=telegraf_version,
@@ -541,8 +527,16 @@ def run_cmd(
     default="all",
     help="Filter by guest OS family",
 )
-@click.option("--cg", "cg_filter", default=None, help="Filter by collector group")
-@click.option("--filter", "query_filter", default=None, help="Search filter for VM name, IP, or MOR")
+@click.option("--cg", "cg_filter", default=None, help="Filter by the collector group of the existing agent")
+@click.option(
+    "--status",
+    "status_filter",
+    type=click.Choice(["all", "not-installed", "reporting", "no-data"], case_sensitive=False),
+    default="all",
+    help="Filter by agent status reported by VCF Operations",
+)
+@click.option("--include-powered-off", is_flag=True, default=False, help="Include powered-off VMs (hidden by default)")
+@click.option("--filter", "query_filter", default=None, help="Search filter for VM name, IP, hostname, or MOR")
 def vms_cmd(
     vcf_url: str,
     vcf_user: str,
@@ -553,6 +547,8 @@ def vms_cmd(
     verify_ssl: bool,
     os_filter: str,
     cg_filter: Optional[str],
+    status_filter: str,
+    include_powered_off: bool,
     query_filter: Optional[str],
 ) -> None:
     """Query and display virtual machine inventory from VCF Operations."""
@@ -583,21 +579,29 @@ def vms_cmd(
 
     try:
         console.print(f"[bold cyan]-->[/bold cyan] Querying VCF Operations inventory from {vcf_url}...")
-        vms = adapter.list_virtual_machines()
+        vms = adapter.list_virtual_machines(strict=True)
     except Exception as exc:
         console.print(f"[bold red]Failed to retrieve inventory:[/bold red] {exc}")
         sys.exit(1)
+    if adapter.inventory_warning:
+        console.print(f"[bold yellow]Warning:[/bold yellow] {adapter.inventory_warning}")
 
+    status_values = {"not-installed": "Not installed", "reporting": "Reporting", "no-data": "No data"}
     filtered = []
     q = (query_filter or "").strip().lower()
     for vm in vms:
-        if q and q not in vm.name.lower() and q not in (vm.ip_address or "").lower() and q not in (vm.vm_mor or "").lower():
+        if not include_powered_off and not vm.is_powered_on:
+            continue
+        haystack = (vm.name, vm.ip_address or "", vm.hostname or "", vm.vm_mor or "")
+        if q and not any(q in field.lower() for field in haystack):
             continue
         if os_filter.lower() == "windows" and vm.os_family.lower() != "windows":
             continue
         if os_filter.lower() == "linux" and vm.os_family.lower() != "linux":
             continue
         if cg_filter and (vm.collector_group or "").lower() != cg_filter.strip().lower():
+            continue
+        if status_filter.lower() != "all" and vm.telegraf_status != status_values[status_filter.lower()]:
             continue
         filtered.append(vm)
 
@@ -606,26 +610,28 @@ def vms_cmd(
         show_header=True,
         header_style="bold magenta",
     )
-    table.add_column("VM Name", style="cyan")
-    table.add_column("IP Address", style="white")
+    # Identity columns never wrap so names, IPs, and MORs stay copyable on narrow terminals
+    table.add_column("VM Name", style="cyan", no_wrap=True)
+    table.add_column("IP Address", style="white", no_wrap=True)
     table.add_column("OS Family", justify="center")
-    table.add_column("VM MOR", justify="center")
-    table.add_column("Collector Group")
-    table.add_column("Agent Status", justify="center")
+    table.add_column("Power", justify="center")
+    table.add_column("VM MOR", justify="center", no_wrap=True)
+    table.add_column("Agent Status", justify="center", overflow="fold")
+    table.add_column("Agent Collector Group", overflow="fold")
 
     for vm in filtered:
-        st_color = (
-            "green"
-            if vm.telegraf_status == "Installed"
-            else ("yellow" if vm.telegraf_status == "Not Installed" else "dim")
-        )
+        st_color = {"Reporting": "green", "No data": "yellow"}.get(vm.telegraf_status, "dim")
+        status = vm.telegraf_status
+        if vm.agent_registrations > 1:
+            status = f"{status} ({vm.agent_registrations} registrations)"
         table.add_row(
             vm.name,
             vm.ip_address or "N/A",
             vm.os_family.capitalize(),
+            vm.power_state or "Unknown",
             vm.vm_mor or "N/A",
-            vm.collector_group or "Default",
-            f"[{st_color}]{vm.telegraf_status}[/{st_color}]",
+            f"[{st_color}]{status}[/{st_color}]",
+            vm.collector_group or "-",
         )
 
     console.print(table)

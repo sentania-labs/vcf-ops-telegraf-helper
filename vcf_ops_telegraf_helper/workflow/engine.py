@@ -24,7 +24,6 @@ from vcf_ops_telegraf_helper.models.endpoint import (
 from vcf_ops_telegraf_helper.models.monitoring import MonitoringConfig
 from vcf_ops_telegraf_helper.models.vcf import VCFEnvironment
 from vcf_ops_telegraf_helper.models.workflow import (
-    DeploymentMode,
     RunSummary,
     StageResult,
     StageStatus,
@@ -151,17 +150,6 @@ class ConfigureEndpointWorkflow:
         start = time.monotonic()
         self.reporter.on_stage_start(WorkflowStage.CONNECT)
 
-        if self.options.mode in (DeploymentMode.SCRIPT, DeploymentMode.CONFIG_ONLY):
-            dur = int((time.monotonic() - start) * 1000)
-            res = StageResult(
-                stage=WorkflowStage.CONNECT,
-                status=StageStatus.SKIPPED,
-                message=f"Target connection skipped for {self.options.mode.value} deployment mode",
-                duration_ms=dur,
-            )
-            self.reporter.on_stage_complete(res)
-            return res
-
         try:
             connected = self.executor.test_connection()
             dur = int((time.monotonic() - start) * 1000)
@@ -196,38 +184,6 @@ class ConfigureEndpointWorkflow:
         """Stage 2: Inspect remote OS, architecture, and existing Telegraf installation."""
         start = time.monotonic()
         self.reporter.on_stage_start(WorkflowStage.DETECT)
-
-        if self.options.mode in (DeploymentMode.SCRIPT, DeploymentMode.CONFIG_ONLY):
-            is_win = (self.target.os_family == OSFamily.WINDOWS) or (type(self.executor).__name__ == "WinRMExecutor")
-            dur = int((time.monotonic() - start) * 1000)
-            telegraf_ver = (
-                getattr(self.options, "telegraf_version", None)
-                or getattr(self.target, "telegraf_version", None)
-                or "1.40.1"
-            )
-            self.discovery = EndpointDiscoveryResult(
-                hostname=self.target.hostname,
-                os_name="Windows" if is_win else "Linux",
-                os_version="Windows" if is_win else "Linux",
-                arch="x86_64",
-                telegraf_installed=True,
-                telegraf_version=f"Telegraf {telegraf_ver}",
-                service_state="N/A",
-                config_dir="C:\\telegraf\\telegraf.d" if is_win else "/etc/telegraf/telegraf.d",
-                main_config_path="C:\\telegraf\\telegraf.conf" if is_win else "/etc/telegraf/telegraf.conf",
-                telegraf_bin_path="C:\\telegraf\\telegraf.exe" if is_win else "/usr/bin/telegraf",
-                host_uuid="",
-                host_ip=self.target.hostname,
-            )
-            res = StageResult(
-                stage=WorkflowStage.DETECT,
-                status=StageStatus.PASS,
-                message=f"Configured for target OS: {'Windows' if is_win else 'Linux'} (offline bundle generation)",
-                details="Offline staging mode; target inspection skipped",
-                duration_ms=dur,
-            )
-            self.reporter.on_stage_complete(res)
-            return res
 
         try:
             is_win = (self.target.os_family == OSFamily.WINDOWS) or (type(self.executor).__name__ == "WinRMExecutor")
@@ -368,11 +324,11 @@ class ConfigureEndpointWorkflow:
                 or "1.40.1"
             )
 
-            if not installed and self.options.mode == DeploymentMode.PUSH and not auto_install:
+            if not installed and not auto_install:
                 res = StageResult(
                     stage=WorkflowStage.DETECT,
                     status=StageStatus.FAIL,
-                    message=f"Telegraf not installed on {self.target.hostname}. Install Telegraf before push, enable auto-install, or use script mode.",
+                    message=f"Telegraf not installed on {self.target.hostname}. Install Telegraf before push or enable auto-install.",
                     details=f"{os_version} ({arch}), Service state: {service_state}",
                     duration_ms=dur,
                 )
@@ -422,7 +378,7 @@ class ConfigureEndpointWorkflow:
             target_uuid = self.discovery.host_uuid if self.discovery else None
 
             existing_bundle = None
-            if self.options.mode == DeploymentMode.PUSH and not getattr(self.options, "force_new_cert", False):
+            if not getattr(self.options, "force_new_cert", False):
                 is_win = (self.target.os_family == OSFamily.WINDOWS) or (type(self.executor).__name__ == "WinRMExecutor")
                 cfg_dir = (
                     self.discovery.config_dir
@@ -625,7 +581,7 @@ class ConfigureEndpointWorkflow:
                 else self.env.collector.address
             )
             is_win = (self.target.os_family == OSFamily.WINDOWS) or (type(self.executor).__name__ == "WinRMExecutor")
-            if not self.options.skip_collector_check and self.options.mode == DeploymentMode.PUSH:
+            if not self.options.skip_collector_check:
                 cp_val = Validator.validate_collector_reachability(self.executor, collector_addr, is_windows=is_win)
                 self.verifications["Collector reachable"] = "PASS" if cp_val.is_valid else "FAIL"
                 if not cp_val.is_valid:
@@ -690,39 +646,38 @@ class ConfigureEndpointWorkflow:
             vcf_file = f"{config_dir}{sep}cloudproxy-http.conf"
 
             # Pre-flight disk space and sudo verification for push deployments
-            if self.options.mode == DeploymentMode.PUSH:
-                free_mb = 1000
-                if hasattr(self.executor, "get_free_disk_space_mb"):
-                    try:
-                        val = self.executor.get_free_disk_space_mb("C:" if is_win else "/")
-                        if isinstance(val, (int, float)):
-                            free_mb = val
-                    except Exception:
-                        free_mb = 1000
-                if free_mb < 500:
+            free_mb = 1000
+            if hasattr(self.executor, "get_free_disk_space_mb"):
+                try:
+                    val = self.executor.get_free_disk_space_mb("C:" if is_win else "/")
+                    if isinstance(val, (int, float)):
+                        free_mb = val
+                except Exception:
+                    free_mb = 1000
+            if free_mb < 500:
+                dur = int((time.monotonic() - start) * 1000)
+                res = StageResult(
+                    stage=WorkflowStage.APPLY,
+                    status=StageStatus.FAIL,
+                    message=f"Insufficient disk space on target ({free_mb} MB free, minimum 500 MB required). Apply aborted.",
+                    duration_ms=dur,
+                )
+                self.reporter.on_stage_complete(res)
+                return res
+
+            if not is_win and getattr(self.executor, "use_sudo", False):
+                sudo_chk = self.executor.execute("sudo -n true", timeout=5)
+                if not sudo_chk.success:
                     dur = int((time.monotonic() - start) * 1000)
                     res = StageResult(
                         stage=WorkflowStage.APPLY,
                         status=StageStatus.FAIL,
-                        message=f"Insufficient disk space on target ({free_mb} MB free, minimum 500 MB required). Apply aborted.",
+                        message="Target Linux user lacks passwordless sudo privileges (sudoers NOPASSWD required). Apply aborted.",
+                        details=self._sanitize(sudo_chk.stderr or sudo_chk.stdout),
                         duration_ms=dur,
                     )
                     self.reporter.on_stage_complete(res)
                     return res
-
-                if not is_win and getattr(self.executor, "use_sudo", False):
-                    sudo_chk = self.executor.execute("sudo -n true", timeout=5)
-                    if not sudo_chk.success:
-                        dur = int((time.monotonic() - start) * 1000)
-                        res = StageResult(
-                            stage=WorkflowStage.APPLY,
-                            status=StageStatus.FAIL,
-                            message="Target Linux user lacks passwordless sudo privileges (sudoers NOPASSWD required). Apply aborted.",
-                            details=self._sanitize(sudo_chk.stderr or sudo_chk.stdout),
-                            duration_ms=dur,
-                        )
-                        self.reporter.on_stage_complete(res)
-                        return res
 
             # Auto-install Telegraf if missing and requested
             auto_install = self.target.install_telegraf or self.options.install_telegraf
@@ -900,7 +855,7 @@ class ConfigureEndpointWorkflow:
                 if self.discovery
                 else ("C:\\telegraf\\telegraf.conf" if is_win else "/etc/telegraf/telegraf.conf")
             )
-            if self.options.mode == DeploymentMode.PUSH and self.executor.file_exists(system_file) and self.executor.file_exists(vcf_file):
+            if self.executor.file_exists(system_file) and self.executor.file_exists(vcf_file):
                 try:
                     def _hash_txt(s: str) -> str:
                         return hashlib.sha256(s.encode("utf-8")).hexdigest()
@@ -1036,15 +991,6 @@ class ConfigureEndpointWorkflow:
                 if self.artifacts and self.artifacts.mandatory_tags_content:
                     self.executor.execute(f"chmod 755 {shlex.quote(config_dir)}/mandatory_tags.sh 2>/dev/null || true")
 
-            if self.options.mode == DeploymentMode.SCRIPT and hasattr(self.executor, "generate_deploy_script"):
-                telegraf_bin = (
-                    self.discovery.telegraf_bin_path
-                    if self.discovery
-                    else ("/usr/bin/telegraf" if not is_win else "C:\\telegraf\\telegraf.exe")
-                )
-                script_path = self.executor.generate_deploy_script(is_windows=is_win, telegraf_bin=telegraf_bin)
-                self.managed_files.append(str(script_path))
-
             dur = int((time.monotonic() - start) * 1000)
             res = StageResult(
                 stage=WorkflowStage.APPLY,
@@ -1146,7 +1092,6 @@ class ConfigureEndpointWorkflow:
         if (
             self.options.preview_only
             or self.options.dry_run
-            or self.options.mode != DeploymentMode.PUSH
             or not self.options.restart_service
         ):
             dur = int((time.monotonic() - start) * 1000)
@@ -1254,7 +1199,7 @@ class ConfigureEndpointWorkflow:
             installed = (
                 self.discovery.telegraf_installed if self.discovery else False
             )
-            if self.options.mode == DeploymentMode.PUSH and not self.options.dry_run:
+            if not self.options.dry_run:
                 self.verifications["Telegraf installed"] = "PASS" if installed else "FAIL"
             else:
                 self.verifications["Telegraf installed"] = "PASS" if installed else "SKIPPED"
@@ -1263,7 +1208,7 @@ class ConfigureEndpointWorkflow:
             cfg_valid = bool(self.system_conf_content and self.vcf_conf_content)
             self.verifications["Config valid"] = "PASS" if cfg_valid else "FAIL"
 
-            if self.options.mode == DeploymentMode.PUSH and not self.options.dry_run:
+            if not self.options.dry_run:
                 # 3. Service running check
                 svc_val = Validator.validate_service_state(self.executor, is_windows=is_win)
                 self.verifications["Service running"] = "PASS" if svc_val.is_valid else "FAIL"
@@ -1386,7 +1331,7 @@ class ConfigureEndpointWorkflow:
                     duration_ms=dur,
                 )
             else:
-                if self.options.mode == DeploymentMode.PUSH and not self.options.dry_run:
+                if not self.options.dry_run:
                     config_dir = (
                         self.discovery.config_dir
                         if self.discovery

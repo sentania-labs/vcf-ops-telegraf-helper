@@ -21,7 +21,8 @@ This helper compresses those manual steps into a fast, guided, transparent, and 
 * **Idempotent and Drift-Free**: Re-running configuration against an existing target produces deterministic files and reports whether updates were needed.
 * **Transparent**: Every generated TOML fragment and planned command is previewed before application.
 * **Honest Validation**: Separately validates configuration syntax, endpoint reachability, collector connectivity, and service state. Failures in one layer are never masked.
-* **Multiple Deployment Modes**: Supports direct remote push (SSH), auditable shell script generation, and configuration-only output.
+* **Direct Push**: Deploys over SSH (Linux) or WinRM (Windows). The GUI shows the equivalent `vcf-telegraf-helper run` command for anyone who needs to adapt it.
+* **Inventory-Driven Targeting**: Pick the VM from VCF Operations inventory (templates and deleted VMs excluded, powered-off VMs hidden by default). Guest OS, IP, agent status, and the agent's current collector come from VCF Operations, and each step unlocks only when the previous one is complete.
 
 ## Installation
 

@@ -21,7 +21,6 @@ class ConnectionMethod(str, Enum):
     MOCK = "mock"
     SSH = "ssh"
     WINRM = "winrm"
-    PACKAGE = "package"
 
 
 class EndpointTarget(BaseModel):
