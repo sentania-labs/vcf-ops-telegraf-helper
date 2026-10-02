@@ -1311,7 +1311,7 @@ class MainWindow(QMainWindow):
             connected = executor.test_connection()
             if not connected:
                 self.logger.warning("Endpoint connection test failed for %s", target.hostname)
-                self.ep_status_label.setText("Connection failed: unable to connect")
+                self.ep_status_label.setText("Connection failed: unable to connect (details in View Log)")
                 self.ep_status_label.setStyleSheet("color: #d95926;")
                 if hasattr(self, "ep_missing_banner"):
                     self.ep_missing_banner.setVisible(False)

@@ -149,3 +149,24 @@ def test_winrm_free_disk_space_queries_requested_drive():
 
         executor.get_free_disk_space_mb("D:\\telegraf")
         assert "-Name 'D'" in mock_session.run_ps.call_args[0][0]
+
+
+def test_winrm_test_connection_logs_real_error_without_password(caplog):
+    """A failed WinRM connection test logs the underlying error for the operator, never the password."""
+    import logging
+
+    executor = WinRMExecutor(hostname="automic.corp.local", username="INT\\sadmin", password="S3cret-pw")
+    mock_session = MagicMock()
+    mock_session.run_ps.side_effect = RuntimeError("the specified credentials were rejected by the server")
+
+    with patch.object(executor, "_get_session", return_value=mock_session):
+        with caplog.at_level(logging.WARNING, logger="vcf_ops_telegraf_helper"):
+            assert executor.test_connection() is False
+
+    logged = caplog.text
+    assert "credentials were rejected" in logged
+    assert "RuntimeError" in logged
+    assert "http://automic.corp.local:5985/wsman" in logged
+    assert "user 'INT\\\\sadmin'" in logged  # repr() doubles the backslash
+    assert "S3cret-pw" not in logged
+

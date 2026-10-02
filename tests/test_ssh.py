@@ -237,3 +237,22 @@ def test_ssh_executor_get_free_disk_space_mb_fallback():
         free_mb = executor.get_free_disk_space_mb("/etc/telegraf")
 
     assert free_mb == 1500
+
+
+def test_ssh_test_connection_logs_real_error_without_password(caplog):
+    """A failed SSH connection test logs the underlying error for the operator, never the password."""
+    import logging
+    from unittest.mock import patch as _patch
+
+    from vcf_ops_telegraf_helper.executors.ssh import SSHExecutor
+
+    executor = SSHExecutor(hostname="linux01.corp.local", username="root", password="S3cret-pw")
+    with _patch.object(executor, "_ensure_connected", side_effect=OSError("Authentication failed.")):
+        with caplog.at_level(logging.WARNING, logger="vcf_ops_telegraf_helper"):
+            assert executor.test_connection() is False
+
+    logged = caplog.text
+    assert "Authentication failed." in logged
+    assert "linux01.corp.local:22" in logged
+    assert "S3cret-pw" not in logged
+
