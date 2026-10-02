@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import Any, Optional
 
 from vcf_ops_telegraf_helper.adapters.base import IntegrationArtifacts, VCFOpsIntegration
-from vcf_ops_telegraf_helper.models.vcf import AuthToken, CollectorInfo, VCFEnvironment
+from vcf_ops_telegraf_helper.models.vcf import AuthToken, CollectorInfo, VCFEnvironment, VirtualMachineResource
 
 
 MOCK_CERT_PEM = (
@@ -92,6 +92,9 @@ class MockVCFOpsIntegration(VCFOpsIntegration):
         target_ip: Optional[str] = None,
         target_hostname: Optional[str] = None,
         target_uuid: Optional[str] = None,
+        existing_cert_bundle: Optional[dict[str, Any]] = None,
+        vm_mor: Optional[str] = None,
+        vc_id: Optional[str] = None,
     ) -> IntegrationArtifacts:
         collector_addr = self.env.collector.address
         script_name = "telegraf-utils.ps1" if os_family.lower() == "windows" else "telegraf-utils.sh"
@@ -103,6 +106,13 @@ class MockVCFOpsIntegration(VCFOpsIntegration):
             "#!/usr/bin/env bash\n"
             "echo 'mandatory.tag,OS_NAME=Linux,OS_VERSION=unknown,TELEGRAF_VERSION=1.40.1,HOSTNAME=localhost,IP=127.0.0.1 value=1i'\n"
         )
+        vm_name = None
+        if vm_mor and not vc_id:
+            match = next((vm for vm in self.list_virtual_machines() if vm.vm_mor == vm_mor), None)
+            if match is None:
+                raise RuntimeError(f"Requested VM binding '{vm_mor}' was not found in VCF Operations inventory.")
+            vc_id, vm_name = match.vc_id, match.name
+        is_managed = bool(vm_mor and vc_id)
         return IntegrationArtifacts(
             token="simulated-vcf-token-abc123xyz",
             collector_address=collector_addr,
@@ -113,8 +123,11 @@ class MockVCFOpsIntegration(VCFOpsIntegration):
             client_cert_content=MOCK_CERT_PEM,
             client_key_content=MOCK_KEY_PEM,
             mandatory_tags_content=win_tags if os_family.lower() == "windows" else linux_tags,
-            is_managed_vm=False,
-            client_id="simulated-client-id",
+            is_managed_vm=is_managed,
+            vm_name=vm_name,
+            vm_mor=vm_mor if is_managed else None,
+            vc_id=vc_id if is_managed else None,
+            client_id=f"{vc_id}_{vm_mor}" if is_managed else "simulated-client-id",
             mutual_auth=True,
             master_pub_content="ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQC simulated",
             vip_content=collector_addr,
@@ -123,3 +136,68 @@ class MockVCFOpsIntegration(VCFOpsIntegration):
 
     def verify_ingestion(self, target_hostname: str) -> str:
         return self.ingestion_status
+
+    def list_virtual_machines(self, strict: bool = False) -> list[VirtualMachineResource]:
+        """Return simulated virtual machine inventory for tests and offline usage."""
+        if hasattr(self, "_vms") and self._vms is not None:
+            return self._vms
+
+        return [
+            VirtualMachineResource(
+                resource_id="res-vm-001",
+                name="dbdemo01",
+                ip_address="172.17.0.2",
+                vm_mor="vm-1001",
+                vc_id="423b-81f0-91a2-0001",
+                os_name="Windows Server 2022 Datacenter",
+                os_family="WINDOWS",
+                collector_group="Default Collector Group",
+                telegraf_status="MISSING",
+            ),
+            VirtualMachineResource(
+                resource_id="res-vm-002",
+                name="mssqldemo2",
+                ip_address="172.16.3.80",
+                vm_mor="vm-1042",
+                vc_id="423b-81f0-91a2-0002",
+                os_name="Windows Server 2025 Standard",
+                os_family="WINDOWS",
+                collector_group="Default Collector Group",
+                telegraf_status="MISSING",
+            ),
+            VirtualMachineResource(
+                resource_id="res-vm-003",
+                name="oraclesrv01",
+                ip_address="172.18.2.14",
+                vm_mor="vm-1004",
+                vc_id="423b-81f0-91a2-0003",
+                os_name="Red Hat Enterprise Linux 9.4",
+                os_family="LINUX",
+                collector_group="DMZ Collector Group",
+                telegraf_status="MISSING",
+            ),
+            VirtualMachineResource(
+                resource_id="res-vm-004",
+                name="webapp01",
+                ip_address="172.16.10.5",
+                vm_mor="vm-1020",
+                vc_id="423b-81f0-91a2-0004",
+                os_name="Ubuntu 24.04 LTS",
+                os_family="LINUX",
+                collector_group="Default Collector Group",
+                telegraf_status="ACTIVE",
+                telegraf_version="1.40.1",
+            ),
+            VirtualMachineResource(
+                resource_id="res-vm-005",
+                name="k8s-node01",
+                ip_address="172.19.1.50",
+                vm_mor="vm-2005",
+                vc_id="423b-81f0-91a2-0005",
+                os_name="Ubuntu 22.04 LTS",
+                os_family="LINUX",
+                collector_group="PCI Cluster Group",
+                telegraf_status="STOPPED",
+            ),
+        ]
+

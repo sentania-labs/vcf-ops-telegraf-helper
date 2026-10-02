@@ -371,3 +371,258 @@ def test_vcf91_fetch_mandatory_tag_script_fallback():
     assert "reg query" in script_bat
     assert "BIOS_VERSION" in script_bat
     assert "BOOTSTRAP_FQDN" in script_bat
+
+
+def test_vcf91_list_virtual_machines():
+    """Verify list_virtual_machines parses Suite API resources and identifier properties."""
+    env = VCFEnvironment(
+        name="test",
+        url="https://vcf-ops.corp.local",
+        username="admin",
+        token="test-token-123",
+        collector=CollectorInfo(address="10.10.10.50"),
+    )
+    mock_session = MagicMock(spec=requests.Session)
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.json.return_value = {
+        "resourceList": [
+            {
+                "identifier": "res-uuid-001",
+                "resourceKey": {
+                    "name": "win-app01",
+                    "adapterKindKey": "VMWARE",
+                    "resourceKindKey": "VirtualMachine",
+                    "resourceIdentifiers": [
+                        {"identifierType": {"name": "VMEntityName"}, "value": "win-app01"},
+                        {"identifierType": {"name": "VMEntityObjectID"}, "value": "vm-201"},
+                        {"identifierType": {"name": "VMEntityVCID"}, "value": "vc-uuid-1"},
+                    ],
+                },
+                "resourceProperties": [
+                    {"name": "summary|guest|operatingSystem", "value": "Microsoft Windows Server 2022"},
+                    {"name": "summary|guest|ipAddress", "value": "192.168.1.100"},
+                ],
+            }
+        ]
+    }
+    mock_session.get.return_value = mock_resp
+
+    adapter = VCF91OpenTelegrafIntegration(env, session=mock_session)
+    vms = adapter.list_virtual_machines()
+
+    assert len(vms) == 1
+    assert vms[0].resource_id == "res-uuid-001"
+    assert vms[0].name == "win-app01"
+    assert vms[0].ip_address == "192.168.1.100"
+    assert vms[0].vm_mor == "vm-201"
+    assert vms[0].vc_id == "vc-uuid-1"
+    assert vms[0].os_family == "WINDOWS"
+
+
+def test_vcf91_reuse_existing_cert_bundle():
+    """Verify prepare_telegraf_integration reuses valid existing cert bundle to avoid cert minting."""
+    env = VCFEnvironment(
+        name="test",
+        url="https://vcf-ops.corp.local",
+        username="admin",
+        token="test-token-123",
+        collector=CollectorInfo(address="10.10.10.50"),
+    )
+    mock_session = MagicMock(spec=requests.Session)
+    adapter = VCF91OpenTelegrafIntegration(env, session=mock_session)
+
+    existing = {
+        "client_cert": "-----BEGIN CERTIFICATE-----\nEXISTING-CERT\n-----END CERTIFICATE-----\n",
+        "client_key": "-----BEGIN RSA PRIVATE KEY-----\nEXISTING-KEY\n-----END RSA PRIVATE KEY-----\n",
+        "ca_cert": "-----BEGIN CERTIFICATE-----\nCA-BUNDLE\n-----END CERTIFICATE-----\n",
+        "master_pub": "ssh-rsa PUBKEY",
+        "vip": "10.10.10.50",
+        "mutual_auth": True,
+    }
+
+    artifacts = adapter.prepare_telegraf_integration(
+        os_family="linux",
+        target_ip="172.16.1.10",
+        target_hostname="host10",
+        existing_cert_bundle=existing,
+    )
+
+    assert artifacts.client_cert_content == existing["client_cert"]
+    assert artifacts.client_key_content == existing["client_key"]
+    assert artifacts.ca_cert_content == existing["ca_cert"]
+    assert artifacts.mutual_auth is True
+    # Ensure Suite API cert bundle endpoint was not called
+    assert not any("collector-certificate" in str(c) for c in mock_session.get.call_args_list)
+
+
+def test_mock_adapter_vm_inventory():
+    """Verify MockVCFOpsIntegration returns simulated VM resources."""
+    from vcf_ops_telegraf_helper.adapters.mock import MockVCFOpsIntegration
+
+    env = VCFEnvironment(
+        name="test",
+        url="https://vcf-ops.local",
+        username="admin",
+        collector=CollectorInfo(address="10.10.10.50"),
+    )
+    adapter = MockVCFOpsIntegration(env)
+    vms = adapter.list_virtual_machines()
+    assert len(vms) >= 3
+    assert any(vm.os_family == "WINDOWS" for vm in vms)
+    assert any(vm.os_family == "LINUX" for vm in vms)
+    assert any(vm.vm_mor == "vm-1042" for vm in vms)
+
+
+def _cert_adapter(group_name: str):
+    env = VCFEnvironment(
+        name="test",
+        url="https://vcf-ops.corp.local",
+        username="admin",
+        token="test-token-123",
+        collector=CollectorInfo(address="10.10.10.50"),
+    )
+    adapter = VCF91OpenTelegrafIntegration(env, session=MagicMock(spec=requests.Session))
+    adapter.resolve_collector_group_name = MagicMock(return_value=group_name)
+    adapter.detect_managed_vm = MagicMock(return_value=(False, None, None, None))
+    adapter.fetch_mandatory_tag_script = MagicMock(return_value="#!/bin/sh\n")
+    return adapter
+
+
+_BUNDLE = {
+    "ca_cert": "CA",
+    "client_cert": "-----BEGIN CERTIFICATE-----\nGROUP\n-----END CERTIFICATE-----\n",
+    "client_key": "KEY",
+    "mutual_auth": True,
+}
+
+
+def test_vcf91_cert_fallback_skipped_when_group_request_succeeds():
+    """The collector-address retry must not run, or fail onboarding, after the group request worked."""
+    adapter = _cert_adapter("prod-collector-group")
+
+    def _fetch(group, client_id):
+        if group == "prod-collector-group":
+            return dict(_BUNDLE)
+        raise RuntimeError("collector address rejected")
+
+    adapter.fetch_client_certificate_bundle = MagicMock(side_effect=_fetch)
+    artifacts = adapter.prepare_telegraf_integration(target_ip="172.16.1.10", target_hostname="host10")
+    assert artifacts.client_cert_content == _BUNDLE["client_cert"]
+    assert adapter.fetch_client_certificate_bundle.call_count == 1
+
+
+def test_vcf91_cert_fallback_used_when_group_request_fails():
+    """When the group request fails, the collector address is tried."""
+    adapter = _cert_adapter("prod-collector-group")
+
+    def _fetch(group, client_id):
+        if group == "10.10.10.50":
+            return dict(_BUNDLE)
+        raise RuntimeError("unknown group")
+
+    adapter.fetch_client_certificate_bundle = MagicMock(side_effect=_fetch)
+    artifacts = adapter.prepare_telegraf_integration(target_ip="172.16.1.10", target_hostname="host10")
+    assert artifacts.client_cert_content == _BUNDLE["client_cert"]
+    assert adapter.fetch_client_certificate_bundle.call_count == 2
+
+
+def test_vcf91_explicit_vm_binding_skips_ip_discovery():
+    """A supplied MOR and vCenter ID bind the endpoint without IP or hostname matching."""
+    adapter = _cert_adapter("10.10.10.50")
+    adapter.fetch_client_certificate_bundle = MagicMock(return_value=dict(_BUNDLE))
+    artifacts = adapter.prepare_telegraf_integration(
+        target_ip="172.16.1.10", target_hostname="host10", vm_mor="vm-201", vc_id="vc-uuid-1"
+    )
+    adapter.detect_managed_vm.assert_not_called()
+    assert artifacts.is_managed_vm is True
+    assert artifacts.client_id == "vc-uuid-1_vm-201"
+    adapter.fetch_client_certificate_bundle.assert_called_once_with("10.10.10.50", "vc-uuid-1_vm-201")
+
+
+def test_vcf91_vm_binding_mor_only_resolution():
+    """A bare MOR resolves through inventory, and fails loudly when missing or ambiguous."""
+    import pytest
+    from vcf_ops_telegraf_helper.models.vcf import VirtualMachineResource
+
+    adapter = _cert_adapter("10.10.10.50")
+
+    def _vm(mor, vcid, name):
+        return VirtualMachineResource(resource_id=name, name=name, vm_mor=mor, vc_id=vcid)
+
+    adapter.list_virtual_machines = MagicMock(return_value=[_vm("vm-201", "vc-1", "app01"), _vm("vm-300", "vc-1", "x")])
+    assert adapter.resolve_bound_vm("vm-201") == (True, "app01", "vc-1", "vm-201")
+
+    with pytest.raises(RuntimeError, match="not found"):
+        adapter.resolve_bound_vm("vm-999")
+
+    adapter.list_virtual_machines = MagicMock(return_value=[_vm("vm-201", "vc-1", "a"), _vm("vm-201", "vc-2", "b")])
+    with pytest.raises(RuntimeError, match="more than one vCenter"):
+        adapter.resolve_bound_vm("vm-201")
+
+
+def test_vcf91_cert_reuse_requires_matching_client_identity():
+    """A cert issued for a different client identity is not reused; a matching one is."""
+    adapter = _cert_adapter("10.10.10.50")
+    adapter.fetch_client_certificate_bundle = MagicMock(return_value=dict(_BUNDLE))
+    old = {"client_cert": "OLD-CERT", "client_key": "OLD-KEY", "client_id": "endpoint_host10"}
+
+    artifacts = adapter.prepare_telegraf_integration(
+        target_ip="172.16.1.10", target_hostname="host10", existing_cert_bundle=old,
+        vm_mor="vm-201", vc_id="vc-uuid-1",
+    )
+    assert artifacts.client_cert_content == _BUNDLE["client_cert"]
+    adapter.fetch_client_certificate_bundle.assert_called_once()
+
+    adapter.fetch_client_certificate_bundle.reset_mock()
+    same = dict(old, client_id="vc-uuid-1_vm-201")
+    artifacts = adapter.prepare_telegraf_integration(
+        target_ip="172.16.1.10", target_hostname="host10", existing_cert_bundle=same,
+        vm_mor="vm-201", vc_id="vc-uuid-1",
+    )
+    assert artifacts.client_cert_content == "OLD-CERT"
+    adapter.fetch_client_certificate_bundle.assert_not_called()
+
+
+def test_vcf91_legacy_cert_without_identity_reminted_only_for_explicit_binding():
+    """Certs from before CLIENT_ID was recorded are reused, unless a VM binding is requested."""
+    adapter = _cert_adapter("10.10.10.50")
+    adapter.fetch_client_certificate_bundle = MagicMock(return_value=dict(_BUNDLE))
+    legacy = {"client_cert": "OLD-CERT", "client_key": "OLD-KEY"}
+
+    artifacts = adapter.prepare_telegraf_integration(
+        target_ip="172.16.1.10", target_hostname="host10", existing_cert_bundle=legacy,
+    )
+    assert artifacts.client_cert_content == "OLD-CERT"
+
+    artifacts = adapter.prepare_telegraf_integration(
+        target_ip="172.16.1.10", target_hostname="host10", existing_cert_bundle=legacy,
+        vm_mor="vm-201", vc_id="vc-uuid-1",
+    )
+    assert artifacts.client_cert_content == _BUNDLE["client_cert"]
+
+
+def test_vcf91_vm_binding_reports_inventory_failure_not_missing_vm():
+    """An inventory API failure must not be reported as the VM being absent."""
+    import pytest
+
+    adapter = _cert_adapter("10.10.10.50")
+    bad = MagicMock()
+    bad.status_code = 500
+    adapter.session.get.return_value = bad
+    with pytest.raises(RuntimeError, match="inventory query failed") as exc:
+        adapter.resolve_bound_vm("vm-201")
+    assert "not found" not in str(exc.value)
+
+
+def test_vcf91_vm_binding_mor_without_vc_id_message():
+    """A MOR present in inventory without a vCenter ID gets a specific message."""
+    import pytest
+    from vcf_ops_telegraf_helper.models.vcf import VirtualMachineResource
+
+    adapter = _cert_adapter("10.10.10.50")
+    adapter.list_virtual_machines = MagicMock(
+        return_value=[VirtualMachineResource(resource_id="r", name="a", vm_mor="vm-201", vc_id=None)]
+    )
+    with pytest.raises(RuntimeError, match="has no vCenter ID"):
+        adapter.resolve_bound_vm("vm-201")

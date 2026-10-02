@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import hashlib
 import ipaddress
 import os
 import shlex
 import socket
 import time
+from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
+from cryptography import x509
 from vcf_ops_telegraf_helper.adapters.base import IntegrationArtifacts, VCFOpsIntegration
 from vcf_ops_telegraf_helper.executors.base import EndpointExecutor
 from vcf_ops_telegraf_helper.executors.ssh import SSHExecutor
@@ -89,10 +92,42 @@ class ConfigureEndpointWorkflow:
         except ValueError:
             return False
 
+    def _security_artifact_files(self, config_dir: str, is_win: bool) -> list[tuple[str, str, int]]:
+        """Return (destination, content, mode) for each mTLS and security file the apply stage writes.
+
+        Apply uploads exactly this list and the idempotency check compares exactly this list,
+        so the two cannot drift apart.
+        """
+        sep = "\\" if is_win else "/"
+        files: list[tuple[str, str, int]] = []
+        if self.artifacts:
+            for name, content, mode in (
+                ("ca.pem", self.artifacts.ca_cert_content, 0o644),
+                ("cert.pem", self.artifacts.client_cert_content, 0o644),
+                ("key.pem", self.artifacts.client_key_content, 0o640),
+                ("master.pub", self.artifacts.master_pub_content, 0o644),
+            ):
+                if content:
+                    files.append((f"{config_dir}{sep}{name}", content, mode))
+        ip_content = (self.artifacts.vip_content or self.artifacts.collector_address) if self.artifacts else self.env.collector.address
+        files.append((f"{config_dir}{sep}IP", f"{ip_content.strip()}\n", 0o644))
+        ma_val = "true\n" if (self.artifacts and self.artifacts.mutual_auth) else "false\n"
+        files.append((f"{config_dir}{sep}MUTUAL_AUTHENTICATION", ma_val, 0o644))
+        # Records which client identity the cert was issued for, so a changed VM binding re-mints
+        if self.artifacts and self.artifacts.client_id and self.artifacts.client_cert_content:
+            files.append((f"{config_dir}{sep}CLIENT_ID", f"{self.artifacts.client_id}\n", 0o644))
+        if self.artifacts and self.artifacts.mandatory_tags_content:
+            tags_name = "mandatory_tags.bat" if is_win else "mandatory_tags.sh"
+            files.append((f"{config_dir}{sep}{tags_name}", self.artifacts.mandatory_tags_content, 0o755))
+        return files
+
     def _get_registered_hostname(self) -> str:
         """Resolve the shortname to register with VCF Operations."""
         if getattr(self.target, "registered_hostname", None):
-            return self.target.registered_hostname.strip().splitlines()[-1].strip().split(".")[0]
+            raw = self.target.registered_hostname.strip().splitlines()[-1].strip()
+            if self._is_ip(raw):
+                return raw
+            return raw.split(".")[0]
         if self.discovery and self.discovery.hostname and not self._is_ip(self.discovery.hostname):
             return self.discovery.hostname.strip().splitlines()[-1].strip().split(".")[0]
         if self.artifacts and getattr(self.artifacts, "vm_name", None) and not self._is_ip(self.artifacts.vm_name):
@@ -109,7 +144,7 @@ class ConfigureEndpointWorkflow:
         except Exception:
             pass
         self._cached_ptr = None
-        return self.target.hostname
+        return getattr(self.target, "registered_hostname", None) or self.target.hostname
 
     def detect_target(self) -> StageResult:
         """Stage 1: Verify connectivity and authenticate with target endpoint."""
@@ -385,11 +420,63 @@ class ConfigureEndpointWorkflow:
 
             target_ip = self.discovery.host_ip if self.discovery else self.target.hostname
             target_uuid = self.discovery.host_uuid if self.discovery else None
+
+            existing_bundle = None
+            if self.options.mode == DeploymentMode.PUSH and not getattr(self.options, "force_new_cert", False):
+                is_win = (self.target.os_family == OSFamily.WINDOWS) or (type(self.executor).__name__ == "WinRMExecutor")
+                cfg_dir = (
+                    self.discovery.config_dir
+                    if self.discovery
+                    else ("C:\\telegraf\\telegraf.d" if is_win else "/etc/telegraf/telegraf.d")
+                )
+                sep = "\\" if is_win else "/"
+                cert_f = f"{cfg_dir}{sep}cert.pem"
+                key_f = f"{cfg_dir}{sep}key.pem"
+                ca_f = f"{cfg_dir}{sep}ca.pem"
+                pub_f = f"{cfg_dir}{sep}master.pub"
+                ip_f = f"{cfg_dir}{sep}IP"
+                ma_f = f"{cfg_dir}{sep}MUTUAL_AUTHENTICATION"
+                cid_f = f"{cfg_dir}{sep}CLIENT_ID"
+                if self.executor.file_exists(cert_f) and self.executor.file_exists(key_f):
+                    try:
+                        c_txt = self.executor.download(cert_f)
+                        k_txt = self.executor.download(key_f)
+                        ca_txt = self.executor.download(ca_f) if self.executor.file_exists(ca_f) else None
+                        pub_txt = self.executor.download(pub_f) if self.executor.file_exists(pub_f) else None
+                        vip_txt = self.executor.download(ip_f).strip() if self.executor.file_exists(ip_f) else None
+                        ma_txt = self.executor.download(ma_f).strip().lower() if self.executor.file_exists(ma_f) else "true"
+                        cid_txt = self.executor.download(cid_f).strip() if self.executor.file_exists(cid_f) else None
+                        if "BEGIN CERTIFICATE" in c_txt and ("BEGIN RSA PRIVATE KEY" in k_txt or "BEGIN PRIVATE KEY" in k_txt):
+                            try:
+                                parsed_cert = x509.load_pem_x509_certificate(c_txt.encode("utf-8"))
+                                expire_dt = getattr(parsed_cert, "not_valid_after_utc", None)
+                                if expire_dt is None:
+                                    expire_dt = parsed_cert.not_valid_after.replace(tzinfo=timezone.utc)
+                                if expire_dt <= datetime.now(timezone.utc):
+                                    existing_bundle = None
+                                else:
+                                    existing_bundle = {
+                                        "client_cert": c_txt,
+                                        "client_key": k_txt,
+                                        "ca_cert": ca_txt,
+                                        "master_pub": pub_txt,
+                                        "vip": vip_txt,
+                                        "mutual_auth": ma_txt != "false",
+                                        "client_id": cid_txt or None,
+                                    }
+                            except Exception:
+                                existing_bundle = None
+                    except Exception:
+                        existing_bundle = None
+
             self.artifacts = self.adapter.prepare_telegraf_integration(
                 os_family=self.target.os_family.value,
                 target_ip=target_ip,
                 target_hostname=self._get_registered_hostname(),
                 target_uuid=target_uuid,
+                existing_cert_bundle=existing_bundle,
+                vm_mor=getattr(self.target, "vm_mor", None),
+                vc_id=getattr(self.target, "vc_id", None),
             )
             if self.artifacts.token and self.artifacts.token not in self._secrets:
                 self._secrets.append(self.artifacts.token)
@@ -602,6 +689,41 @@ class ConfigureEndpointWorkflow:
             system_file = f"{config_dir}{sep}vcf-helper-system.conf"
             vcf_file = f"{config_dir}{sep}cloudproxy-http.conf"
 
+            # Pre-flight disk space and sudo verification for push deployments
+            if self.options.mode == DeploymentMode.PUSH:
+                free_mb = 1000
+                if hasattr(self.executor, "get_free_disk_space_mb"):
+                    try:
+                        val = self.executor.get_free_disk_space_mb("C:" if is_win else "/")
+                        if isinstance(val, (int, float)):
+                            free_mb = val
+                    except Exception:
+                        free_mb = 1000
+                if free_mb < 500:
+                    dur = int((time.monotonic() - start) * 1000)
+                    res = StageResult(
+                        stage=WorkflowStage.APPLY,
+                        status=StageStatus.FAIL,
+                        message=f"Insufficient disk space on target ({free_mb} MB free, minimum 500 MB required). Apply aborted.",
+                        duration_ms=dur,
+                    )
+                    self.reporter.on_stage_complete(res)
+                    return res
+
+                if not is_win and getattr(self.executor, "use_sudo", False):
+                    sudo_chk = self.executor.execute("sudo -n true", timeout=5)
+                    if not sudo_chk.success:
+                        dur = int((time.monotonic() - start) * 1000)
+                        res = StageResult(
+                            stage=WorkflowStage.APPLY,
+                            status=StageStatus.FAIL,
+                            message="Target Linux user lacks passwordless sudo privileges (sudoers NOPASSWD required). Apply aborted.",
+                            details=self._sanitize(sudo_chk.stderr or sudo_chk.stdout),
+                            duration_ms=dur,
+                        )
+                        self.reporter.on_stage_complete(res)
+                        return res
+
             # Auto-install Telegraf if missing and requested
             auto_install = self.target.install_telegraf or self.options.install_telegraf
             if self.discovery and not self.discovery.telegraf_installed and auto_install:
@@ -748,6 +870,19 @@ class ConfigureEndpointWorkflow:
                     )
                     self.reporter.on_stage_complete(res)
                     return res
+
+                expected_bin = "C:\\telegraf\\telegraf.exe" if is_win else "/usr/bin/telegraf"
+                bin_exists = self.executor.file_exists(expected_bin)
+                if not bin_exists and type(self.executor).__name__ in ("SSHExecutor", "WinRMExecutor", "LocalExecutor"):
+                    dur = int((time.monotonic() - start) * 1000)
+                    res = StageResult(
+                        stage=WorkflowStage.APPLY,
+                        status=StageStatus.FAIL,
+                        message=f"Telegraf binary not found at {expected_bin} after installation",
+                        duration_ms=dur,
+                    )
+                    self.reporter.on_stage_complete(res)
+                    return res
                 self.discovery.telegraf_installed = True
                 if is_win:
                     self.discovery.telegraf_bin_path = "C:\\telegraf\\telegraf.exe"
@@ -758,6 +893,52 @@ class ConfigureEndpointWorkflow:
                     self.discovery.main_config_path = "/etc/telegraf/telegraf.conf"
                     self.discovery.config_dir = "/etc/telegraf/telegraf.d"
 
+            # SHA-256 Idempotency Comparison
+            self.is_idempotent = False
+            main_cfg = (
+                self.discovery.main_config_path
+                if self.discovery
+                else ("C:\\telegraf\\telegraf.conf" if is_win else "/etc/telegraf/telegraf.conf")
+            )
+            if self.options.mode == DeploymentMode.PUSH and self.executor.file_exists(system_file) and self.executor.file_exists(vcf_file):
+                try:
+                    def _hash_txt(s: str) -> str:
+                        return hashlib.sha256(s.encode("utf-8")).hexdigest()
+
+                    remote_sys = self.executor.download(system_file)
+                    remote_vcf = self.executor.download(vcf_file)
+                    match_sys = (_hash_txt(remote_sys) == _hash_txt(self.system_conf_content))
+                    match_vcf = (_hash_txt(remote_vcf) == _hash_txt(self.vcf_conf_content))
+                    match_base = True
+                    if self.base_stub_content and self.executor.file_exists(main_cfg):
+                        remote_base = self.executor.download(main_cfg)
+                        match_base = (_hash_txt(remote_base) == _hash_txt(self.base_stub_content))
+
+                    # Certificate artifacts are referenced by path only in the TOML, so a rotated
+                    # bundle must be compared directly or it would never be uploaded.
+                    match_certs = True
+                    for c_dest, c_content, _ in self._security_artifact_files(config_dir, is_win):
+                        if not self.executor.file_exists(c_dest) or (
+                            _hash_txt(self.executor.download(c_dest)) != _hash_txt(c_content)
+                        ):
+                            match_certs = False
+                            break
+
+                    if match_sys and match_vcf and match_base and match_certs:
+                        self.is_idempotent = True
+                        self.managed_files = [system_file, vcf_file]
+                        dur = int((time.monotonic() - start) * 1000)
+                        res = StageResult(
+                            stage=WorkflowStage.APPLY,
+                            status=StageStatus.PASS,
+                            message=f"Configuration unchanged (SHA-256 match). Managed fragments already current in {config_dir}.",
+                            duration_ms=dur,
+                        )
+                        self.reporter.on_stage_complete(res)
+                        return res
+                except Exception:
+                    self.is_idempotent = False
+
             # Create destination directory and backup existing fragments/certs
             if is_win:
                 self.executor.execute(
@@ -766,7 +947,7 @@ class ConfigureEndpointWorkflow:
                 for f_name in (
                     "vcf-helper-system.conf", "cloudproxy-http.conf",
                     "ca.pem", "cert.pem", "key.pem",
-                    "master.pub", "IP", "MUTUAL_AUTHENTICATION",
+                    "master.pub", "IP", "MUTUAL_AUTHENTICATION", "CLIENT_ID",
                     "mandatory_tags.bat"
                 ):
                     f_dest = f"{config_dir}\\{f_name}"
@@ -777,7 +958,7 @@ class ConfigureEndpointWorkflow:
                 for f_name in (
                     "vcf-helper-system.conf", "cloudproxy-http.conf",
                     "ca.pem", "cert.pem", "key.pem",
-                    "master.pub", "IP", "MUTUAL_AUTHENTICATION",
+                    "master.pub", "IP", "MUTUAL_AUTHENTICATION", "CLIENT_ID",
                     "mandatory_tags.sh"
                 ):
                     f_dest = f"{config_dir}/{f_name}"
@@ -789,41 +970,10 @@ class ConfigureEndpointWorkflow:
             self.executor.upload(self.vcf_conf_content, vcf_file)
             self.managed_files = [system_file, vcf_file]
 
-            # Upload mTLS certificates if acquired
-            if self.artifacts and self.artifacts.ca_cert_content:
-                ca_dest = f"{config_dir}\\ca.pem" if is_win else f"{config_dir}/ca.pem"
-                self.executor.upload(self.artifacts.ca_cert_content, ca_dest, mode=0o644)
-                self.managed_files.append(ca_dest)
-            if self.artifacts and self.artifacts.client_cert_content:
-                cert_dest = f"{config_dir}\\cert.pem" if is_win else f"{config_dir}/cert.pem"
-                self.executor.upload(self.artifacts.client_cert_content, cert_dest, mode=0o644)
-                self.managed_files.append(cert_dest)
-            if self.artifacts and self.artifacts.client_key_content:
-                key_dest = f"{config_dir}\\key.pem" if is_win else f"{config_dir}/key.pem"
-                self.executor.upload(self.artifacts.client_key_content, key_dest, mode=0o640)
-                self.managed_files.append(key_dest)
-
-            # Upload master.pub, IP, and MUTUAL_AUTHENTICATION security artifacts
-            if self.artifacts and self.artifacts.master_pub_content:
-                pub_dest = f"{config_dir}\\master.pub" if is_win else f"{config_dir}/master.pub"
-                self.executor.upload(self.artifacts.master_pub_content, pub_dest, mode=0o644)
-                self.managed_files.append(pub_dest)
-
-            ip_content = (self.artifacts.vip_content or self.artifacts.collector_address) if self.artifacts else self.env.collector.address
-            ip_dest = f"{config_dir}\\IP" if is_win else f"{config_dir}/IP"
-            self.executor.upload(f"{ip_content.strip()}\n", ip_dest, mode=0o644)
-            self.managed_files.append(ip_dest)
-
-            ma_val = "true\n" if (self.artifacts and self.artifacts.mutual_auth) else "false\n"
-            ma_dest = f"{config_dir}\\MUTUAL_AUTHENTICATION" if is_win else f"{config_dir}/MUTUAL_AUTHENTICATION"
-            self.executor.upload(ma_val, ma_dest, mode=0o644)
-            self.managed_files.append(ma_dest)
-
-            # Upload mandatory_tags script if present
-            if self.artifacts and self.artifacts.mandatory_tags_content:
-                tags_dest = f"{config_dir}\\mandatory_tags.bat" if is_win else f"{config_dir}/mandatory_tags.sh"
-                self.executor.upload(self.artifacts.mandatory_tags_content, tags_dest, mode=0o755)
-                self.managed_files.append(tags_dest)
+            # Upload mTLS certificates and security artifacts
+            for f_dest, f_content, f_mode in self._security_artifact_files(config_dir, is_win):
+                self.executor.upload(f_content, f_dest, mode=f_mode)
+                self.managed_files.append(f_dest)
 
             # Replace unmanaged stock telegraf.conf with clean base stub to eliminate duplicate inputs,
             # while preserving the original configuration in telegraf.conf.orig
@@ -878,7 +1028,7 @@ class ConfigureEndpointWorkflow:
                     f"chmod 644 {shlex.quote(main_cfg)} {shlex.quote(config_dir)}/*.conf "
                     f"{shlex.quote(config_dir)}/ca.pem {shlex.quote(config_dir)}/cert.pem "
                     f"{shlex.quote(config_dir)}/master.pub {shlex.quote(config_dir)}/IP "
-                    f"{shlex.quote(config_dir)}/MUTUAL_AUTHENTICATION 2>/dev/null || true"
+                    f"{shlex.quote(config_dir)}/MUTUAL_AUTHENTICATION {shlex.quote(config_dir)}/CLIENT_ID 2>/dev/null || true"
                 )
                 # Client private key must NEVER be world-readable: 0640 with root:telegraf
                 self.executor.execute(f"chown root:telegraf {shlex.quote(config_dir)}/key.pem 2>/dev/null || true")
@@ -926,6 +1076,7 @@ class ConfigureEndpointWorkflow:
             "master.pub",
             "IP",
             "MUTUAL_AUTHENTICATION",
+            "CLIENT_ID",
             "mandatory_tags.bat" if is_win else "mandatory_tags.sh",
         ]
         main_cfg = (
@@ -964,10 +1115,33 @@ class ConfigureEndpointWorkflow:
             rollback_script = f"{sudo_pfx}bash -c '{inner_cmd}'"
             self.executor.execute(rollback_script, timeout=15)
 
+    def _cleanup_bak_files(self, config_dir: str, is_win: bool) -> None:
+        """Remove .bak backup files on successful verification."""
+        try:
+            if is_win:
+                cleanup_cmd = f"Remove-Item -Path '{config_dir}\\*.bak', 'C:\\telegraf\\telegraf.conf.bak' -Force -ErrorAction SilentlyContinue"
+            else:
+                sudo_pfx = "sudo -n " if getattr(self.executor, "use_sudo", False) else ""
+                cleanup_cmd = f"{sudo_pfx}rm -f {shlex.quote(config_dir)}/*.bak /etc/telegraf/telegraf.conf.bak 2>/dev/null || true"
+            self.executor.execute(cleanup_cmd, timeout=10)
+        except Exception:
+            pass
+
     def restart_if_needed(self) -> StageResult:
         """Stage 7: Test configuration on endpoint and restart Telegraf service."""
         start = time.monotonic()
         self.reporter.on_stage_start(WorkflowStage.RESTART)
+
+        if getattr(self, "is_idempotent", False):
+            dur = int((time.monotonic() - start) * 1000)
+            res = StageResult(
+                stage=WorkflowStage.RESTART,
+                status=StageStatus.SKIPPED,
+                message="Configuration unchanged (SHA-256 match), skipping service restart",
+                duration_ms=dur,
+            )
+            self.reporter.on_stage_complete(res)
+            return res
 
         if (
             self.options.preview_only
@@ -1212,6 +1386,13 @@ class ConfigureEndpointWorkflow:
                     duration_ms=dur,
                 )
             else:
+                if self.options.mode == DeploymentMode.PUSH and not self.options.dry_run:
+                    config_dir = (
+                        self.discovery.config_dir
+                        if self.discovery
+                        else ("C:\\telegraf\\telegraf.d" if is_win else "/etc/telegraf/telegraf.d")
+                    )
+                    self._cleanup_bak_files(config_dir, is_win)
                 res = StageResult(
                     stage=WorkflowStage.VERIFY,
                     status=StageStatus.PASS,

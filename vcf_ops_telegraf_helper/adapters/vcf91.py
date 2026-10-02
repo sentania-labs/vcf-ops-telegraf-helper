@@ -16,9 +16,29 @@ import requests
 
 from vcf_ops_telegraf_helper.adapters.base import IntegrationArtifacts, VCFOpsIntegration
 from vcf_ops_telegraf_helper.logger import get_logger
-from vcf_ops_telegraf_helper.models.vcf import AuthToken, CollectorInfo, VCFEnvironment
+from vcf_ops_telegraf_helper.models.vcf import AuthToken, CollectorInfo, VCFEnvironment, VirtualMachineResource
 
 logger = get_logger("vcf91")
+
+
+def get_default_ca_bundle(custom_path: Optional[str] = None) -> Any:
+    """Resolve TLS verification bundle checking custom path, env vars, and OS system store."""
+    if custom_path:
+        return custom_path
+    for env_var in ("REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE", "SSL_CERT_FILE"):
+        val = os.environ.get(env_var)
+        if val and os.path.exists(val):
+            return val
+    system_paths = [
+        "/etc/ssl/certs/ca-certificates.crt",
+        "/etc/pki/tls/certs/ca-bundle.crt",
+        "/etc/ssl/ca-bundle.pem",
+        "/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem",
+    ]
+    for p in system_paths:
+        if os.path.exists(p):
+            return p
+    return True
 
 
 class VCF91OpenTelegrafIntegration(VCFOpsIntegration):
@@ -28,7 +48,10 @@ class VCF91OpenTelegrafIntegration(VCFOpsIntegration):
         self.env = env
         self.base_url = env.url.rstrip("/")
         self.session = session or requests.Session()
-        self.session.verify = env.verify_ssl if env.ca_cert_path is None else env.ca_cert_path
+        if not env.verify_ssl:
+            self.session.verify = False
+        else:
+            self.session.verify = get_default_ca_bundle(env.ca_cert_path)
 
     def validate_connection(self) -> bool:
         """Verify reachability of VCF Operations Suite API."""
@@ -161,6 +184,39 @@ class VCF91OpenTelegrafIntegration(VCFOpsIntegration):
                     pass
 
         return False, None, None, None
+
+    def resolve_bound_vm(
+        self,
+        vm_mor: str,
+        vc_id: Optional[str] = None,
+    ) -> Tuple[bool, Optional[str], str, str]:
+        """Resolve an explicitly requested VM binding.
+
+        An explicit (vm_mor, vc_id) pair is trusted as given. A MOR alone is looked up
+        in inventory, since MORs are only unique within one vCenter.
+
+        Returns:
+            Tuple of (is_managed, vm_entity_name, vcid, vm_mor).
+        """
+        if vc_id:
+            return True, None, vc_id, vm_mor
+        candidates = [vm for vm in self.list_virtual_machines(strict=True) if vm.vm_mor == vm_mor]
+        matches = [vm for vm in candidates if vm.vc_id]
+        if not matches:
+            if candidates:
+                raise RuntimeError(
+                    f"Requested VM binding '{vm_mor}' is in VCF Operations inventory but has no vCenter ID; "
+                    "supply the vCenter ID as well."
+                )
+            raise RuntimeError(
+                f"Requested VM binding '{vm_mor}' was not found in VCF Operations inventory. "
+                "Check the MOR, or supply the vCenter ID as well."
+            )
+        if len({vm.vc_id for vm in matches}) > 1:
+            raise RuntimeError(
+                f"Requested VM binding '{vm_mor}' exists in more than one vCenter; supply the vCenter ID to choose one."
+            )
+        return True, matches[0].name, matches[0].vc_id, vm_mor
 
     def _extract_vm_identifiers(
         self,
@@ -524,6 +580,9 @@ class VCF91OpenTelegrafIntegration(VCFOpsIntegration):
         target_ip: Optional[str] = None,
         target_hostname: Optional[str] = None,
         target_uuid: Optional[str] = None,
+        existing_cert_bundle: Optional[Dict[str, Any]] = None,
+        vm_mor: Optional[str] = None,
+        vc_id: Optional[str] = None,
     ) -> IntegrationArtifacts:
         """Prepare tokens, URLs, mTLS client certificates, and metadata artifacts."""
         token = self.env.token
@@ -597,10 +656,11 @@ class VCF91OpenTelegrafIntegration(VCFOpsIntegration):
         # 1. Detect if target is a managed VM in VCF Operations
         is_managed = False
         vm_name = None
-        vm_mor = None
-        vc_id = None
 
-        if target_ip or target_hostname:
+        explicit_binding = bool(vm_mor)
+        if vm_mor:
+            is_managed, vm_name, vc_id, vm_mor = self.resolve_bound_vm(vm_mor, vc_id)
+        elif target_ip or target_hostname:
             is_managed, vm_name, vc_id, vm_mor = self.detect_managed_vm(target_ip, target_hostname)
 
         # 2. Determine clientId for certificate request
@@ -625,29 +685,49 @@ class VCF91OpenTelegrafIntegration(VCFOpsIntegration):
         logger.info("Resolved collector group name for %s: %s", collector_addr, collector_group)
 
         last_cert_err = None
-        try:
-            bundle = self.fetch_client_certificate_bundle(collector_group, client_id)
-            ca_cert_content = bundle.get("ca_cert")
-            client_cert_content = bundle.get("client_cert")
-            client_key_content = bundle.get("client_key")
-            master_pub_content = bundle.get("master_pub")
-            vip_content = bundle.get("vip")
-            mutual_auth = bundle.get("mutual_auth", True)
-        except Exception as e:
-            last_cert_err = e
-            # If collector group name failed and differs from collector_addr, try collector_addr
-            if collector_group != collector_addr:
-                try:
-                    bundle = self.fetch_client_certificate_bundle(collector_addr, client_id)
-                    ca_cert_content = bundle.get("ca_cert")
-                    client_cert_content = bundle.get("client_cert")
-                    client_key_content = bundle.get("client_key")
-                    master_pub_content = bundle.get("master_pub")
-                    vip_content = bundle.get("vip")
-                    mutual_auth = bundle.get("mutual_auth", True)
-                    last_cert_err = None
-                except Exception as inner_e:
-                    last_cert_err = inner_e
+        # Reuse only a cert issued for this client identity. Endpoints enrolled before the identity
+        # was recorded are reused as before, unless the caller explicitly binds a VM.
+        existing_id = (existing_cert_bundle or {}).get("client_id")
+        identity_ok = (existing_id == client_id) if existing_id else not explicit_binding
+        if not identity_ok and existing_cert_bundle:
+            logger.info("Existing certificate was issued for '%s', not '%s'; minting a new one", existing_id, client_id)
+        if (
+            identity_ok
+            and existing_cert_bundle
+            and existing_cert_bundle.get("client_cert")
+            and existing_cert_bundle.get("client_key")
+        ):
+            logger.info("Reusing existing client certificate bundle from target (idempotent run)")
+            ca_cert_content = existing_cert_bundle.get("ca_cert")
+            client_cert_content = existing_cert_bundle.get("client_cert")
+            client_key_content = existing_cert_bundle.get("client_key")
+            master_pub_content = existing_cert_bundle.get("master_pub")
+            vip_content = existing_cert_bundle.get("vip")
+            mutual_auth = existing_cert_bundle.get("mutual_auth", True)
+        else:
+            try:
+                bundle = self.fetch_client_certificate_bundle(collector_group, client_id)
+                ca_cert_content = bundle.get("ca_cert")
+                client_cert_content = bundle.get("client_cert")
+                client_key_content = bundle.get("client_key")
+                master_pub_content = bundle.get("master_pub")
+                vip_content = bundle.get("vip")
+                mutual_auth = bundle.get("mutual_auth", True)
+            except Exception as e:
+                last_cert_err = e
+                # Collector group name failed; retry by collector_addr when it differs
+                if collector_group != collector_addr:
+                    try:
+                        bundle = self.fetch_client_certificate_bundle(collector_addr, client_id)
+                        ca_cert_content = bundle.get("ca_cert")
+                        client_cert_content = bundle.get("client_cert")
+                        client_key_content = bundle.get("client_key")
+                        master_pub_content = bundle.get("master_pub")
+                        vip_content = bundle.get("vip")
+                        mutual_auth = bundle.get("mutual_auth", True)
+                        last_cert_err = None
+                    except Exception as inner_e:
+                        last_cert_err = inner_e
 
         if last_cert_err is not None:
             raise RuntimeError(
@@ -683,7 +763,8 @@ class VCF91OpenTelegrafIntegration(VCFOpsIntegration):
         """Check whether metrics for target are appearing in VCF Operations.
 
         Returns:
-            'PASS' if object found, 'UNKNOWN' if API cannot confirm yet, 'FAIL' if error.
+            'PASS' if object with stats found, 'PENDING' if enrolled but roll-up pending,
+            'UNKNOWN' if API cannot confirm yet, 'FAIL' if error.
         """
         if not self.env.token:
             return "UNKNOWN"
@@ -697,20 +778,133 @@ class VCF91OpenTelegrafIntegration(VCFOpsIntegration):
             if short_name != target_hostname:
                 candidates.append(short_name)
 
+        headers = {
+            "Accept": "application/json",
+            "Authorization": f"vRealizeOpsToken {self.env.token}",
+        }
+
         try:
             url = f"{self.base_url}/suite-api/api/resources"
-            headers = {
-                "Accept": "application/json",
-                "Authorization": f"vRealizeOpsToken {self.env.token}",
-            }
             for candidate in candidates:
-                params = {"name": candidate}
+                # Strictly query APPOSUCP: open-source Telegraf agents ingest exclusively under APPOSUCP.
+                # Querying VMWARE produces false positives by matching the vCenter hypervisor VM stats.
+                params = {"name": candidate, "adapterKind": "APPOSUCP"}
                 resp = self.session.get(url, headers=headers, params=params, timeout=10)
                 if resp.status_code == 200:
                     data = resp.json()
                     resource_list = data.get("resourceList", [])
                     if resource_list:
-                        return "PASS"
+                        res_id = resource_list[0].get("identifier")
+                        if res_id:
+                            stats_url = f"{self.base_url}/suite-api/api/resources/{res_id}/stats/latest"
+                            try:
+                                s_resp = self.session.get(stats_url, headers=headers, timeout=10)
+                                if s_resp.status_code == 200:
+                                    s_data = s_resp.json()
+                                    stat_values = s_data.get("values", [])
+                                    if stat_values:
+                                        return "PASS"
+                            except Exception:
+                                pass
+                        # Resource enrolled in VCF Ops APPOSUCP, metrics roll-up pending (5-15 min)
+                        return "PENDING"
             return "UNKNOWN"
         except Exception:
             return "UNKNOWN"
+
+    def list_virtual_machines(self, strict: bool = False) -> List[VirtualMachineResource]:
+        """Discover virtual machines from VCF Operations inventory.
+
+        With strict=True an API or authentication failure raises instead of returning a
+        partial list, so callers can tell "not in inventory" from "could not ask".
+        """
+        if not self.env.token and self.env.username and self.env.password:
+            try:
+                self.acquire_token(self.env.username, self.env.password)
+            except Exception:
+                pass
+        if not self.env.token:
+            if strict:
+                raise RuntimeError("Cannot query VCF Operations inventory: no API token (check credentials)")
+            return []
+
+        headers = {
+            "Accept": "application/json",
+            "Authorization": f"vRealizeOpsToken {self.env.token}",
+        }
+        url = f"{self.base_url}/suite-api/api/resources"
+        vms: List[VirtualMachineResource] = []
+        page = 0
+        page_size = 1000
+
+        while True:
+            params = {
+                "adapterKind": "VMWARE",
+                "resourceKind": "VirtualMachine",
+                "page": page,
+                "pageSize": page_size,
+            }
+            try:
+                resp = self.session.get(url, headers=headers, params=params, timeout=20)
+                if resp.status_code != 200:
+                    logger.warning("Suite API resource query failed on page %d with status %d", page, resp.status_code)
+                    if strict:
+                        raise RuntimeError(
+                            f"VCF Operations inventory query failed on page {page} with HTTP {resp.status_code}"
+                        )
+                    break
+
+                data = resp.json()
+                res_list = data.get("resourceList", [])
+                if not res_list:
+                    break
+
+                for res in res_list:
+                    res_id = res.get("identifier") or ""
+                    res_key = res.get("resourceKey", {})
+                    name = res_key.get("name") or "Unknown VM"
+                    _, vm_name, vcid, vm_mor = self._extract_vm_identifiers(res)
+
+                    ip_addr = None
+                    os_name = None
+                    for prop in res.get("resourceProperties", []):
+                        pname = prop.get("name")
+                        pval = prop.get("value")
+                        if pname in ("summary|guest|ipAddress", "guest|ipAddress"):
+                            ip_addr = pval
+                        elif pname in ("summary|guest|operatingSystem", "guest|operatingSystem"):
+                            os_name = pval
+
+                    os_fam = "WINDOWS" if os_name and "windows" in os_name.lower() else "LINUX"
+
+                    vms.append(
+                        VirtualMachineResource(
+                            resource_id=res_id,
+                            name=vm_name or name,
+                            ip_address=ip_addr,
+                            vm_mor=vm_mor,
+                            vc_id=vcid,
+                            os_name=os_name,
+                            os_family=os_fam,
+                            collector_group=self.env.collector.name or "Default Collector Group",
+                            telegraf_status="MISSING",
+                        )
+                    )
+
+                page_info = data.get("pageInfo", {})
+                total_count = page_info.get("totalCount")
+                if total_count is not None and len(vms) >= total_count:
+                    break
+                if len(res_list) < page_size:
+                    break
+                page += 1
+            except Exception as exc:
+                if strict:
+                    if isinstance(exc, RuntimeError) and "inventory query failed" in str(exc):
+                        raise
+                    raise RuntimeError(f"VCF Operations inventory query failed on page {page}: {exc}") from exc
+                logger.warning("Failed to list virtual machines on page %d from VCF Operations: %s", page, exc)
+                break
+
+        return vms
+

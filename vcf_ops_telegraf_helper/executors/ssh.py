@@ -9,6 +9,10 @@ from typing import Optional, Union
 import paramiko
 
 from vcf_ops_telegraf_helper.executors.base import CommandResult, EndpointExecutor
+from vcf_ops_telegraf_helper.models.discovery import (
+    DiscoveredDatabase,
+    DiscoveredService,
+)
 
 
 class SSHExecutor(EndpointExecutor):
@@ -178,6 +182,71 @@ class SSHExecutor(EndpointExecutor):
         except IOError:
             return False
 
+    def discover_services(self) -> list[DiscoveredService]:
+        """Discover running systemd services on Linux endpoint."""
+        res = self.execute("systemctl list-units --type=service --state=running --no-legend --no-pager", timeout=15)
+        if not res.success or not res.stdout.strip():
+            return []
+
+        services: list[DiscoveredService] = []
+        for line in res.stdout.splitlines():
+            parts = line.strip().split()
+            if len(parts) >= 4:
+                unit = parts[0].replace(".service", "")
+                desc = " ".join(parts[4:]) if len(parts) > 4 else ""
+                services.append(DiscoveredService(
+                    name=unit,
+                    display_name=desc or unit,
+                    status="Running",
+                    start_type="Automatic",
+                ))
+        return services
+
+    def discover_databases(
+        self,
+        db_type: str = "postgresql",
+        auth_mode: str = "integrated",
+        username: Optional[str] = None,
+        password: Optional[str] = None,
+        port: int = 5432,
+    ) -> list[DiscoveredDatabase]:
+        """Discover database catalogs on Linux endpoint."""
+        dbs: list[DiscoveredDatabase] = []
+        if db_type.lower() in ("postgresql", "postgres"):
+            cmd = "sudo -u postgres psql -t -A -c \"SELECT datname FROM pg_database WHERE datistemplate = false\""
+            res = self.execute(cmd, timeout=10)
+            if res.success and res.stdout.strip():
+                for line in res.stdout.splitlines():
+                    name = line.strip()
+                    if name:
+                        dbs.append(DiscoveredDatabase(
+                            name=name,
+                            state="ONLINE",
+                            db_type="system" if name == "postgres" else "user",
+                        ))
+        elif db_type.lower() in ("mysql", "mariadb"):
+            cmd = "mysql -N -e 'SHOW DATABASES;'"
+            res = self.execute(cmd, timeout=10)
+            if res.success and res.stdout.strip():
+                for line in res.stdout.splitlines():
+                    name = line.strip()
+                    if name and name not in ("information_schema", "performance_schema"):
+                        dbs.append(DiscoveredDatabase(
+                            name=name,
+                            state="ONLINE",
+                            db_type="system" if name in ("mysql", "sys") else "user",
+                        ))
+        return dbs
+
+    def get_free_disk_space_mb(self, path: Optional[str] = None) -> int:
+        """Return free disk space in megabytes on target Linux filesystem."""
+        check_path = path or "/"
+        cmd = f"p={shlex.quote(check_path)}; if [ ! -e \"$p\" ]; then p=\"/\"; fi; df -m -P \"$p\" | awk 'NR>1 {{print $4}}'"
+        res = self.execute(cmd, timeout=10)
+        if res.success and res.stdout.strip().isdigit():
+            return int(res.stdout.strip())
+        return 1000
+
     def close(self) -> None:
         if self._sftp is not None:
             try:
@@ -191,3 +260,4 @@ class SSHExecutor(EndpointExecutor):
             except Exception:
                 pass
             self._client = None
+

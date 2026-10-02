@@ -5,6 +5,7 @@ from __future__ import annotations
 from unittest.mock import MagicMock, patch
 import pytest
 
+from vcf_ops_telegraf_helper.executors.base import CommandResult
 from vcf_ops_telegraf_helper.executors.ssh import SSHExecutor
 
 
@@ -218,3 +219,21 @@ def test_ssh_executor_key_filename_tilde_expansion():
     executor = SSHExecutor(hostname="linux.local", key_filename="~/.ssh/custom_key")
     expected = os.path.expanduser("~/.ssh/custom_key")
     assert executor.key_filename == expected
+
+
+def test_ssh_executor_get_free_disk_space_mb_fallback():
+    """Verify get_free_disk_space_mb executes df -m -P with root fallback."""
+    executor = SSHExecutor(hostname="linux.local", username="scott")
+    mock_client = MagicMock()
+    mock_stdout = MagicMock()
+    mock_stdout.channel.recv_exit_status.return_value = 0
+    mock_stdout.read.return_value = b"Filesystem 1048576 524288 524288 50% /\n"
+    mock_stderr = MagicMock()
+    mock_stderr.read.return_value = b""
+    mock_client.exec_command.return_value = (MagicMock(), mock_stdout, mock_stderr)
+    executor._client = mock_client
+
+    with patch.object(executor, "execute", return_value=CommandResult(exit_code=0, stdout="1500\n", command="cmd")):
+        free_mb = executor.get_free_disk_space_mb("/etc/telegraf")
+
+    assert free_mb == 1500

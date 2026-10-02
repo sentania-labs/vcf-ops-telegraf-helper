@@ -3,8 +3,14 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Union
+from typing import Optional, Union
 from pydantic import BaseModel, Field
+
+from vcf_ops_telegraf_helper.models.discovery import (
+    DiscoveredDatabase,
+    DiscoveredPerfmonSet,
+    DiscoveredService,
+)
 
 
 class CommandResult(BaseModel):
@@ -49,6 +55,30 @@ class EndpointExecutor(ABC):
         """Check if a file exists on the target."""
         pass
 
+    def discover_services(self) -> list[DiscoveredService]:
+        """Discover installed or running services on endpoint."""
+        return []
+
+    def discover_perfmon_sets(self) -> list[DiscoveredPerfmonSet]:
+        """Discover Windows Perfmon counter sets on endpoint."""
+        return []
+
+    def discover_databases(
+        self,
+        db_type: str = "mssql",
+        auth_mode: str = "integrated",
+        username: Optional[str] = None,
+        password: Optional[str] = None,
+        port: int = 1433,
+    ) -> list[DiscoveredDatabase]:
+        """Discover database catalogs on endpoint."""
+        return []
+
+    def get_free_disk_space_mb(self, path: Optional[str] = None) -> int:
+        """Return free disk space in megabytes on target volume."""
+        return 1000
+
     def close(self) -> None:
         """Clean up any active network sessions or resources."""
         pass
+

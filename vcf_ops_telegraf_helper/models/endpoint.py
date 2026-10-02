@@ -41,6 +41,8 @@ class EndpointTarget(BaseModel):
     install_telegraf: bool = Field(default=False, description="Install Telegraf agent if missing")
     telegraf_version: Optional[str] = Field(default=None, description="Telegraf version release to install")
     registered_hostname: Optional[str] = Field(default=None, description="Explicit hostname for VCF Operations registration (overrides discovery)")
+    vm_mor: Optional[str] = Field(default=None, description="vCenter VM MOR, e.g. vm-1042")
+    vc_id: Optional[str] = Field(default=None, description="vCenter instance UUID")
 
     @model_validator(mode="after")
     def set_winrm_default_port(self) -> EndpointTarget:

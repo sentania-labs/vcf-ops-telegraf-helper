@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Optional
+from typing import Any, Optional
 from pydantic import BaseModel, Field
 
-from vcf_ops_telegraf_helper.models.vcf import AuthToken, CollectorInfo
+from vcf_ops_telegraf_helper.models.vcf import AuthToken, CollectorInfo, VirtualMachineResource
 
 
 class IntegrationArtifacts(BaseModel):
@@ -63,8 +63,15 @@ class VCFOpsIntegration(ABC):
         target_ip: Optional[str] = None,
         target_hostname: Optional[str] = None,
         target_uuid: Optional[str] = None,
+        existing_cert_bundle: Optional[dict[str, Any]] = None,
+        vm_mor: Optional[str] = None,
+        vc_id: Optional[str] = None,
     ) -> IntegrationArtifacts:
-        """Prepare tokens, URLs, and artifacts for the open-source Telegraf workflow."""
+        """Prepare tokens, URLs, and artifacts for the open-source Telegraf workflow.
+
+        When vm_mor is supplied the endpoint is bound to that vCenter VM instead of
+        being matched by IP or hostname. vc_id is resolved from inventory if omitted.
+        """
         pass
 
     @abstractmethod
@@ -75,3 +82,9 @@ class VCFOpsIntegration(ABC):
             One of: 'PASS', 'UNKNOWN', 'FAIL'.
         """
         pass
+
+    @abstractmethod
+    def list_virtual_machines(self, strict: bool = False) -> list[VirtualMachineResource]:
+        """Discover virtual machines from VCF Operations inventory."""
+        pass
+

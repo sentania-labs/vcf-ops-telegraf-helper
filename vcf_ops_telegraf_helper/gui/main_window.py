@@ -18,6 +18,7 @@ from typing import Any, Optional
 from PySide6.QtCore import QObject, QThread, QTimer, Signal, Qt
 from PySide6.QtWidgets import (
     QApplication,
+    QButtonGroup,
     QCheckBox,
     QComboBox,
     QDialog,
@@ -26,6 +27,7 @@ from PySide6.QtWidgets import (
     QFrame,
     QGridLayout,
     QHBoxLayout,
+    QHeaderView,
     QLabel,
     QLineEdit,
     QListWidget,
@@ -34,8 +36,12 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
+    QRadioButton,
     QScrollArea,
     QStackedWidget,
+    QTableWidget,
+    QTableWidgetItem,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -74,7 +80,11 @@ from vcf_ops_telegraf_helper.models.monitoring import (
     WinPerfCountersInputConfig,
     WinServicesInputConfig,
 )
-from vcf_ops_telegraf_helper.models.vcf import CollectorInfo, VCFEnvironment
+from vcf_ops_telegraf_helper.models.vcf import (
+    CollectorInfo,
+    VCFEnvironment,
+    VirtualMachineResource,
+)
 from vcf_ops_telegraf_helper.models.workflow import (
     DeploymentMode,
     RunSummary,
@@ -88,6 +98,12 @@ from vcf_ops_telegraf_helper.renderer.renderer import TelegrafRenderer
 from vcf_ops_telegraf_helper.storage.state import StateStore
 from vcf_ops_telegraf_helper.workflow.engine import ConfigureEndpointWorkflow
 from vcf_ops_telegraf_helper.workflow.uninstall import UninstallEndpointWorkflow
+from vcf_ops_telegraf_helper.gui.discovery_dialogs import (
+    DatabaseConnectDialog,
+    DatabaseDiscoveryDialog,
+    PerfmonDiscoveryDialog,
+    ServicesDiscoveryDialog,
+)
 
 
 class QtProgressReporter:
@@ -185,6 +201,12 @@ class MainWindow(QMainWindow):
         self.uninstall_worker: Optional[UninstallWorker] = None
         self.logger = get_logger("gui")
         self._updating_catalog = False
+        self._cached_vms: list[VirtualMachineResource] = []
+        self.selected_vm: Optional[VirtualMachineResource] = None
+        self.selected_vm_mor: Optional[str] = None
+        self.bound_vm: Optional[VirtualMachineResource] = None
+        self.selected_vc_id: Optional[str] = None
+        self.selected_vm_name: Optional[str] = None
 
         self.setWindowTitle("VCF Operations Open Telegraf Helper")
         self.resize(1150, 840)
@@ -408,6 +430,19 @@ class MainWindow(QMainWindow):
         self.vcf_ssl_check.setChecked(True)
         c_layout.addWidget(self.vcf_ssl_check)
 
+        ca_row = QHBoxLayout()
+        ca_row.setSpacing(8)
+        ca_label = QLabel("Enterprise CA Bundle (optional):")
+        self.vcf_ca_input = QLineEdit()
+        self.vcf_ca_input.setPlaceholderText("Path to custom CA certificate bundle (e.g. /etc/ssl/certs/lab-ca.pem)")
+        self.vcf_ca_browse_btn = QPushButton("Browse...")
+        self.vcf_ca_browse_btn.setProperty("class", "secondary")
+        self.vcf_ca_browse_btn.clicked.connect(self._browse_ca_cert)
+        ca_row.addWidget(ca_label)
+        ca_row.addWidget(self.vcf_ca_input, 1)
+        ca_row.addWidget(self.vcf_ca_browse_btn)
+        c_layout.addLayout(ca_row)
+
         test_row = QHBoxLayout()
         self.test_vcf_btn = QPushButton("Validate VCF Connection")
         self.test_vcf_btn.clicked.connect(self._test_vcf_connection)
@@ -480,17 +515,112 @@ class MainWindow(QMainWindow):
         c_layout = QVBoxLayout(card)
         c_layout.setSpacing(12)
 
-        lbl = QLabel("STEP 2: ENDPOINT TARGET & DETECTION")
+        lbl = QLabel("STEP 2: ENDPOINT TARGET & INVENTORY")
         lbl.setProperty("class", "lattice-section-label")
         c_layout.addWidget(lbl)
 
         desc = QLabel(
-            "Define the host where open-source Telegraf is or will be running. "
+            "Select a target host from VCF Operations inventory or configure an endpoint directly. "
             "The helper will detect OS, architecture, existing Telegraf version, and service state."
         )
         desc.setProperty("class", "lattice-muted")
         desc.setWordWrap(True)
         c_layout.addWidget(desc)
+
+        # Tabs for Step 2: Inventory Browser vs Manual Target Entry
+        self.step2_tabs = QTabWidget()
+        self.step2_tabs.setProperty("class", "lattice-card")
+
+        # ----------------------------------------------------------------------
+        # Tab 0: VCF Inventory Browser
+        # ----------------------------------------------------------------------
+        inv_tab = QWidget()
+        inv_layout = QVBoxLayout(inv_tab)
+        inv_layout.setContentsMargins(12, 12, 12, 12)
+        inv_layout.setSpacing(10)
+
+        # Filter bar
+        filter_row = QHBoxLayout()
+        filter_row.setSpacing(8)
+
+        self.vm_search_input = QLineEdit()
+        self.vm_search_input.setPlaceholderText("Filter VMs by name or IP...")
+        self.vm_search_input.textChanged.connect(self._filter_vm_table)
+        filter_row.addWidget(self.vm_search_input, 2)
+
+        self.vm_os_filter = QComboBox()
+        self.vm_os_filter.addItems(["All OS Families", "Windows", "Linux"])
+        self.vm_os_filter.currentTextChanged.connect(self._filter_vm_table)
+        filter_row.addWidget(self.vm_os_filter, 1)
+
+        self.vm_cg_filter = QComboBox()
+        self.vm_cg_filter.addItem("All Collector Groups")
+        self.vm_cg_filter.currentTextChanged.connect(self._filter_vm_table)
+        filter_row.addWidget(self.vm_cg_filter, 1)
+
+        self.vm_status_filter = QComboBox()
+        self.vm_status_filter.addItems(["All Agent States", "Installed", "Not Installed", "Unknown"])
+        self.vm_status_filter.currentTextChanged.connect(self._filter_vm_table)
+        filter_row.addWidget(self.vm_status_filter, 1)
+
+        self.fetch_vms_btn = QPushButton("Query VCF Inventory")
+        self.fetch_vms_btn.setProperty("class", "secondary")
+        self.fetch_vms_btn.clicked.connect(self._fetch_vcf_inventory)
+        filter_row.addWidget(self.fetch_vms_btn)
+
+        self.vm_count_label = QLabel("0 VMs")
+        self.vm_count_label.setProperty("class", "lattice-caption")
+        filter_row.addWidget(self.vm_count_label)
+
+        inv_layout.addLayout(filter_row)
+
+        # VM Table
+        self.vm_table = QTableWidget()
+        self.vm_table.setColumnCount(6)
+        self.vm_table.setHorizontalHeaderLabels([
+            "VM Name", "IP Address", "OS Family", "VM MOR", "Collector Group", "Agent Status"
+        ])
+        self.vm_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        self.vm_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        self.vm_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        self.vm_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        self.vm_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeToContents)
+        self.vm_table.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeToContents)
+        self.vm_table.verticalHeader().setVisible(False)
+        self.vm_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.vm_table.setSelectionMode(QTableWidget.SingleSelection)
+        self.vm_table.setMinimumHeight(240)
+        self.vm_table.itemSelectionChanged.connect(self._on_vm_row_selected)
+        self.vm_table.cellDoubleClicked.connect(self._on_vm_double_clicked)
+        inv_layout.addWidget(self.vm_table, 1)
+
+        # Selected VM Inspector
+        self.vm_inspector = QFrame()
+        self.vm_inspector.setProperty("class", "lattice-card")
+        vi_layout = QHBoxLayout(self.vm_inspector)
+        vi_layout.setContentsMargins(10, 8, 10, 8)
+        vi_layout.setSpacing(12)
+
+        self.vm_inspector_label = QLabel("No VM selected. Click a row to bind target.")
+        self.vm_inspector_label.setProperty("class", "lattice-caption")
+        vi_layout.addWidget(self.vm_inspector_label, 1)
+
+        self.btn_select_vm = QPushButton("Use Selected VM ->")
+        self.btn_select_vm.setProperty("class", "primary")
+        self.btn_select_vm.setEnabled(False)
+        self.btn_select_vm.clicked.connect(self._apply_selected_vm_to_form)
+        vi_layout.addWidget(self.btn_select_vm)
+
+        inv_layout.addWidget(self.vm_inspector)
+        self.step2_tabs.addTab(inv_tab, "VCF Operations Inventory")
+
+        # ----------------------------------------------------------------------
+        # Tab 1: Manual / Target Host Details
+        # ----------------------------------------------------------------------
+        manual_tab = QWidget()
+        manual_layout = QVBoxLayout(manual_tab)
+        manual_layout.setContentsMargins(12, 12, 12, 12)
+        manual_layout.setSpacing(10)
 
         grid = QGridLayout()
         grid.setSpacing(10)
@@ -506,28 +636,41 @@ class MainWindow(QMainWindow):
         self.ep_host_input.textChanged.connect(self._on_target_host_changed)
         grid.addWidget(self.ep_host_input, 1, 1)
 
+        grid.addWidget(QLabel("vCenter VM Binding:"), 2, 0)
+        self.ep_mor_badge = QLabel("Unmanaged host (not bound to vCenter VM)")
+        self.ep_mor_badge.setProperty("class", "lattice-caption")
+        grid.addWidget(self.ep_mor_badge, 2, 1)
+
+        # Linux authentication radio toggle
         self.ep_auth_type_label = QLabel("Authentication:")
-        self.ep_auth_type_combo = QComboBox()
-        self.ep_auth_type_combo.addItems(["SSH Private Key", "Username & Password"])
-        self.ep_auth_type_combo.currentTextChanged.connect(self._on_auth_type_changed)
-        grid.addWidget(self.ep_auth_type_label, 2, 0)
-        grid.addWidget(self.ep_auth_type_combo, 2, 1)
+        self.ep_auth_radio_widget = QWidget()
+        ar_layout = QHBoxLayout(self.ep_auth_radio_widget)
+        ar_layout.setContentsMargins(0, 0, 0, 0)
+        ar_layout.setSpacing(16)
+        self.ep_auth_radio_pass = QRadioButton("Password")
+        self.ep_auth_radio_key = QRadioButton("SSH Private Key")
+        self.ep_auth_radio_pass.setChecked(True)
+        self.ep_auth_group = QButtonGroup(self)
+        self.ep_auth_group.addButton(self.ep_auth_radio_pass)
+        self.ep_auth_group.addButton(self.ep_auth_radio_key)
+        self.ep_auth_radio_pass.toggled.connect(self._on_auth_radio_toggled)
+        self.ep_auth_radio_key.toggled.connect(self._on_auth_radio_toggled)
+        ar_layout.addWidget(self.ep_auth_radio_pass)
+        ar_layout.addWidget(self.ep_auth_radio_key)
+        ar_layout.addStretch()
+        grid.addWidget(self.ep_auth_type_label, 3, 0)
+        grid.addWidget(self.ep_auth_radio_widget, 3, 1)
 
         self.ep_user_label = QLabel("Username:")
         self.ep_user_input = QLineEdit("root")
-        grid.addWidget(self.ep_user_label, 3, 0)
-        grid.addWidget(self.ep_user_input, 3, 1)
+        grid.addWidget(self.ep_user_label, 4, 0)
+        grid.addWidget(self.ep_user_input, 4, 1)
 
         self.ep_pass_label = QLabel("Password:")
         self.ep_pass_input = QLineEdit()
         self.ep_pass_input.setEchoMode(QLineEdit.Password)
-        grid.addWidget(self.ep_pass_label, 4, 0)
-        grid.addWidget(self.ep_pass_input, 4, 1)
-
-        self.ep_key_label = QLabel("SSH Key Path:")
-        self.ep_key_input = QLineEdit("~/.ssh/id_rsa")
-        grid.addWidget(self.ep_key_label, 5, 0)
-        grid.addWidget(self.ep_key_input, 5, 1)
+        grid.addWidget(self.ep_pass_label, 5, 0)
+        grid.addWidget(self.ep_pass_input, 5, 1)
 
         self.ep_advanced_check = QCheckBox("Show advanced connection options")
         self.ep_advanced_check.setChecked(False)
@@ -541,36 +684,28 @@ class MainWindow(QMainWindow):
         grid.addWidget(self.ep_port_label, 7, 0)
         grid.addWidget(self.ep_port_input, 7, 1)
 
-        self.ep_auto_install_check = QCheckBox("Install open-source Telegraf agent if missing (InfluxData official distribution)")
-        self.ep_auto_install_check.setChecked(True)
-        grid.addWidget(self.ep_auto_install_check, 8, 0, 1, 2)
-
-        ver_row = QHBoxLayout()
-        ver_row.setContentsMargins(0, 0, 0, 0)
-        self.ep_version_label = QLabel("Telegraf Version:")
-        self.ep_version_label.setStyleSheet("font-size: 12px; margin-left: 20px;")
+        # Telegraf version selection replacing redundant checkbox
+        grid.addWidget(QLabel("Telegraf Distribution:"), 8, 0)
         self.ep_version_combo = QComboBox()
         self.ep_version_combo.setEditable(True)
-        self.ep_version_combo.setMinimumWidth(400)
+        self.ep_version_combo.setMinimumWidth(380)
         self.ep_version_combo.addItems([
-            "1.40.1 (Latest Stable - Recommended)",
-            "1.34.0 (1.34 Series)",
-            "1.32.1 (1.32 Series)",
-            "1.30.0 (1.30 Series)",
+            "Auto-install Official 1.40.1 (Latest Stable - Recommended)",
+            "Auto-install Official 1.34.0 (1.34 Series)",
+            "Auto-install Official 1.32.1 (1.32 Series)",
+            "Auto-install Official 1.30.0 (1.30 Series)",
+            "Do Not Install (Use Existing Host Agent)",
         ])
         self.ep_version_combo.setCurrentIndex(0)
         if self.ep_version_combo.lineEdit():
             self.ep_version_combo.lineEdit().setCursorPosition(0)
         self.ep_version_combo.currentIndexChanged.connect(self._on_version_combo_changed)
-        self.ep_version_combo.setToolTip("Select a release family or enter a specific release version (e.g. 1.40.1)")
-        ver_row.addWidget(self.ep_version_label)
-        ver_row.addWidget(self.ep_version_combo)
-        ver_row.addStretch()
-        grid.addLayout(ver_row, 9, 0, 1, 2)
+        grid.addWidget(self.ep_version_combo, 8, 1)
 
-        self.ep_auto_install_check.toggled.connect(self._on_auto_install_toggled)
+        manual_layout.addLayout(grid)
+        self.step2_tabs.addTab(manual_tab, "Target Host Configuration")
+        c_layout.addWidget(self.step2_tabs)
 
-        c_layout.addLayout(grid)
         self._update_auth_and_endpoint_visibility()
 
         # Missing agent guidance banner
@@ -586,7 +721,7 @@ class MainWindow(QMainWindow):
         mb_title.setStyleSheet("font-weight: 600; color: #d97706; font-size: 13px;")
         mb_desc = QLabel(
             "This endpoint does not currently have Telegraf installed. "
-            "Keep 'Install open-source Telegraf agent' enabled to automatically download and register "
+            "Select an 'Auto-install' release family to automatically download and register "
             "the official InfluxData agent before applying VCF Operations monitoring."
         )
         mb_desc.setProperty("class", "lattice-muted")
@@ -651,28 +786,198 @@ class MainWindow(QMainWindow):
         is_win = self.ep_os_combo.currentText().lower().startswith("win")
 
         if is_win:
-            self.ep_auth_type_label.setVisible(False)
-            self.ep_auth_type_combo.setVisible(False)
-            self.ep_key_label.setVisible(False)
-            self.ep_key_input.setVisible(False)
-            self.ep_key_label.setEnabled(False)
-            self.ep_key_input.setEnabled(False)
-            self.ep_pass_label.setVisible(True)
-            self.ep_pass_input.setVisible(True)
-            self.ep_user_label.setVisible(True)
-            self.ep_user_input.setVisible(True)
+            if hasattr(self, "ep_auth_type_label"):
+                self.ep_auth_type_label.setVisible(False)
+            if hasattr(self, "ep_auth_radio_widget"):
+                self.ep_auth_radio_widget.setVisible(False)
+            if hasattr(self, "ep_pass_label"):
+                self.ep_pass_label.setText("Password:")
+            if hasattr(self, "ep_pass_input"):
+                self.ep_pass_input.setEchoMode(QLineEdit.Password)
+                self.ep_pass_input.setPlaceholderText("Enter WinRM password")
+            if hasattr(self, "ep_user_label"):
+                self.ep_user_label.setVisible(True)
+            if hasattr(self, "ep_user_input"):
+                self.ep_user_input.setVisible(True)
         else:
-            self.ep_auth_type_label.setVisible(True)
-            self.ep_auth_type_combo.setVisible(True)
-            self.ep_user_label.setVisible(True)
-            self.ep_user_input.setVisible(True)
-            use_key = hasattr(self, "ep_auth_type_combo") and "key" in self.ep_auth_type_combo.currentText().lower()
-            self.ep_key_label.setVisible(use_key)
-            self.ep_key_input.setVisible(use_key)
-            self.ep_key_label.setEnabled(use_key)
-            self.ep_key_input.setEnabled(use_key)
-            self.ep_pass_label.setVisible(not use_key)
-            self.ep_pass_input.setVisible(not use_key)
+            if hasattr(self, "ep_auth_type_label"):
+                self.ep_auth_type_label.setVisible(True)
+            if hasattr(self, "ep_auth_radio_widget"):
+                self.ep_auth_radio_widget.setVisible(True)
+            use_key = hasattr(self, "ep_auth_radio_key") and self.ep_auth_radio_key.isChecked()
+            if hasattr(self, "ep_pass_label"):
+                self.ep_pass_label.setText("SSH Key Path:" if use_key else "Password:")
+            if hasattr(self, "ep_pass_input"):
+                self.ep_pass_input.setEchoMode(QLineEdit.Normal if use_key else QLineEdit.Password)
+                self.ep_pass_input.setPlaceholderText("~/.ssh/id_rsa" if use_key else "Enter SSH password")
+            if hasattr(self, "ep_user_label"):
+                self.ep_user_label.setVisible(True)
+            if hasattr(self, "ep_user_input"):
+                self.ep_user_input.setVisible(True)
+
+    def _on_auth_radio_toggled(self) -> None:
+        if hasattr(self, "ep_pass_input"):
+            self.ep_pass_input.clear()
+        self._update_auth_and_endpoint_visibility()
+
+    def _fetch_vcf_inventory(self) -> None:
+        self.fetch_vms_btn.setEnabled(False)
+        self.fetch_vms_btn.setText("Querying Inventory...")
+        self.vm_count_label.setText("Querying VCF Operations...")
+        try:
+            env = self._get_vcf_env()
+            adapter = get_adapter(env)
+            self._cached_vms = adapter.list_virtual_machines()
+            self._populate_vm_table(self._cached_vms)
+            self._update_cg_filter_options(self._cached_vms)
+            self.vm_count_label.setText(f"{len(self._cached_vms)} VMs loaded")
+            self.logger.info("Retrieved %d VMs from VCF Operations inventory", len(self._cached_vms))
+        except Exception as exc:
+            self.vm_count_label.setText(f"Query error: {exc}")
+            self.logger.warning("Failed to retrieve VM inventory: %s", exc)
+        finally:
+            self.fetch_vms_btn.setEnabled(True)
+            self.fetch_vms_btn.setText("Query VCF Inventory")
+
+    def _update_cg_filter_options(self, vms: list[VirtualMachineResource]) -> None:
+        if not hasattr(self, "vm_cg_filter"):
+            return
+        current_cg = self.vm_cg_filter.currentText()
+        cgs = sorted({vm.collector_group for vm in vms if vm.collector_group})
+        self.vm_cg_filter.blockSignals(True)
+        self.vm_cg_filter.clear()
+        self.vm_cg_filter.addItem("All Collector Groups")
+        for cg in cgs:
+            self.vm_cg_filter.addItem(cg)
+        idx = self.vm_cg_filter.findText(current_cg)
+        if idx >= 0:
+            self.vm_cg_filter.setCurrentIndex(idx)
+        self.vm_cg_filter.blockSignals(False)
+
+    def _populate_vm_table(self, vms: list[VirtualMachineResource]) -> None:
+        self.vm_table.setSortingEnabled(False)
+        self.vm_table.setRowCount(len(vms))
+        for row, vm in enumerate(vms):
+            name_item = QTableWidgetItem(vm.name)
+            name_item.setData(Qt.UserRole, vm)
+            self.vm_table.setItem(row, 0, name_item)
+
+            ip_item = QTableWidgetItem(vm.ip_address or "N/A")
+            self.vm_table.setItem(row, 1, ip_item)
+
+            os_item = QTableWidgetItem(vm.os_family.capitalize())
+            self.vm_table.setItem(row, 2, os_item)
+
+            mor_item = QTableWidgetItem(vm.vm_mor or "N/A")
+            self.vm_table.setItem(row, 3, mor_item)
+
+            cg_item = QTableWidgetItem(vm.collector_group or "Default")
+            self.vm_table.setItem(row, 4, cg_item)
+
+            st_item = QTableWidgetItem(vm.telegraf_status or "Unknown")
+            if vm.telegraf_status == "Installed":
+                st_item.setForeground(Qt.darkGreen)
+            elif vm.telegraf_status == "Not Installed":
+                st_item.setForeground(Qt.darkYellow)
+            self.vm_table.setItem(row, 5, st_item)
+        self.vm_table.setSortingEnabled(True)
+
+    def _filter_vm_table(self) -> None:
+        if not hasattr(self, "_cached_vms") or not self._cached_vms:
+            return
+        query = self.vm_search_input.text().strip().lower()
+        os_filter = self.vm_os_filter.currentText().lower()
+        cg_filter = self.vm_cg_filter.currentText().lower()
+        status_filter = self.vm_status_filter.currentText().lower()
+
+        total = self.vm_table.rowCount()
+        visible_count = 0
+        for row in range(total):
+            item = self.vm_table.item(row, 0)
+            vm = item.data(Qt.UserRole) if item else None
+            if not vm:
+                continue
+            show = True
+            if query and query not in vm.name.lower() and query not in (vm.ip_address or "").lower() and query not in (vm.vm_mor or "").lower():
+                show = False
+            elif "win" in os_filter and vm.os_family.lower() != "windows":
+                show = False
+            elif "lin" in os_filter and vm.os_family.lower() != "linux":
+                show = False
+            elif cg_filter != "all collector groups" and cg_filter != (vm.collector_group or "").lower():
+                show = False
+            elif status_filter != "all agent states":
+                st = (vm.telegraf_status or "").lower()
+                if "not" in status_filter or "missing" in status_filter:
+                    if "not" not in st and "missing" not in st:
+                        show = False
+                elif "installed" in status_filter or "active" in status_filter:
+                    if ("installed" not in st and "active" not in st) or "not" in st:
+                        show = False
+                elif "unknown" in status_filter:
+                    if st not in ("unknown", "n/a", ""):
+                        show = False
+            self.vm_table.setRowHidden(row, not show)
+            if show:
+                visible_count += 1
+        self.vm_count_label.setText(f"{visible_count} / {len(self._cached_vms)} VMs")
+
+    def _on_vm_row_selected(self) -> None:
+        items = self.vm_table.selectedItems()
+        if not items:
+            self.btn_select_vm.setEnabled(False)
+            self.vm_inspector_label.setText("No VM selected. Click a row to bind target.")
+            return
+        row = items[0].row()
+        item0 = self.vm_table.item(row, 0)
+        if not item0:
+            return
+        vm: Optional[VirtualMachineResource] = item0.data(Qt.UserRole)
+        if not vm:
+            return
+        self.selected_vm = vm
+        self.btn_select_vm.setEnabled(True)
+        self._update_vm_inspector(vm)
+
+    def _update_vm_inspector(self, vm: VirtualMachineResource) -> None:
+        cg_str = vm.collector_group or "Auto-assign"
+        mor_str = vm.vm_mor or "N/A"
+        vcid_str = vm.vc_id or "N/A"
+        txt = (
+            f"Selected: {vm.name} ({vm.ip_address or 'No IP'}) | OS: {vm.os_family.capitalize()} | "
+            f"MOR: {mor_str} | VCID: {vcid_str} | Collector Group: {cg_str} | Agent: {vm.telegraf_status}"
+        )
+        self.vm_inspector_label.setText(txt)
+
+    def _on_vm_double_clicked(self, row: int, col: int) -> None:
+        self._on_vm_row_selected()
+        self._apply_selected_vm_to_form()
+
+    def _apply_selected_vm_to_form(self) -> None:
+        if not self.selected_vm:
+            return
+        vm = self.selected_vm
+        self.bound_vm = vm
+        self.selected_vm_mor = vm.vm_mor
+        self.selected_vc_id = vm.vc_id
+        self.selected_vm_name = vm.name
+
+        self.ep_host_input.setText(vm.ip_address or vm.name)
+        if vm.os_family.lower() == "windows":
+            self.ep_os_combo.setCurrentText("Windows")
+        else:
+            self.ep_os_combo.setCurrentText("Linux")
+
+        if vm.collector_group and hasattr(self, "vcf_collector_group_input"):
+            self.vcf_collector_group_input.setText(vm.collector_group)
+
+        if hasattr(self, "ep_mor_badge"):
+            mor_display = f"Bound to vCenter VM: {vm.vm_mor} (vCenter ID: {vm.vc_id or 'auto'})"
+            self.ep_mor_badge.setText(mor_display)
+            self.ep_mor_badge.setStyleSheet("color: #199e70; font-weight: 600;")
+
+        self.step2_tabs.setCurrentIndex(1)
+        self.logger.info("Applied VM %s (%s) to target configuration", vm.name, vm.vm_mor)
 
     def _update_vcf_auth_visibility(self) -> None:
         if not hasattr(self, "vcf_auth_type_combo"):
@@ -697,9 +1002,20 @@ class MainWindow(QMainWindow):
             self.ep_details_box.setPlainText("Endpoint details will appear here after detection.")
         if hasattr(self, "ep_missing_banner"):
             self.ep_missing_banner.setVisible(False)
+        # Compare against the VM actually applied to the form, not the row merely highlighted
+        bound_vm = getattr(self, "bound_vm", None)
+        if bound_vm and text.strip() not in (bound_vm.ip_address, bound_vm.name):
+            self.bound_vm = None
+            self.selected_vm_mor = None
+            self.selected_vc_id = None
+            self.selected_vm_name = None
+            if hasattr(self, "ep_mor_badge"):
+                self.ep_mor_badge.setText("Unmanaged host (not bound to vCenter VM)")
+                self.ep_mor_badge.setStyleSheet("")
 
     def _on_os_changed(self, os_name: str) -> None:
-        self._on_target_host_changed("")
+        # Reset detection state, but keep a VM binding that still matches the entered host
+        self._on_target_host_changed(self.ep_host_input.text() if hasattr(self, "ep_host_input") else "")
         is_win = os_name.lower().startswith("win")
         if is_win:
             if not self.ep_advanced_check.isChecked() or self.ep_port_input.text() == "22":
@@ -743,6 +1059,8 @@ class MainWindow(QMainWindow):
         if not hasattr(self, "ep_version_combo"):
             return "1.40.1"
         text = self.ep_version_combo.currentText().strip()
+        if text.startswith("Auto-install Official "):
+            text = text[len("Auto-install Official "):].strip()
         if " " in text:
             text = text.split(" ", 1)[0].strip()
         if text.startswith("v") and len(text) > 1 and text[1].isdigit():
@@ -1246,10 +1564,20 @@ class MainWindow(QMainWindow):
             "Summarizes total processes grouped by status (running, sleeping, stopped, zombie).",
             self.proc_check
         ))
+        # Windows Performance Counters Card
+        win_perf_widget = QWidget()
+        wp_layout = QVBoxLayout(win_perf_widget)
+        wp_layout.setContentsMargins(0, 0, 0, 0)
+        self.btn_browse_perfmon = QPushButton("⚡ Browse Perfmon Counters")
+        self.btn_browse_perfmon.setProperty("class", "secondary")
+        self.btn_browse_perfmon.setToolTip("Query installed Windows Performance Counter sets from target endpoint")
+        self.btn_browse_perfmon.clicked.connect(self._on_browse_perfmon_clicked)
+        wp_layout.addWidget(self.btn_browse_perfmon)
         self.plugin_config_stack.addWidget(self._create_plugin_card(
             "Windows Performance Counters (inputs.win_perf_counters)", "Windows",
             "Collects native Windows Processor, Memory, LogicalDisk, Network Interface, and System counters matching VCF Operations Windows guest OS dashboards.",
             self.win_perf_check,
+            inputs_widget=win_perf_widget,
             notes="Captures Processor (*), Memory, LogicalDisk (*), Network Interface (*), and System objects."
         ))
 
@@ -1259,6 +1587,11 @@ class MainWindow(QMainWindow):
         wsw_layout.setContentsMargins(0, 0, 0, 0)
         wsw_layout.addWidget(QLabel("Service Names Filter (comma-separated, * for all):"))
         wsw_layout.addWidget(self.win_svc_names_input)
+        self.btn_discover_services = QPushButton("⚡ Discover Host Services")
+        self.btn_discover_services.setProperty("class", "secondary")
+        self.btn_discover_services.setToolTip("Query active running services from endpoint via WinRM or SSH")
+        self.btn_discover_services.clicked.connect(self._on_discover_services_clicked)
+        wsw_layout.addWidget(self.btn_discover_services)
         self.plugin_config_stack.addWidget(self._create_plugin_card(
             "Windows Services Status (inputs.win_services)", "Windows",
             "Monitors status and startup types of Windows services.",
@@ -1298,6 +1631,11 @@ class MainWindow(QMainWindow):
         my_layout.setContentsMargins(0, 0, 0, 0)
         my_layout.addWidget(QLabel("MySQL / MariaDB Connection String:"))
         my_layout.addWidget(self.mysql_server_input)
+        self.btn_discover_mysql = QPushButton("⚡ Connect & Discover DBs")
+        self.btn_discover_mysql.setProperty("class", "secondary")
+        self.btn_discover_mysql.setToolTip("Query active databases on MySQL server instance")
+        self.btn_discover_mysql.clicked.connect(lambda: self._on_discover_databases_clicked("mysql"))
+        my_layout.addWidget(self.btn_discover_mysql)
         self.plugin_config_stack.addWidget(self._create_plugin_card(
             "MySQL / MariaDB (inputs.mysql)", "Workloads",
             "Collects database performance metrics, query counts, and connection pool statistics.",
@@ -1311,6 +1649,11 @@ class MainWindow(QMainWindow):
         pg_layout.setContentsMargins(0, 0, 0, 0)
         pg_layout.addWidget(QLabel("PostgreSQL Connection Address:"))
         pg_layout.addWidget(self.postgres_addr_input)
+        self.btn_discover_pg = QPushButton("⚡ Connect & Discover DBs")
+        self.btn_discover_pg.setProperty("class", "secondary")
+        self.btn_discover_pg.setToolTip("Query active databases on PostgreSQL server instance")
+        self.btn_discover_pg.clicked.connect(lambda: self._on_discover_databases_clicked("postgresql"))
+        pg_layout.addWidget(self.btn_discover_pg)
         self.plugin_config_stack.addWidget(self._create_plugin_card(
             "PostgreSQL Server (inputs.postgresql)", "Workloads",
             "Monitors PostgreSQL database statistics, buffer hits, transaction rates, and deadlocks.",
@@ -1324,6 +1667,11 @@ class MainWindow(QMainWindow):
         ms_layout.setContentsMargins(0, 0, 0, 0)
         ms_layout.addWidget(QLabel("Microsoft SQL Server Connection String:"))
         ms_layout.addWidget(self.mssql_server_input)
+        self.btn_discover_mssql = QPushButton("⚡ Connect & Discover DBs")
+        self.btn_discover_mssql.setProperty("class", "secondary")
+        self.btn_discover_mssql.setToolTip("Query active database catalogs on Microsoft SQL Server instance")
+        self.btn_discover_mssql.clicked.connect(lambda: self._on_discover_databases_clicked("mssql"))
+        ms_layout.addWidget(self.btn_discover_mssql)
         self.plugin_config_stack.addWidget(self._create_plugin_card(
             "Microsoft SQL Server (inputs.sqlserver)", "Workloads",
             "Collects SQL Server engine metrics, batch requests, buffer cache hit ratios, and memory.",
@@ -1541,6 +1889,21 @@ class MainWindow(QMainWindow):
         if selected_dir:
             self.bundle_dir_input.setText(selected_dir)
 
+    def _browse_ca_cert(self) -> None:
+        init_file = (
+            self.vcf_ca_input.text().strip()
+            if hasattr(self, "vcf_ca_input") and self.vcf_ca_input.text().strip()
+            else ""
+        )
+        selected_file, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select Enterprise CA Certificate",
+            init_file,
+            "Certificate Files (*.pem *.crt *.cer);;All Files (*)",
+        )
+        if selected_file:
+            self.vcf_ca_input.setText(selected_file)
+
     def _apply_baseline_preset(self) -> None:
         is_win = bool(
             getattr(self, "ep_os_combo", None)
@@ -1623,6 +1986,227 @@ class MainWindow(QMainWindow):
                         item.setCheckState(Qt.Unchecked)
         finally:
             self._updating_catalog = False
+
+    def _create_discovery_executor(self, target: EndpointTarget) -> Any:
+        if hasattr(self, "mock_executor") and self.mock_executor is not None:
+            return self.mock_executor
+        m = target.connection_method.value
+        if m == "local":
+            return LocalExecutor()
+        if m == "winrm" or target.os_family == OSFamily.WINDOWS:
+            return WinRMExecutor(
+                hostname=target.hostname,
+                port=target.port,
+                username=target.username,
+                password=target.password,
+                use_ssl=target.winrm_use_ssl,
+            )
+        return SSHExecutor(
+            hostname=target.hostname,
+            port=target.port,
+            username=target.username,
+            password=target.password,
+            key_filename=target.key_filename,
+        )
+
+    def _on_discover_services_clicked(self) -> None:
+        try:
+            target = self._get_endpoint_target()
+        except Exception as exc:
+            QMessageBox.warning(self, "Configuration Incomplete", f"Cannot connect to host: {exc}")
+            return
+
+        if target.os_family != OSFamily.WINDOWS:
+            QMessageBox.warning(
+                self,
+                "Windows Only",
+                "Windows Services monitoring (inputs.win_services) is only supported on Windows endpoints.",
+            )
+            return
+
+        if not target.hostname:
+            QMessageBox.warning(
+                self,
+                "Host Required",
+                "Please enter an endpoint hostname or IP address in Step 2 before querying services.",
+            )
+            return
+
+        try:
+            executor = self._create_discovery_executor(target)
+            services = executor.discover_services()
+            if not services:
+                QMessageBox.information(
+                    self,
+                    "No Services Discovered",
+                    f"No services could be queried from endpoint {target.hostname}. Verify credentials and remote permissions.",
+                )
+                return
+
+            current_svcs = [s.strip() for s in self.win_svc_names_input.text().split(",") if s.strip()]
+            dlg = ServicesDiscoveryDialog(self, services, initial_selected=current_svcs)
+            if dlg.exec() == QDialog.Accepted and dlg.selected_services:
+                self.win_svc_names_input.setText(", ".join(dlg.selected_services))
+                self.win_svc_check.setChecked(True)
+                self.logger.info("Applied %d discovered services to WinServices config", len(dlg.selected_services))
+        except Exception as exc:
+            self.logger.exception("Failed to discover services on %s", target.hostname)
+            QMessageBox.warning(
+                self,
+                "Service Discovery Error",
+                f"Failed to query running services from target host:\n{exc}",
+            )
+
+    def _on_browse_perfmon_clicked(self) -> None:
+        try:
+            target = self._get_endpoint_target()
+        except Exception as exc:
+            QMessageBox.warning(self, "Configuration Incomplete", f"Cannot connect to host: {exc}")
+            return
+
+        if target.os_family != OSFamily.WINDOWS:
+            QMessageBox.warning(
+                self,
+                "Windows Only",
+                "Windows Performance Counters are only supported on Windows endpoints.",
+            )
+            return
+
+        if not target.hostname:
+            QMessageBox.warning(
+                self,
+                "Host Required",
+                "Please enter an endpoint hostname or IP address in Step 2 before querying counters.",
+            )
+            return
+
+        try:
+            executor = self._create_discovery_executor(target)
+            counter_sets = executor.discover_perfmon_sets()
+            if not counter_sets:
+                QMessageBox.information(
+                    self,
+                    "No Counters Discovered",
+                    f"No Performance Counter sets could be queried from endpoint {target.hostname}. Verify WinRM connectivity.",
+                )
+                return
+
+            dlg = PerfmonDiscoveryDialog(self, counter_sets)
+            if dlg.exec() == QDialog.Accepted and dlg.selected_sets:
+                self.win_perf_check.setChecked(True)
+                stanzas = []
+                for cs in dlg.selected_sets:
+                    clean_name = cs.name.replace(" ", "_").lower()
+                    counters = cs.counters if cs.counters else ["*"]
+                    counters_toml = ", ".join(f'"{c}"' for c in counters[:8])
+                    stanzas.append(
+                        f"# Discovered Perfmon Counter Set: {cs.name}\n"
+                        f"[[inputs.win_perf_counters]]\n"
+                        f"  PrintValid = false\n"
+                        f"  [[inputs.win_perf_counters.object]]\n"
+                        f'    ObjectName = "{cs.name}"\n'
+                        f"    Counters = [{counters_toml}]\n"
+                        f'    Instances = ["*"]\n'
+                        f'    Measurement = "win_{clean_name}"\n'
+                    )
+                new_text = "\n".join(stanzas)
+                curr = self.custom_toml_input.toPlainText().strip()
+                self.custom_toml_input.setPlainText(f"{curr}\n\n{new_text}".strip() if curr else new_text)
+                self.custom_toml_check.setChecked(True)
+                self.logger.info("Added %d extra Perfmon counter sets to Telegraf configuration", len(dlg.selected_sets))
+        except Exception as exc:
+            self.logger.exception("Failed to discover perfmon counter sets on %s", target.hostname)
+            QMessageBox.warning(
+                self,
+                "Perfmon Discovery Error",
+                f"Failed to query Performance Counter sets from target host:\n{exc}",
+            )
+
+    def _on_discover_databases_clicked(self, engine: str) -> None:
+        try:
+            target = self._get_endpoint_target()
+        except Exception as exc:
+            QMessageBox.warning(self, "Configuration Incomplete", f"Cannot connect to host: {exc}")
+            return
+
+        if not target.hostname:
+            QMessageBox.warning(
+                self,
+                "Host Required",
+                "Please enter an endpoint hostname or IP address in Step 2 before discovering databases.",
+            )
+            return
+
+        default_port = (
+            1433
+            if engine == "mssql"
+            else (5432 if engine in ("postgresql", "postgres") else 3306)
+        )
+        engine_title = (
+            "Microsoft SQL Server"
+            if engine == "mssql"
+            else ("PostgreSQL" if engine in ("postgresql", "postgres") else "MySQL")
+        )
+        conn_dlg = DatabaseConnectDialog(
+            self,
+            engine_name=engine_title,
+            default_port=default_port,
+        )
+        if conn_dlg.exec() != QDialog.Accepted:
+            return
+
+        try:
+            executor = self._create_discovery_executor(target)
+            dbs = executor.discover_databases(
+                db_type=engine,
+                auth_mode=conn_dlg.auth_mode,
+                username=conn_dlg.username or None,
+                password=conn_dlg.password or None,
+                port=conn_dlg.port,
+            )
+            if not dbs:
+                QMessageBox.information(
+                    self,
+                    "No Databases Found",
+                    f"No online databases found or could not authenticate to {engine_title} on port {conn_dlg.port}.",
+                )
+                return
+
+            disc_dlg = DatabaseDiscoveryDialog(
+                self,
+                engine_name=engine_title,
+                databases=dbs,
+            )
+            if disc_dlg.exec() == QDialog.Accepted and disc_dlg.selected_databases:
+                selected_db_names = disc_dlg.selected_databases
+                if engine == "mssql":
+                    self.mssql_check.setChecked(True)
+                    if conn_dlg.auth_mode == "sql":
+                        conn_str = f"Server=127.0.0.1;Port={conn_dlg.port};User Id={conn_dlg.username};Password={conn_dlg.password};app name=telegraf;log=1;"
+                    else:
+                        conn_str = f"Server=127.0.0.1;Port={conn_dlg.port};app name=telegraf;log=1;"
+                    self.mssql_server_input.setText(conn_str)
+                elif engine in ("postgresql", "postgres"):
+                    self.postgres_check.setChecked(True)
+                    first_db = selected_db_names[0] if selected_db_names else "postgres"
+                    pw_part = f" password={conn_dlg.password}" if conn_dlg.password else ""
+                    pg_addr = f"host=localhost port={conn_dlg.port} user={conn_dlg.username or 'postgres'}{pw_part} sslmode=disable dbname={first_db}"
+                    self.postgres_addr_input.setText(pg_addr)
+                elif engine == "mysql":
+                    self.mysql_check.setChecked(True)
+                    first_db = selected_db_names[0] if selected_db_names else ""
+                    db_suffix = f"/{first_db}" if first_db else ""
+                    my_srv = f"{conn_dlg.username or 'root'}:{conn_dlg.password or ''}@tcp(127.0.0.1:{conn_dlg.port}){db_suffix}?tls=false"
+                    self.mysql_server_input.setText(my_srv)
+
+                self.logger.info("Applied %d discovered %s databases to configuration", len(selected_db_names), engine)
+        except Exception as exc:
+            self.logger.exception("Failed to discover %s databases on %s", engine, target.hostname)
+            QMessageBox.warning(
+                self,
+                "Database Discovery Error",
+                f"Failed to query {engine_title} databases from target host:\n{exc}",
+            )
     # Step 4: Review & Preview
     # --------------------------------------------------------------------------
     def _build_step4_page(self) -> QWidget:
@@ -1969,6 +2553,8 @@ class MainWindow(QMainWindow):
         parts.append(f"--collector {shlex.quote(env.collector.address)}")
         if env.collector.name:
             parts.append(f"--collector-group {shlex.quote(env.collector.name)}")
+        if env.ca_cert_path:
+            parts.append(f"--ca-cert {shlex.quote(env.ca_cert_path)}")
 
         parts.append(f"--target-host {shlex.quote(target.hostname)}")
         if mode != DeploymentMode.PUSH:
@@ -2005,6 +2591,12 @@ class MainWindow(QMainWindow):
         reg_host = getattr(target, "registered_hostname", None) or getattr(self, "discovered_hostname", None)
         if reg_host and reg_host != target.hostname:
             parts.append(f"--hostname {shlex.quote(reg_host)}")
+        if getattr(target, "vm_mor", None):
+            parts.append(f"--vm-id {shlex.quote(target.vm_mor)}")
+            if getattr(target, "vc_id", None):
+                parts.append(f"--vc-id {shlex.quote(target.vc_id)}")
+        if getattr(self, "selected_vm_name", None):
+            parts.append(f"--vm-name {shlex.quote(self.selected_vm_name)}")
 
         if target.os_family == OSFamily.WINDOWS:
             has_win_core = mon.win_perf_counters.enabled or (mon.win_services.enabled and bool(mon.win_services.service_names))
@@ -2189,6 +2781,7 @@ class MainWindow(QMainWindow):
             username = self.vcf_user_input.text().strip() or "admin"
             password = self.vcf_pass_input.text().strip() or None
 
+        ca_cert = (self.vcf_ca_input.text().strip() or None) if hasattr(self, "vcf_ca_input") else None
         return VCFEnvironment(
             url=self.vcf_url_input.text().strip() or "https://vcf-ops.local",
             username=username,
@@ -2196,6 +2789,7 @@ class MainWindow(QMainWindow):
             token=token,
             collector=CollectorInfo(address=collector_addr, name=collector_group),
             verify_ssl=self.vcf_ssl_check.isChecked(),
+            ca_cert_path=ca_cert,
         )
 
     def _get_endpoint_target(self) -> EndpointTarget:
@@ -2208,23 +2802,29 @@ class MainWindow(QMainWindow):
             port_val = int(self.ep_port_input.text().strip())
         except Exception:
             port_val = 5985 if is_win else 22
-        auto_install = self.ep_auto_install_check.isChecked() if hasattr(self, "ep_auto_install_check") else False
+        ver_text = self.ep_version_combo.currentText() if hasattr(self, "ep_version_combo") else "1.40.1"
+        if "Do Not Install" in ver_text:
+            auto_install = False
+            ver_str = "1.40.1"
+        else:
+            auto_install = True
+            ver_str = self._get_selected_telegraf_version() if hasattr(self, "_get_selected_telegraf_version") else "1.40.1"
 
         if is_win:
             key_filename = None
             password = self.ep_pass_input.text().strip() or None
         else:
-            use_key = hasattr(self, "ep_auth_type_combo") and "key" in self.ep_auth_type_combo.currentText().lower()
+            use_key = hasattr(self, "ep_auth_radio_key") and self.ep_auth_radio_key.isChecked()
             if use_key:
-                key_filename = self.ep_key_input.text().strip() or None
+                key_filename = self.ep_pass_input.text().strip() or None
                 password = None
             else:
                 key_filename = None
                 password = self.ep_pass_input.text().strip() or None
 
-        ver_str = self._get_selected_telegraf_version() if hasattr(self, "_get_selected_telegraf_version") else "1.40.1"
+        reg_hname = getattr(self, "selected_vm_name", None) or getattr(self, "discovered_hostname", None)
 
-        return EndpointTarget(
+        target = EndpointTarget(
             hostname=self.ep_host_input.text().strip() or "10.10.10.101",
             os_family=os_family,
             connection_method=method,
@@ -2235,8 +2835,13 @@ class MainWindow(QMainWindow):
             winrm_use_ssl=(port_val == 5986),
             install_telegraf=auto_install,
             telegraf_version=ver_str,
-            registered_hostname=getattr(self, "discovered_hostname", None),
+            registered_hostname=reg_hname,
         )
+        if getattr(self, "selected_vm_mor", None):
+            target.vm_mor = self.selected_vm_mor
+        if getattr(self, "selected_vc_id", None):
+            target.vc_id = self.selected_vc_id
+        return target
 
     def _get_monitoring_config(self) -> MonitoringConfig:
         svc_names_raw = self.win_svc_names_input.text().strip() if hasattr(self, "win_svc_names_input") else "*"
