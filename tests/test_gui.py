@@ -981,3 +981,41 @@ def test_main_window_pages_fit_at_minimum_size(qapp, tmp_path):
     assert window.plugin_catalog_list.horizontalScrollBar().isVisible() is False
     assert overflowing == []
 
+
+def test_main_window_login_source(qapp, tmp_path, monkeypatch):
+    """The login source is offered from the instance, sent for username auth, and kept in the CLI command."""
+    from vcf_ops_telegraf_helper.adapters.mock import MockVCFOpsIntegration
+    from vcf_ops_telegraf_helper.gui import main_window as mw
+
+    class WithSources(MockVCFOpsIntegration):
+        def list_auth_sources(self):
+            return ["VCF SSO"]
+
+    monkeypatch.setattr(mw, "get_adapter", lambda env, session=None: WithSources(env=env, connected=True))
+    window = MainWindow(state_store=StateStore(state_file=tmp_path / "state.json"))
+    window.vcf_url_input.setText("https://ops.corp.local")
+    window._load_auth_sources()
+    assert [window.vcf_auth_source_combo.itemText(i) for i in range(window.vcf_auth_source_combo.count())] == ["Local", "VCF SSO"]
+
+    window.vcf_auth_type_combo.setCurrentText("Username & Password")
+    assert window.vcf_auth_source_combo.isHidden() is False
+    assert window._get_vcf_env().auth_source == "local"
+    window.vcf_auth_source_combo.setCurrentText("VCF SSO")
+    assert window._get_vcf_env().auth_source == "VCF SSO"
+    assert "--vcf-auth-source 'VCF SSO'" in window._build_cli_command()
+
+    # Token auth has no login source
+    window.vcf_auth_type_combo.setCurrentText("API Token / Key")
+    assert window.vcf_auth_source_combo.isHidden() is True
+    assert window._get_vcf_env().auth_source == "local"
+
+
+def test_main_window_passwords_are_not_trimmed(qapp, tmp_path):
+    """Leading or trailing spaces can be part of a real password."""
+    window = MainWindow(state_store=StateStore(state_file=tmp_path / "state.json"))
+    window.vcf_auth_type_combo.setCurrentText("Username & Password")
+    window.vcf_pass_input.setText(" pw with spaces ")
+    window.ep_pass_input.setText(" pw2 ")
+    assert window._get_vcf_env().password == " pw with spaces "
+    assert window._get_endpoint_target().password == " pw2 "
+

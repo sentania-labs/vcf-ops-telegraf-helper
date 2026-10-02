@@ -231,6 +231,12 @@ def resolve_monitoring_config(
 @click.option("--vcf-user", default="admin", help="VCF Operations username")
 @click.option("--vcf-pass", default=None, help="VCF Operations password")
 @click.option("--vcf-token", default=None, help="VCF Operations API token")
+@click.option(
+    "--vcf-auth-source",
+    default="local",
+    show_default=True,
+    help="VCF Operations login source for --vcf-user (a directory or SSO source name)",
+)
 @click.option("--mock-vcf", is_flag=True, help="Use simulated VCF Operations adapter for offline testing")
 @click.option("--collector", required=True, help="Cloud Proxy or Collector IP/FQDN")
 @click.option("--collector-group", default=None, help="Collector group name for mTLS client certificate bundle")
@@ -289,6 +295,7 @@ def run_cmd(
     vcf_user: str,
     vcf_pass: Optional[str],
     vcf_token: Optional[str],
+    vcf_auth_source: str,
     mock_vcf: bool,
     collector: str,
     collector_group: Optional[str],
@@ -362,6 +369,7 @@ def run_cmd(
         username=vcf_user,
         password=vcf_pass,
         token=vcf_token,
+        auth_source=vcf_auth_source,
         collector=CollectorInfo(address=collector, name=collector_group),
         verify_ssl=verify_ssl,
         ca_cert_path=str(ca_cert) if ca_cert else None,
@@ -512,6 +520,13 @@ def run_cmd(
 @click.option("--vcf-user", envvar="VCF_USER", default="admin", help="VCF Operations API username")
 @click.option("--vcf-pass", envvar="VCF_PASS", default=None, help="VCF Operations API password")
 @click.option("--vcf-token", envvar="VCF_TOKEN", default=None, help="VCF Operations API token")
+@click.option(
+    "--vcf-auth-source",
+    envvar="VCF_AUTH_SOURCE",
+    default="local",
+    show_default=True,
+    help="VCF Operations login source for --vcf-user (a directory or SSO source name)",
+)
 @click.option("--mock-vcf", is_flag=True, help="Use simulated VCF Operations adapter for offline testing")
 @click.option(
     "--ca-cert",
@@ -542,6 +557,7 @@ def vms_cmd(
     vcf_user: str,
     vcf_pass: Optional[str],
     vcf_token: Optional[str],
+    vcf_auth_source: str,
     mock_vcf: bool,
     ca_cert: Optional[Path],
     verify_ssl: bool,
@@ -567,6 +583,7 @@ def vms_cmd(
         username=vcf_user,
         password=vcf_pass,
         token=vcf_token,
+        auth_source=vcf_auth_source,
         collector=CollectorInfo(address="127.0.0.1"),
         verify_ssl=verify_ssl,
         ca_cert_path=str(ca_cert) if ca_cert else None,

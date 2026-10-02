@@ -863,3 +863,33 @@ def test_vcf91_unregistered_ip_not_matched_by_first_octet():
     with pytest.raises(RuntimeError, match="is not registered"):
         adapter.prepare_telegraf_integration(target_ip="172.16.1.10", target_hostname="host10")
 
+
+def test_vcf91_token_request_sends_auth_source_only_when_not_local():
+    """Directory and SSO accounts send authSource; local accounts send the plain request."""
+    for source, expected in (("local", None), ("VCF SSO", "VCF SSO")):
+        env = VCFEnvironment(
+            name="test", url="https://vcf-ops.corp.local", username="sadmin", password="pw",
+            auth_source=source, collector=CollectorInfo(address="10.0.0.54"),
+        )
+        session = MagicMock(spec=requests.Session)
+        ok = MagicMock(status_code=200)
+        ok.json.return_value = {"token": "t-1"}
+        session.post.return_value = ok
+        VCF91OpenTelegrafIntegration(env, session=session).acquire_token("sadmin", "pw")
+        payload = session.post.call_args.kwargs["json"]
+        assert payload.get("authSource") == expected
+
+
+def test_vcf91_list_auth_sources_unauthenticated():
+    """Login sources are read without credentials, in the 9.1 response shape."""
+    session = MagicMock(spec=requests.Session)
+    resp = MagicMock(status_code=200)
+    resp.json.return_value = {"sources": [{"id": "x", "name": "VCF SSO", "sourceType": {"id": "VIDB", "name": "VIDB"}}]}
+    session.get.return_value = resp
+    adapter = VCF91OpenTelegrafIntegration(_api_env(), session=session)
+    assert adapter.list_auth_sources() == ["VCF SSO"]
+    assert "Authorization" not in (session.get.call_args.kwargs.get("headers") or {})
+
+    session.get.return_value = MagicMock(status_code=500)
+    assert adapter.list_auth_sources() == []
+

@@ -539,6 +539,16 @@ class MainWindow(QMainWindow):
         grid.addWidget(self.vcf_pass_label, 4, 0)
         grid.addWidget(self.vcf_pass_input, 4, 1)
 
+        self.vcf_auth_source_label = QLabel("Login Source:")
+        self.vcf_auth_source_combo = QComboBox()
+        self.vcf_auth_source_combo.setEditable(True)
+        self.vcf_auth_source_combo.addItem("Local")
+        self.vcf_auth_source_combo.setToolTip(
+            "Where the account lives: Local, or a directory or SSO source configured in VCF Operations"
+        )
+        grid.addWidget(self.vcf_auth_source_label, 5, 0)
+        grid.addWidget(self.vcf_auth_source_combo, 5, 1)
+
         c_layout.addLayout(grid)
         self._update_vcf_auth_visibility()
 
@@ -575,6 +585,9 @@ class MainWindow(QMainWindow):
 
         for w in (self.vcf_url_input, self.vcf_token_input, self.vcf_user_input, self.vcf_pass_input, self.vcf_ca_input):
             w.textChanged.connect(self._invalidate_vcf_connection)
+        self.vcf_auth_source_combo.currentTextChanged.connect(self._invalidate_vcf_connection)
+        # The instance lists its login sources without authentication, so offer them once the URL is entered
+        self.vcf_url_input.editingFinished.connect(self._load_auth_sources)
         self.vcf_auth_type_combo.currentTextChanged.connect(self._invalidate_vcf_connection)
         self.vcf_ssl_check.toggled.connect(self._invalidate_vcf_connection)
 
@@ -583,6 +596,26 @@ class MainWindow(QMainWindow):
 
         nav_frame, _ = self._build_nav(self.STEP_CONNECT, None, "Select VM")
         return self._wrap_page(content, nav_frame)
+
+    def _load_auth_sources(self) -> None:
+        url = self.vcf_url_input.text().strip()
+        if not url or url == getattr(self, "_auth_sources_url", None):
+            return
+        self._auth_sources_url = url
+        try:
+            sources = get_adapter(self._get_vcf_env()).list_auth_sources()
+        except Exception as exc:
+            self.logger.warning("Could not list VCF Operations login sources: %s", exc)
+            sources = []
+        current = self.vcf_auth_source_combo.currentText()
+        self.vcf_auth_source_combo.blockSignals(True)
+        self.vcf_auth_source_combo.clear()
+        self.vcf_auth_source_combo.addItem("Local")
+        for name in sources:
+            if name.lower() != "local":
+                self.vcf_auth_source_combo.addItem(name)
+        self.vcf_auth_source_combo.setCurrentText(current or "Local")
+        self.vcf_auth_source_combo.blockSignals(False)
 
     def _on_vcf_ssl_toggled(self, checked: bool) -> None:
         # A CA bundle only matters when certificates are verified
@@ -1148,6 +1181,9 @@ class MainWindow(QMainWindow):
         self.vcf_user_input.setVisible(not use_key)
         self.vcf_pass_label.setVisible(not use_key)
         self.vcf_pass_input.setVisible(not use_key)
+        if hasattr(self, "vcf_auth_source_combo"):
+            self.vcf_auth_source_label.setVisible(not use_key)
+            self.vcf_auth_source_combo.setVisible(not use_key)
 
     def _on_vcf_auth_type_changed(self, text: str) -> None:
         self._update_vcf_auth_visibility()
@@ -2589,6 +2625,8 @@ class MainWindow(QMainWindow):
             parts.append('--vcf-token "<token>"')
         elif env.username:
             parts.append(f"--vcf-user {shlex.quote(env.username)}")
+            if env.auth_source and env.auth_source.lower() != "local":
+                parts.append(f"--vcf-auth-source {shlex.quote(env.auth_source)}")
             if env.password:
                 parts.append('--vcf-pass "<password>"')
 
@@ -2801,6 +2839,7 @@ class MainWindow(QMainWindow):
             "key" in self.vcf_auth_type_combo.currentText().lower()
             or "token" in self.vcf_auth_type_combo.currentText().lower()
         )
+        auth_source = "local"
         if use_key:
             token = self.vcf_token_input.text().strip() or None
             username = "admin"
@@ -2808,7 +2847,10 @@ class MainWindow(QMainWindow):
         else:
             token = None
             username = self.vcf_user_input.text().strip() or "admin"
-            password = self.vcf_pass_input.text().strip() or None
+            password = self.vcf_pass_input.text() or None
+            source_text = self.vcf_auth_source_combo.currentText().strip() if hasattr(self, "vcf_auth_source_combo") else ""
+            if source_text and source_text.lower() != "local":
+                auth_source = source_text
 
         ca_cert = (self.vcf_ca_input.text().strip() or None) if hasattr(self, "vcf_ca_input") else None
         return VCFEnvironment(
@@ -2816,6 +2858,7 @@ class MainWindow(QMainWindow):
             username=username,
             password=password,
             token=token,
+            auth_source=auth_source,
             collector=collector,
             verify_ssl=self.vcf_ssl_check.isChecked(),
             ca_cert_path=ca_cert,
@@ -2841,7 +2884,7 @@ class MainWindow(QMainWindow):
 
         if is_win:
             key_filename = None
-            password = self.ep_pass_input.text().strip() or None
+            password = self.ep_pass_input.text() or None
         else:
             use_key = hasattr(self, "ep_auth_radio_key") and self.ep_auth_radio_key.isChecked()
             if use_key:
@@ -2849,7 +2892,7 @@ class MainWindow(QMainWindow):
                 password = None
             else:
                 key_filename = None
-                password = self.ep_pass_input.text().strip() or None
+                password = self.ep_pass_input.text() or None
 
         reg_hname = getattr(self, "selected_vm_name", None) or getattr(self, "discovered_hostname", None)
 
@@ -2955,6 +2998,8 @@ class MainWindow(QMainWindow):
             latest = recent_envs[0]
             self.vcf_url_input.setText(latest.url)
             self.vcf_user_input.setText(latest.username or "")
+            if latest.auth_source and latest.auth_source.lower() != "local":
+                self.vcf_auth_source_combo.setCurrentText(latest.auth_source)
             self.vcf_ssl_check.setChecked(latest.verify_ssl)
 
         saved_vcf_mode = self.state_store.get_preference("vcf_auth_mode")
