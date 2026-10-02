@@ -912,3 +912,21 @@ def test_main_window_rejected_credentials_do_not_unlock(qapp, tmp_path, monkeypa
     assert "rejected the credentials" in window.vcf_status_label.text()
     assert window._max_unlocked_step() == window.STEP_CONNECT
 
+
+def test_main_window_execute_button_in_nav_bar(qapp, tmp_path):
+    """Execute sits at the right end of the Step 6 navigation bar, like every other advance button."""
+    window = MainWindow(state_store=StateStore(state_file=tmp_path / "state.json"))
+    execute_bar = window.execute_btn.parentWidget()
+    next_bar = window._next_buttons[window.STEP_REVIEW].parentWidget()
+    assert execute_bar.property("class") == next_bar.property("class") == "lattice-card"
+    layout = execute_bar.layout()
+    assert layout.itemAt(layout.count() - 1).widget() is window.execute_btn
+    assert window.execute_btn.property("class") == "primary"
+
+
+def test_main_window_nav_labels_show_ampersand(qapp, tmp_path):
+    """Step names containing '&' render literally on navigation buttons, not as a shortcut underline."""
+    window = MainWindow(state_store=StateStore(state_file=tmp_path / "state.json"))
+    assert window._next_buttons[window.STEP_MONITORING].text() == "Next: Review && Preview ->"
+    assert window._next_buttons[window.STEP_REVIEW].text() == "Next: Execute && Verify ->"
+
