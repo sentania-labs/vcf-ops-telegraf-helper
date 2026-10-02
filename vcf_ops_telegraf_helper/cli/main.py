@@ -290,6 +290,7 @@ def resolve_monitoring_config(
 )
 @click.option("--vm-name", default=None, help="Target virtual machine name in vCenter / VCF Operations")
 @click.option("--vm-id", default=None, help="Target vCenter virtual machine MOR (e.g. vm-1042)")
+@click.option("--vc-id", default=None, help="vCenter instance UUID for --vm-id (resolved from inventory if omitted)")
 @click.option("--force-new-cert", is_flag=True, default=False, help="Force minting a new client certificate even if existing cert is valid")
 def run_cmd(
     vcf_url: str,
@@ -339,10 +340,14 @@ def run_cmd(
     ca_cert: Optional[Path] = None,
     vm_name: Optional[str] = None,
     vm_id: Optional[str] = None,
+    vc_id: Optional[str] = None,
     force_new_cert: bool = False,
 ) -> None:
     """Execute the guided workflow via command-line options."""
     display_banner(console)
+
+    if vc_id and not vm_id:
+        raise click.UsageError("--vc-id requires --vm-id")
 
     conn_method = ConnectionMethod(connection)
     if target_os:
@@ -392,6 +397,7 @@ def run_cmd(
         telegraf_version=telegraf_version,
         registered_hostname=hostname or vm_name,
         vm_mor=vm_id,
+        vc_id=vc_id,
     )
 
     monitoring = resolve_monitoring_config(

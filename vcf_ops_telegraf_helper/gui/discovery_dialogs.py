@@ -429,7 +429,12 @@ class DatabaseConnectDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle(f"Connect to {engine_name}")
         self.resize(480, 320)
-        self.engine_name = engine_name.lower()
+        # Normalize display titles to the stable engine keys the branches below test against
+        self.engine_name = {
+            "microsoft sql server": "mssql",
+            "sql server": "mssql",
+            "postgres": "postgresql",
+        }.get(engine_name.strip().lower(), engine_name.strip().lower())
         self.auth_mode = "integrated"
         self.username = ""
         self.password = ""

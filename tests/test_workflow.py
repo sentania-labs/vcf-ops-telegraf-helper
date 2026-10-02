@@ -609,8 +609,12 @@ def test_workflow_sha256_idempotency_skips_restart():
     wf.configure_vcf_output()
     wf.render_inputs()
 
-    # Remote files return identical content to generated configs
+    # Remote files return identical content to generated configs and security artifacts
+    security_files = {d: c for d, c, _ in wf._security_artifact_files("/etc/telegraf/telegraf.d", False)}
+
     def _download(path: str) -> str:
+        if path in security_files:
+            return security_files[path]
         if "vcf-helper-system.conf" in path:
             return wf.system_conf_content
         if "cloudproxy-http.conf" in path:
@@ -784,3 +788,123 @@ def test_workflow_expired_cert_triggers_fresh_minting():
 
 
 
+
+
+def _idempotency_workflow(remote_overrides: dict[str, str]):
+    """Build a push workflow whose remote files match generated output, except for overrides."""
+    env = VCFEnvironment(
+        name="test-env",
+        url="https://vcf-ops.local",
+        username="admin",
+        collector=CollectorInfo(address="10.10.10.50"),
+    )
+    target = EndpointTarget(
+        hostname="linux01.corp.local",
+        os_family=OSFamily.LINUX,
+        connection_method=ConnectionMethod.SSH,
+    )
+    mock_exec = MagicMock()
+    mock_exec.execute.return_value = CommandResult(exit_code=0, stdout="", command="cmd")
+    mock_exec.file_exists.return_value = True
+    wf = ConfigureEndpointWorkflow(
+        environment=env,
+        target=target,
+        monitoring=MonitoringConfig(),
+        executor=mock_exec,
+        adapter=MockVCFOpsIntegration(env=env, connected=True),
+    )
+    wf.detect_target()
+    wf.detect_telegraf()
+    wf.configure_vcf_output()
+    wf.render_inputs()
+
+    remote = {d: c for d, c, _ in wf._security_artifact_files("/etc/telegraf/telegraf.d", False)}
+    remote.update(remote_overrides)
+
+    def _download(path: str) -> str:
+        if path in remote:
+            return remote[path]
+        if "vcf-helper-system.conf" in path:
+            return wf.system_conf_content
+        if "cloudproxy-http.conf" in path:
+            return wf.vcf_conf_content
+        if "telegraf.conf" in path:
+            return wf.base_stub_content or ""
+        return ""
+
+    mock_exec.download.side_effect = _download
+    return wf, mock_exec
+
+
+def test_workflow_rotated_cert_is_uploaded_despite_unchanged_config():
+    """A freshly minted cert must reach the endpoint even when the TOML fragments are unchanged."""
+    wf, mock_exec = _idempotency_workflow(
+        {"/etc/telegraf/telegraf.d/cert.pem": "-----BEGIN CERTIFICATE-----\nOLD-EXPIRED\n-----END CERTIFICATE-----\n"}
+    )
+    res = wf.apply()
+    assert res.status == StageStatus.PASS
+    assert "Configuration unchanged" not in res.message
+    assert wf.is_idempotent is False
+    uploaded = [c.args[1] for c in mock_exec.upload.call_args_list]
+    assert "/etc/telegraf/telegraf.d/cert.pem" in uploaded
+    assert "/etc/telegraf/telegraf.d/key.pem" in uploaded
+
+
+def test_workflow_missing_cert_file_bypasses_idempotency():
+    """A missing security artifact on the endpoint forces a full apply."""
+    wf, mock_exec = _idempotency_workflow({})
+    mock_exec.file_exists.side_effect = lambda p: not p.endswith("key.pem")
+    res = wf.apply()
+    assert "Configuration unchanged" not in res.message
+    assert wf.is_idempotent is False
+
+
+def test_workflow_registered_hostname_ip_override_beats_discovery():
+    """An explicit IP registration override wins over a discovered hostname."""
+    wf = _create_test_workflow()
+    wf.detect_target()
+    wf.detect_telegraf()
+    assert wf.discovery is not None
+    wf.discovery.hostname = "discovered-host"
+    wf.target.registered_hostname = "192.168.1.100"
+    assert wf._get_registered_hostname() == "192.168.1.100"
+
+
+def test_workflow_passes_vm_binding_to_adapter():
+    """A requested VM MOR and vCenter ID reach the adapter and produce a managed-VM enrollment."""
+    wf = _create_test_workflow()
+    wf.target.vm_mor = "vm-1042"
+    wf.target.vc_id = "423b-81f0-91a2-0002"
+    original_prepare = wf.adapter.prepare_telegraf_integration
+    mock_prepare = MagicMock(side_effect=original_prepare)
+    wf.adapter.prepare_telegraf_integration = mock_prepare
+
+    wf.detect_target()
+    wf.detect_telegraf()
+    wf.configure_vcf_output()
+
+    kwargs = mock_prepare.call_args.kwargs
+    assert kwargs["vm_mor"] == "vm-1042"
+    assert kwargs["vc_id"] == "423b-81f0-91a2-0002"
+    assert wf.artifacts.is_managed_vm is True
+    assert wf.artifacts.vm_mor == "vm-1042"
+    assert wf.artifacts.client_id == "423b-81f0-91a2-0002_vm-1042"
+
+
+def test_workflow_vm_binding_mor_only_resolves_vc_id():
+    """A MOR without a vCenter ID is resolved from inventory."""
+    wf = _create_test_workflow()
+    wf.target.vm_mor = "vm-1042"
+    wf.detect_target()
+    wf.detect_telegraf()
+    wf.configure_vcf_output()
+    assert wf.artifacts.is_managed_vm is True
+    assert wf.artifacts.vc_id == "423b-81f0-91a2-0002"
+
+
+def test_workflow_apply_records_client_identity():
+    """Apply writes CLIENT_ID alongside the cert so later runs can detect an identity change."""
+    wf, mock_exec = _idempotency_workflow({"/etc/telegraf/telegraf.d/CLIENT_ID": "endpoint_other\n"})
+    wf.apply()
+    uploads = {c.args[1]: c.args[0] for c in mock_exec.upload.call_args_list}
+    assert uploads["/etc/telegraf/telegraf.d/CLIENT_ID"] == f"{wf.artifacts.client_id}\n"

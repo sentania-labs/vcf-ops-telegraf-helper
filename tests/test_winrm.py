@@ -129,3 +129,23 @@ def test_winrm_discover_perfmon_sets_default_counters():
     assert len(sets) == 1
     assert sets[0].name == "Web Service"
     assert sets[0].counters == ["*"]
+
+
+def test_winrm_free_disk_space_queries_requested_drive():
+    """Free space is measured on the requested drive, not the smallest drive on the host."""
+    executor = WinRMExecutor(hostname="win-host.local", username="admin", password="secret")
+    mock_session = MagicMock()
+    mock_res = MagicMock()
+    mock_res.status_code = 0
+    mock_res.std_out = b"51200\r\n"
+    mock_res.std_err = b""
+    mock_session.run_ps.return_value = mock_res
+
+    with patch.object(executor, "_get_session", return_value=mock_session):
+        assert executor.get_free_disk_space_mb("C:") == 51200
+        called_cmd = mock_session.run_ps.call_args[0][0]
+        assert "-Name 'C'" in called_cmd
+        assert "Sort-Object" not in called_cmd
+
+        executor.get_free_disk_space_mb("D:\\telegraf")
+        assert "-Name 'D'" in mock_session.run_ps.call_args[0][0]

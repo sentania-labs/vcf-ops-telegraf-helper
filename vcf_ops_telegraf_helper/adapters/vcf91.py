@@ -185,6 +185,39 @@ class VCF91OpenTelegrafIntegration(VCFOpsIntegration):
 
         return False, None, None, None
 
+    def resolve_bound_vm(
+        self,
+        vm_mor: str,
+        vc_id: Optional[str] = None,
+    ) -> Tuple[bool, Optional[str], str, str]:
+        """Resolve an explicitly requested VM binding.
+
+        An explicit (vm_mor, vc_id) pair is trusted as given. A MOR alone is looked up
+        in inventory, since MORs are only unique within one vCenter.
+
+        Returns:
+            Tuple of (is_managed, vm_entity_name, vcid, vm_mor).
+        """
+        if vc_id:
+            return True, None, vc_id, vm_mor
+        candidates = [vm for vm in self.list_virtual_machines(strict=True) if vm.vm_mor == vm_mor]
+        matches = [vm for vm in candidates if vm.vc_id]
+        if not matches:
+            if candidates:
+                raise RuntimeError(
+                    f"Requested VM binding '{vm_mor}' is in VCF Operations inventory but has no vCenter ID; "
+                    "supply the vCenter ID as well."
+                )
+            raise RuntimeError(
+                f"Requested VM binding '{vm_mor}' was not found in VCF Operations inventory. "
+                "Check the MOR, or supply the vCenter ID as well."
+            )
+        if len({vm.vc_id for vm in matches}) > 1:
+            raise RuntimeError(
+                f"Requested VM binding '{vm_mor}' exists in more than one vCenter; supply the vCenter ID to choose one."
+            )
+        return True, matches[0].name, matches[0].vc_id, vm_mor
+
     def _extract_vm_identifiers(
         self,
         resource: dict,
@@ -548,6 +581,8 @@ class VCF91OpenTelegrafIntegration(VCFOpsIntegration):
         target_hostname: Optional[str] = None,
         target_uuid: Optional[str] = None,
         existing_cert_bundle: Optional[Dict[str, Any]] = None,
+        vm_mor: Optional[str] = None,
+        vc_id: Optional[str] = None,
     ) -> IntegrationArtifacts:
         """Prepare tokens, URLs, mTLS client certificates, and metadata artifacts."""
         token = self.env.token
@@ -621,10 +656,11 @@ class VCF91OpenTelegrafIntegration(VCFOpsIntegration):
         # 1. Detect if target is a managed VM in VCF Operations
         is_managed = False
         vm_name = None
-        vm_mor = None
-        vc_id = None
 
-        if target_ip or target_hostname:
+        explicit_binding = bool(vm_mor)
+        if vm_mor:
+            is_managed, vm_name, vc_id, vm_mor = self.resolve_bound_vm(vm_mor, vc_id)
+        elif target_ip or target_hostname:
             is_managed, vm_name, vc_id, vm_mor = self.detect_managed_vm(target_ip, target_hostname)
 
         # 2. Determine clientId for certificate request
@@ -649,7 +685,18 @@ class VCF91OpenTelegrafIntegration(VCFOpsIntegration):
         logger.info("Resolved collector group name for %s: %s", collector_addr, collector_group)
 
         last_cert_err = None
-        if existing_cert_bundle and existing_cert_bundle.get("client_cert") and existing_cert_bundle.get("client_key"):
+        # Reuse only a cert issued for this client identity. Endpoints enrolled before the identity
+        # was recorded are reused as before, unless the caller explicitly binds a VM.
+        existing_id = (existing_cert_bundle or {}).get("client_id")
+        identity_ok = (existing_id == client_id) if existing_id else not explicit_binding
+        if not identity_ok and existing_cert_bundle:
+            logger.info("Existing certificate was issued for '%s', not '%s'; minting a new one", existing_id, client_id)
+        if (
+            identity_ok
+            and existing_cert_bundle
+            and existing_cert_bundle.get("client_cert")
+            and existing_cert_bundle.get("client_key")
+        ):
             logger.info("Reusing existing client certificate bundle from target (idempotent run)")
             ca_cert_content = existing_cert_bundle.get("ca_cert")
             client_cert_content = existing_cert_bundle.get("client_cert")
@@ -668,19 +715,19 @@ class VCF91OpenTelegrafIntegration(VCFOpsIntegration):
                 mutual_auth = bundle.get("mutual_auth", True)
             except Exception as e:
                 last_cert_err = e
-            # If collector group name failed and differs from collector_addr, try collector_addr
-            if collector_group != collector_addr:
-                try:
-                    bundle = self.fetch_client_certificate_bundle(collector_addr, client_id)
-                    ca_cert_content = bundle.get("ca_cert")
-                    client_cert_content = bundle.get("client_cert")
-                    client_key_content = bundle.get("client_key")
-                    master_pub_content = bundle.get("master_pub")
-                    vip_content = bundle.get("vip")
-                    mutual_auth = bundle.get("mutual_auth", True)
-                    last_cert_err = None
-                except Exception as inner_e:
-                    last_cert_err = inner_e
+                # Collector group name failed; retry by collector_addr when it differs
+                if collector_group != collector_addr:
+                    try:
+                        bundle = self.fetch_client_certificate_bundle(collector_addr, client_id)
+                        ca_cert_content = bundle.get("ca_cert")
+                        client_cert_content = bundle.get("client_cert")
+                        client_key_content = bundle.get("client_key")
+                        master_pub_content = bundle.get("master_pub")
+                        vip_content = bundle.get("vip")
+                        mutual_auth = bundle.get("mutual_auth", True)
+                        last_cert_err = None
+                    except Exception as inner_e:
+                        last_cert_err = inner_e
 
         if last_cert_err is not None:
             raise RuntimeError(
@@ -765,14 +812,20 @@ class VCF91OpenTelegrafIntegration(VCFOpsIntegration):
         except Exception:
             return "UNKNOWN"
 
-    def list_virtual_machines(self) -> List[VirtualMachineResource]:
-        """Discover virtual machines from VCF Operations inventory."""
+    def list_virtual_machines(self, strict: bool = False) -> List[VirtualMachineResource]:
+        """Discover virtual machines from VCF Operations inventory.
+
+        With strict=True an API or authentication failure raises instead of returning a
+        partial list, so callers can tell "not in inventory" from "could not ask".
+        """
         if not self.env.token and self.env.username and self.env.password:
             try:
                 self.acquire_token(self.env.username, self.env.password)
             except Exception:
                 pass
         if not self.env.token:
+            if strict:
+                raise RuntimeError("Cannot query VCF Operations inventory: no API token (check credentials)")
             return []
 
         headers = {
@@ -795,6 +848,10 @@ class VCF91OpenTelegrafIntegration(VCFOpsIntegration):
                 resp = self.session.get(url, headers=headers, params=params, timeout=20)
                 if resp.status_code != 200:
                     logger.warning("Suite API resource query failed on page %d with status %d", page, resp.status_code)
+                    if strict:
+                        raise RuntimeError(
+                            f"VCF Operations inventory query failed on page {page} with HTTP {resp.status_code}"
+                        )
                     break
 
                 data = resp.json()
@@ -842,6 +899,10 @@ class VCF91OpenTelegrafIntegration(VCFOpsIntegration):
                     break
                 page += 1
             except Exception as exc:
+                if strict:
+                    if isinstance(exc, RuntimeError) and "inventory query failed" in str(exc):
+                        raise
+                    raise RuntimeError(f"VCF Operations inventory query failed on page {page}: {exc}") from exc
                 logger.warning("Failed to list virtual machines on page %d from VCF Operations: %s", page, exc)
                 break
 

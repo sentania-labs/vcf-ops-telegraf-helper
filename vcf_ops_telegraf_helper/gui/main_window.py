@@ -204,6 +204,7 @@ class MainWindow(QMainWindow):
         self._cached_vms: list[VirtualMachineResource] = []
         self.selected_vm: Optional[VirtualMachineResource] = None
         self.selected_vm_mor: Optional[str] = None
+        self.bound_vm: Optional[VirtualMachineResource] = None
         self.selected_vc_id: Optional[str] = None
         self.selected_vm_name: Optional[str] = None
 
@@ -956,6 +957,7 @@ class MainWindow(QMainWindow):
         if not self.selected_vm:
             return
         vm = self.selected_vm
+        self.bound_vm = vm
         self.selected_vm_mor = vm.vm_mor
         self.selected_vc_id = vm.vc_id
         self.selected_vm_name = vm.name
@@ -1000,9 +1002,10 @@ class MainWindow(QMainWindow):
             self.ep_details_box.setPlainText("Endpoint details will appear here after detection.")
         if hasattr(self, "ep_missing_banner"):
             self.ep_missing_banner.setVisible(False)
-        selected_vm = getattr(self, "selected_vm", None)
-        if selected_vm and text.strip() not in (selected_vm.ip_address, selected_vm.name):
-            self.selected_vm = None
+        # Compare against the VM actually applied to the form, not the row merely highlighted
+        bound_vm = getattr(self, "bound_vm", None)
+        if bound_vm and text.strip() not in (bound_vm.ip_address, bound_vm.name):
+            self.bound_vm = None
             self.selected_vm_mor = None
             self.selected_vc_id = None
             self.selected_vm_name = None
@@ -1011,7 +1014,8 @@ class MainWindow(QMainWindow):
                 self.ep_mor_badge.setStyleSheet("")
 
     def _on_os_changed(self, os_name: str) -> None:
-        self._on_target_host_changed("")
+        # Reset detection state, but keep a VM binding that still matches the entered host
+        self._on_target_host_changed(self.ep_host_input.text() if hasattr(self, "ep_host_input") else "")
         is_win = os_name.lower().startswith("win")
         if is_win:
             if not self.ep_advanced_check.isChecked() or self.ep_port_input.text() == "22":
@@ -2589,6 +2593,8 @@ class MainWindow(QMainWindow):
             parts.append(f"--hostname {shlex.quote(reg_host)}")
         if getattr(target, "vm_mor", None):
             parts.append(f"--vm-id {shlex.quote(target.vm_mor)}")
+            if getattr(target, "vc_id", None):
+                parts.append(f"--vc-id {shlex.quote(target.vc_id)}")
         if getattr(self, "selected_vm_name", None):
             parts.append(f"--vm-name {shlex.quote(self.selected_vm_name)}")
 

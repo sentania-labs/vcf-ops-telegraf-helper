@@ -257,10 +257,10 @@ class WinRMExecutor(EndpointExecutor):
 
     def get_free_disk_space_mb(self, path: Optional[str] = None) -> int:
         """Return free disk space in megabytes on target Windows volume."""
-        script = (
-            "[int]((Get-PSDrive -PSProvider FileSystem | "
-            "Where-Object { $_.Free -gt 0 } | Sort-Object Free)[0].Free / 1MB)"
-        )
+        drive = (path or "C:").strip().rstrip("\\/").rstrip(":")[:1] or "C"
+        if not drive.isalpha():
+            drive = "C"
+        script = f"[int64]((Get-PSDrive -Name '{drive}' -PSProvider FileSystem -ErrorAction Stop).Free / 1MB)"
         res = self.execute(script, timeout=10)
         if res.success and res.stdout.strip().isdigit():
             return int(res.stdout.strip())

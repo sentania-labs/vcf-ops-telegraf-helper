@@ -787,6 +787,32 @@ def test_main_window_vm_inventory_table_filter_and_binding(qapp, tmp_path):
     assert window.ep_os_combo.currentText() == "Linux"
     assert "vm-102" in window.ep_mor_badge.text()
 
+    # Applying a Windows VM switches the OS combo; the binding must survive that switch
+    window.vm_table.selectRow(0)
+    window._apply_selected_vm_to_form()
+    assert window.ep_os_combo.currentText() == "Windows"
+    assert window.selected_vm_mor == "vm-101"
+    assert window.selected_vc_id == "vc-1"
+    target = window._get_endpoint_target()
+    assert target.vm_mor == "vm-101"
+    assert target.vc_id == "vc-1"
+    assert "vm-101" in window.ep_mor_badge.text()
+
+    # Highlighting another row without applying it must not let that host inherit the binding
+    window.vm_table.selectRow(1)
+    assert window.selected_vm.name == "linux-web01"
+    window.ep_host_input.setText("192.168.10.20")
+    assert window.selected_vm_mor is None
+    assert "Unmanaged" in window.ep_mor_badge.text()
+
+    # Re-apply the Windows VM; typing a different host still clears the binding
+    window.vm_table.selectRow(0)
+    window._apply_selected_vm_to_form()
+    assert window.selected_vm_mor == "vm-101"
+    window.ep_host_input.setText("10.99.99.99")
+    assert window.selected_vm_mor is None
+    assert "Unmanaged" in window.ep_mor_badge.text()
+
 
 def test_discovery_dialogs_instantiation_and_selection(qapp):
     """Verify live discovery modal dialogs populate tables and accept selections."""
@@ -823,6 +849,14 @@ def test_discovery_dialogs_instantiation_and_selection(qapp):
     conn_dlg = DatabaseConnectDialog(None, "Microsoft SQL Server", default_port=1433)
     assert conn_dlg.port == 1433
     assert conn_dlg.auth_mode == "integrated"
+    # The display title must still enable the SQL Server auth choices and report "sql"
+    assert conn_dlg.engine_name == "mssql"
+    conn_dlg.radio_sql.setChecked(True)
+    conn_dlg.user_input.setText("telegraf")
+    conn_dlg.pass_input.setText("pw")
+    conn_dlg._on_submit()
+    assert conn_dlg.auth_mode == "sql"
+    assert conn_dlg.username == "telegraf"
 
     # Database discovery dialog
     dbs = [

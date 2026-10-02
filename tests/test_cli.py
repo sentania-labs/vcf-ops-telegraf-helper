@@ -735,12 +735,32 @@ def test_cli_run_ca_cert_and_vm_binding(tmp_path):
             "--connection", "mock",
             "--ca-cert", str(ca_file),
             "--vm-name", "corp-db-01",
-            "--vm-id", "vm-9021",
+            "--vm-id", "vm-1042",
             "--preview",
         ],
     )
     assert res.exit_code == 0
     assert "corp-db-01" in res.output or "10.10.10.101" in res.output
+
+
+def test_cli_run_unknown_vm_id_fails_instead_of_enrolling_unmanaged():
+    """A --vm-id that is not in inventory must fail, not silently enroll an unmanaged host."""
+    runner = CliRunner()
+    res = runner.invoke(
+        cli,
+        [
+            "run",
+            "--vcf-url", "https://vcf-ops.local",
+            "--mock-vcf",
+            "--collector", "10.10.10.50",
+            "--target-host", "10.10.10.101",
+            "--connection", "mock",
+            "--vm-id", "vm-9021",
+            "--preview",
+        ],
+    )
+    assert res.exit_code != 0
+    assert "vm-9021" in res.output
 
 
 def test_cli_run_force_new_cert():
@@ -766,3 +786,23 @@ def test_cli_run_force_new_cert():
 
 
 
+
+
+def test_cli_run_vc_id_requires_vm_id():
+    """--vc-id on its own is rejected rather than silently dropped."""
+    runner = CliRunner()
+    res = runner.invoke(
+        cli,
+        [
+            "run",
+            "--vcf-url", "https://vcf-ops.local",
+            "--mock-vcf",
+            "--collector", "10.10.10.50",
+            "--target-host", "10.10.10.101",
+            "--connection", "mock",
+            "--vc-id", "vc-1",
+            "--preview",
+        ],
+    )
+    assert res.exit_code != 0
+    assert "--vc-id requires --vm-id" in res.output

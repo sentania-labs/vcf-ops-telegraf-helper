@@ -64,8 +64,14 @@ class VCFOpsIntegration(ABC):
         target_hostname: Optional[str] = None,
         target_uuid: Optional[str] = None,
         existing_cert_bundle: Optional[dict[str, Any]] = None,
+        vm_mor: Optional[str] = None,
+        vc_id: Optional[str] = None,
     ) -> IntegrationArtifacts:
-        """Prepare tokens, URLs, and artifacts for the open-source Telegraf workflow."""
+        """Prepare tokens, URLs, and artifacts for the open-source Telegraf workflow.
+
+        When vm_mor is supplied the endpoint is bound to that vCenter VM instead of
+        being matched by IP or hostname. vc_id is resolved from inventory if omitted.
+        """
         pass
 
     @abstractmethod
@@ -78,7 +84,7 @@ class VCFOpsIntegration(ABC):
         pass
 
     @abstractmethod
-    def list_virtual_machines(self) -> list[VirtualMachineResource]:
+    def list_virtual_machines(self, strict: bool = False) -> list[VirtualMachineResource]:
         """Discover virtual machines from VCF Operations inventory."""
         pass
 

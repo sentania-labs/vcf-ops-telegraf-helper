@@ -93,6 +93,8 @@ class MockVCFOpsIntegration(VCFOpsIntegration):
         target_hostname: Optional[str] = None,
         target_uuid: Optional[str] = None,
         existing_cert_bundle: Optional[dict[str, Any]] = None,
+        vm_mor: Optional[str] = None,
+        vc_id: Optional[str] = None,
     ) -> IntegrationArtifacts:
         collector_addr = self.env.collector.address
         script_name = "telegraf-utils.ps1" if os_family.lower() == "windows" else "telegraf-utils.sh"
@@ -104,6 +106,13 @@ class MockVCFOpsIntegration(VCFOpsIntegration):
             "#!/usr/bin/env bash\n"
             "echo 'mandatory.tag,OS_NAME=Linux,OS_VERSION=unknown,TELEGRAF_VERSION=1.40.1,HOSTNAME=localhost,IP=127.0.0.1 value=1i'\n"
         )
+        vm_name = None
+        if vm_mor and not vc_id:
+            match = next((vm for vm in self.list_virtual_machines() if vm.vm_mor == vm_mor), None)
+            if match is None:
+                raise RuntimeError(f"Requested VM binding '{vm_mor}' was not found in VCF Operations inventory.")
+            vc_id, vm_name = match.vc_id, match.name
+        is_managed = bool(vm_mor and vc_id)
         return IntegrationArtifacts(
             token="simulated-vcf-token-abc123xyz",
             collector_address=collector_addr,
@@ -114,8 +123,11 @@ class MockVCFOpsIntegration(VCFOpsIntegration):
             client_cert_content=MOCK_CERT_PEM,
             client_key_content=MOCK_KEY_PEM,
             mandatory_tags_content=win_tags if os_family.lower() == "windows" else linux_tags,
-            is_managed_vm=False,
-            client_id="simulated-client-id",
+            is_managed_vm=is_managed,
+            vm_name=vm_name,
+            vm_mor=vm_mor if is_managed else None,
+            vc_id=vc_id if is_managed else None,
+            client_id=f"{vc_id}_{vm_mor}" if is_managed else "simulated-client-id",
             mutual_auth=True,
             master_pub_content="ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQC simulated",
             vip_content=collector_addr,
@@ -125,7 +137,7 @@ class MockVCFOpsIntegration(VCFOpsIntegration):
     def verify_ingestion(self, target_hostname: str) -> str:
         return self.ingestion_status
 
-    def list_virtual_machines(self) -> list[VirtualMachineResource]:
+    def list_virtual_machines(self, strict: bool = False) -> list[VirtualMachineResource]:
         """Return simulated virtual machine inventory for tests and offline usage."""
         if hasattr(self, "_vms") and self._vms is not None:
             return self._vms
