@@ -149,3 +149,50 @@ def test_winrm_free_disk_space_queries_requested_drive():
 
         executor.get_free_disk_space_mb("D:\\telegraf")
         assert "-Name 'D'" in mock_session.run_ps.call_args[0][0]
+
+
+def test_winrm_test_connection_logs_real_error_without_password(caplog):
+    """A failed WinRM connection test logs the underlying error for the operator, never the password."""
+    import logging
+
+    executor = WinRMExecutor(hostname="automic.corp.local", username="INT\\sadmin", password="S3cret-pw")
+    mock_session = MagicMock()
+    mock_session.run_ps.side_effect = RuntimeError("the specified credentials were rejected by the server")
+
+    with patch.object(executor, "_get_session", return_value=mock_session):
+        with caplog.at_level(logging.WARNING, logger="vcf_ops_telegraf_helper"):
+            assert executor.test_connection() is False
+
+    logged = caplog.text
+    assert "credentials were rejected" in logged
+    assert "RuntimeError" in logged
+    assert "http://automic.corp.local:5985/wsman" in logged
+    assert "user 'INT\\\\sadmin'" in logged  # repr() doubles the backslash
+    # Guards against the log format ever including the executor's password field
+    assert "S3cret-pw" not in logged
+
+
+def test_winrm_execute_failure_keeps_exception_class():
+    """A failed WinRM call reports the exception class in stderr so the cause is identifiable."""
+    executor = WinRMExecutor(hostname="win-host.local", username="admin", password="secret")
+    mock_session = MagicMock()
+    mock_session.run_ps.side_effect = TimeoutError("timed out")
+    with patch.object(executor, "_get_session", return_value=mock_session):
+        res = executor.execute("hostname")
+    assert res.exit_code == 1
+    assert res.stderr == "TimeoutError: timed out"
+
+
+def test_winrm_test_connection_redacts_password_echoed_in_error(caplog):
+    """If an error message ever quotes the password, the log line masks it."""
+    import logging
+
+    executor = WinRMExecutor(hostname="win-host.local", username="admin", password="S3cret-pw")
+    mock_session = MagicMock()
+    mock_session.run_ps.side_effect = RuntimeError("login failed for admin with S3cret-pw")
+    with patch.object(executor, "_get_session", return_value=mock_session):
+        with caplog.at_level(logging.WARNING, logger="vcf_ops_telegraf_helper"):
+            assert executor.test_connection() is False
+    assert "login failed for admin" in caplog.text
+    assert "S3cret-pw" not in caplog.text
+

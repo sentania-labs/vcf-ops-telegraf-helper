@@ -9,10 +9,15 @@ from typing import Optional, Union
 import paramiko
 
 from vcf_ops_telegraf_helper.executors.base import CommandResult, EndpointExecutor
+from vcf_ops_telegraf_helper.logger import get_logger
+from vcf_ops_telegraf_helper.security.redaction import redact_secrets
 from vcf_ops_telegraf_helper.models.discovery import (
     DiscoveredDatabase,
     DiscoveredService,
 )
+
+
+logger = get_logger("executors.ssh")
 
 
 class SSHExecutor(EndpointExecutor):
@@ -66,9 +71,31 @@ class SSHExecutor(EndpointExecutor):
         try:
             self._ensure_connected()
             res = self.execute("uname -s", timeout=5)
-            return res.success and "linux" in res.stdout.lower()
-        except Exception:
-            return False
+        except Exception as exc:
+            res = CommandResult(exit_code=1, stdout="", stderr=f"{type(exc).__name__}: {exc}", command="")
+        if res.success and "linux" in res.stdout.lower():
+            return True
+        # The GUI shows a short message; the underlying SSH error goes to the log (never the password)
+        if res.success:
+            detail = f"connected, but 'uname -s' reported {res.stdout.strip()!r} instead of Linux"
+        else:
+            detail = (res.stderr or "").strip() or f"exit code {res.exit_code} with no output"
+        # Errors can echo input back; never let the password (also the key passphrase) reach the log
+        detail = redact_secrets(detail, [self.password] if self.password else None)
+        # paramiko offers every one of these that is available, so name them all
+        sources = [f"key file {self.key_filename}"] if self.key_filename else []
+        if self.password:
+            sources.append("password" if not self.key_filename else "password (also used as key passphrase)")
+        sources.extend(["SSH agent", "default keys"])
+        logger.warning(
+            "SSH connection test failed for %s:%d as user %r (%s): %s",
+            self.hostname,
+            self.port,
+            self.username,
+            ", ".join(sources),
+            detail[:2000],
+        )
+        return False
 
     def _is_privileged_path(self, path: str) -> bool:
         normalized = posixpath.normpath(path)

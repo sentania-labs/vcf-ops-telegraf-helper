@@ -7,11 +7,16 @@ import json
 from typing import Optional, Union
 
 from vcf_ops_telegraf_helper.executors.base import CommandResult, EndpointExecutor
+from vcf_ops_telegraf_helper.logger import get_logger
+from vcf_ops_telegraf_helper.security.redaction import redact_secrets
 from vcf_ops_telegraf_helper.models.discovery import (
     DiscoveredDatabase,
     DiscoveredPerfmonSet,
     DiscoveredService,
 )
+
+
+logger = get_logger("executors.winrm")
 
 
 class WinRMExecutor(EndpointExecutor):
@@ -63,9 +68,24 @@ class WinRMExecutor(EndpointExecutor):
         """Verify reachability and authentication to the Windows endpoint."""
         try:
             res = self.execute("$PSVersionTable.PSVersion.Major", timeout=10)
-            return res.success and len(res.stdout.strip()) > 0
-        except Exception:
-            return False
+        except Exception as exc:
+            res = CommandResult(exit_code=1, stdout="", stderr=f"{type(exc).__name__}: {exc}", command="")
+        if res.success and res.stdout.strip():
+            return True
+        # The GUI shows a short message; the underlying WinRM error goes to the log (never the password)
+        detail = (res.stderr or "").strip() or f"exit code {res.exit_code} with no output"
+        # Errors can echo input back; never let the password reach the persistent log
+        detail = redact_secrets(detail, [self.password] if self.password else None)
+        logger.warning(
+            "WinRM connection test failed for %s://%s:%d/wsman as user %r (transport %s): %s",
+            "https" if self.use_ssl else "http",
+            self.hostname,
+            self.port,
+            self.username or "Administrator",
+            self.transport,
+            detail[:2000],
+        )
+        return False
 
     def execute(self, command: str, timeout: int = 30) -> CommandResult:
         """Execute a PowerShell script block on the Windows target."""
@@ -85,7 +105,7 @@ class WinRMExecutor(EndpointExecutor):
             return CommandResult(
                 exit_code=1,
                 stdout="",
-                stderr=str(exc),
+                stderr=f"{type(exc).__name__}: {exc}",
                 command=command,
             )
 

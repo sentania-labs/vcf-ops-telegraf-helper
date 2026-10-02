@@ -449,6 +449,9 @@ class MainWindow(QMainWindow):
         nav_frame.setProperty("class", "lattice-card")
         nav_layout = QHBoxLayout(nav_frame)
         nav_layout.setContentsMargins(16, 10, 16, 10)
+        # "&" marks a keyboard shortcut in Qt button text; "&&" shows a literal ampersand
+        back_label = back_label.replace("&", "&&") if back_label else back_label
+        next_label = next_label.replace("&", "&&") if next_label else next_label
         if back_label:
             back_btn = QPushButton(f"<- Back: {back_label}")
             back_btn.clicked.connect(lambda: self.step_list.setCurrentRow(step - 1))
@@ -1308,7 +1311,7 @@ class MainWindow(QMainWindow):
             connected = executor.test_connection()
             if not connected:
                 self.logger.warning("Endpoint connection test failed for %s", target.hostname)
-                self.ep_status_label.setText("Connection failed: unable to connect")
+                self.ep_status_label.setText("Connection failed: unable to connect (details in View Log)")
                 self.ep_status_label.setStyleSheet("color: #d95926;")
                 if hasattr(self, "ep_missing_banner"):
                     self.ep_missing_banner.setVisible(False)
@@ -1517,7 +1520,7 @@ class MainWindow(QMainWindow):
         self.net_check = QCheckBox("Enable Network Interfaces")
         self.net_check.setChecked(True)
 
-        self.sys_check = QCheckBox("Enable System Load & Uptime")
+        self.sys_check = QCheckBox("Enable System Load && Uptime")
         self.sys_check.setChecked(True)
 
         self.swap_check = QCheckBox("Enable Swap Usage")
@@ -1743,7 +1746,7 @@ class MainWindow(QMainWindow):
         my_layout.setContentsMargins(0, 0, 0, 0)
         my_layout.addWidget(QLabel("MySQL / MariaDB Connection String:"))
         my_layout.addWidget(self.mysql_server_input)
-        self.btn_discover_mysql = QPushButton("⚡ Connect & Discover DBs")
+        self.btn_discover_mysql = QPushButton("⚡ Connect && Discover DBs")
         self.btn_discover_mysql.setProperty("class", "secondary")
         self.btn_discover_mysql.setToolTip("Query active databases on MySQL server instance")
         self.btn_discover_mysql.clicked.connect(lambda: self._on_discover_databases_clicked("mysql"))
@@ -1761,7 +1764,7 @@ class MainWindow(QMainWindow):
         pg_layout.setContentsMargins(0, 0, 0, 0)
         pg_layout.addWidget(QLabel("PostgreSQL Connection Address:"))
         pg_layout.addWidget(self.postgres_addr_input)
-        self.btn_discover_pg = QPushButton("⚡ Connect & Discover DBs")
+        self.btn_discover_pg = QPushButton("⚡ Connect && Discover DBs")
         self.btn_discover_pg.setProperty("class", "secondary")
         self.btn_discover_pg.setToolTip("Query active databases on PostgreSQL server instance")
         self.btn_discover_pg.clicked.connect(lambda: self._on_discover_databases_clicked("postgresql"))
@@ -1779,7 +1782,7 @@ class MainWindow(QMainWindow):
         ms_layout.setContentsMargins(0, 0, 0, 0)
         ms_layout.addWidget(QLabel("Microsoft SQL Server Connection String:"))
         ms_layout.addWidget(self.mssql_server_input)
-        self.btn_discover_mssql = QPushButton("⚡ Connect & Discover DBs")
+        self.btn_discover_mssql = QPushButton("⚡ Connect && Discover DBs")
         self.btn_discover_mssql.setProperty("class", "secondary")
         self.btn_discover_mssql.setToolTip("Query active database catalogs on Microsoft SQL Server instance")
         self.btn_discover_mssql.clicked.connect(lambda: self._on_discover_databases_clicked("mssql"))
@@ -2484,10 +2487,6 @@ class MainWindow(QMainWindow):
         self.dry_run_check = QCheckBox("Dry-run only (Simulate without target modifications)")
         action_row.addWidget(self.dry_run_check)
 
-        self.execute_btn = QPushButton("Execute Guided Workflow")
-        self.execute_btn.setProperty("class", "primary")
-        self.execute_btn.clicked.connect(self._run_workflow)
-        action_row.addWidget(self.execute_btn)
         action_row.addStretch()
 
         self.export_md_btn = QPushButton("Export Markdown")
@@ -2546,7 +2545,12 @@ class MainWindow(QMainWindow):
 
         scroll.setWidget(content)
 
-        nav_frame, _ = self._build_nav(self.STEP_EXECUTE, "Review & Preview", None)
+        nav_frame, nav_layout = self._build_nav(self.STEP_EXECUTE, "Review & Preview", None)
+        # Same bottom-right slot as every other step's advance button
+        self.execute_btn = QPushButton("Execute Guided Workflow ->")
+        self.execute_btn.setProperty("class", "primary")
+        self.execute_btn.clicked.connect(self._run_workflow)
+        nav_layout.addWidget(self.execute_btn)
 
         v = QVBoxLayout(page)
         v.setContentsMargins(0, 0, 0, 0)
