@@ -947,3 +947,37 @@ def test_gui_ampersand_texts_escaped(qapp, tmp_path):
     assert window.sys_check.text() == "Enable System Load && Uptime"
     assert dlg.findChild(QDialogButtonBox).button(QDialogButtonBox.Ok).text() == "Connect && Discover"
 
+
+def test_main_window_execute_recovers_when_setup_fails(qapp, tmp_path, monkeypatch):
+    """If the run fails before the worker starts, Execute is usable again and the error is shown (#33)."""
+    from vcf_ops_telegraf_helper.gui import main_window as mw
+
+    window = MainWindow(state_store=StateStore(state_file=tmp_path / "state.json"))
+    monkeypatch.setattr(mw.QMessageBox, "critical", lambda *a, **k: None)
+    monkeypatch.setattr(window, "_create_executor", lambda target: (_ for _ in ()).throw(RuntimeError("no route to host")))
+    window._run_workflow()
+    assert window.execute_btn.isEnabled() is True
+    assert "no route to host" in window.stage_list_box.toPlainText()
+
+
+def test_main_window_pages_fit_at_minimum_size(qapp, tmp_path):
+    """At the smallest allowed window size no step, and no plugin card, needs a sideways scroll."""
+    from PySide6.QtWidgets import QScrollArea
+
+    window = MainWindow(state_store=StateStore(state_file=tmp_path / "state.json"))
+    window.show()
+    window.resize(window.minimumSize())
+    overflowing = []
+    for page in range(window.page_stack.count()):
+        window.page_stack.setCurrentIndex(page)
+        rows = range(window.plugin_catalog_list.count()) if page == window.STEP_MONITORING else [None]
+        for row in rows:
+            if row is not None:
+                window.plugin_catalog_list.setCurrentRow(row)
+            qapp.processEvents()
+            scroll = window.page_stack.currentWidget().findChild(QScrollArea)
+            if scroll.horizontalScrollBar().isVisible():
+                overflowing.append((page + 1, row))
+    assert window.plugin_catalog_list.horizontalScrollBar().isVisible() is False
+    assert overflowing == []
+

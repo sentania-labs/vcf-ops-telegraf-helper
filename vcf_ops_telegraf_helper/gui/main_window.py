@@ -213,7 +213,8 @@ class MainWindow(QMainWindow):
 
         self.setWindowTitle("VCF Operations Open Telegraf Helper")
         self.resize(1150, 840)
-        self.setMinimumSize(960, 680)
+        # Narrow enough for small laptop screens, wide enough that no step needs a sideways scroll
+        self.setMinimumSize(1120, 680)
 
         self._init_ui()
         self._apply_theme()
@@ -1841,6 +1842,13 @@ class MainWindow(QMainWindow):
             self.plugin_catalog_list.addItem(item)
             chk.toggled.connect(lambda checked, i=idx: self._sync_checkbox_to_catalog(i, checked))
 
+        # Long names shorten with an ellipsis (full name in the tooltip) instead of scrolling sideways
+        self.plugin_catalog_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.plugin_catalog_list.setTextElideMode(Qt.ElideRight)
+        for i in range(self.plugin_catalog_list.count()):
+            item = self.plugin_catalog_list.item(i)
+            item.setToolTip(item.text())
+
         self.plugin_catalog_list.itemChanged.connect(self._on_catalog_item_changed)
         self.plugin_catalog_list.currentRowChanged.connect(self._on_catalog_row_changed)
         self.plugin_catalog_list.setCurrentRow(0)
@@ -1893,6 +1901,7 @@ class MainWindow(QMainWindow):
 
         card_title = QLabel(title)
         card_title.setProperty("class", "lattice-title")
+        card_title.setWordWrap(True)
         header_row.addWidget(card_title)
         header_row.addStretch()
         layout.addLayout(header_row)
@@ -2690,6 +2699,14 @@ class MainWindow(QMainWindow):
         self.stage_list_box.clear()
         self.export_md_btn.setEnabled(False)
         self.export_json_btn.setEnabled(False)
+        try:
+            self._start_workflow_worker()
+        except Exception as exc:
+            # Setup failed before the worker existed, so no worker signal will re-enable the buttons
+            self.logger.exception("Failed to start workflow")
+            self._on_worker_failed(f"Could not start the workflow: {exc}")
+
+    def _start_workflow_worker(self) -> None:
         self._update_cli_command()
 
         target = self._get_endpoint_target()
