@@ -5,6 +5,7 @@ from __future__ import annotations
 import subprocess
 import sys
 from unittest.mock import patch
+import pytest
 from click.testing import CliRunner
 
 from vcf_ops_telegraf_helper.cli.main import _is_windows_double_click, cli
@@ -424,51 +425,20 @@ def test_cli_password_env_fallbacks(monkeypatch):
     assert result.exit_code == 0
 
 
-def test_cli_run_mode_script_generates_bundle(tmp_path):
-    """Verify --mode script writes deploy-telegraf.sh and bundle files to output-dir without remote connection."""
-    bundle_out = tmp_path / "test-script-bundle"
+def test_cli_run_rejects_removed_bundle_modes():
+    """Only direct push is offered: --mode, --output-dir, and the package connection are gone."""
     runner = CliRunner()
-    result = runner.invoke(
-        cli,
-        [
-            "run",
-            "--vcf-url", "https://vcf.local",
-            "--mock-vcf",
-            "--collector", "10.10.10.50",
-            "--target-host", "node01.corp.local",
-            "--mode", "script",
-            "--output-dir", str(bundle_out),
-        ],
-    )
-    assert result.exit_code == 0
-    assert (bundle_out / "deploy-telegraf.sh").exists()
-    script_txt = (bundle_out / "deploy-telegraf.sh").read_text(encoding="utf-8")
-    assert "systemctl restart telegraf" in script_txt
-    assert "MUTUAL_AUTHENTICATION" in script_txt
-    assert (bundle_out / "etc" / "telegraf" / "telegraf.d" / "vcf-helper-system.conf").exists()
-    assert (bundle_out / "etc" / "telegraf" / "telegraf.d" / "cloudproxy-http.conf").exists()
-
-
-def test_cli_run_mode_config_only_generates_bundle(tmp_path):
-    """Verify --mode config_only writes configuration files without deploy scripts."""
-    bundle_out = tmp_path / "test-cfg-bundle"
-    runner = CliRunner()
-    result = runner.invoke(
-        cli,
-        [
-            "run",
-            "--vcf-url", "https://vcf.local",
-            "--mock-vcf",
-            "--collector", "10.10.10.50",
-            "--target-host", "node01.corp.local",
-            "--mode", "config_only",
-            "--output-dir", str(bundle_out),
-        ],
-    )
-    assert result.exit_code == 0
-    assert not (bundle_out / "deploy-telegraf.sh").exists()
-    assert (bundle_out / "etc" / "telegraf" / "telegraf.d" / "vcf-helper-system.conf").exists()
-    assert (bundle_out / "etc" / "telegraf" / "telegraf.d" / "cloudproxy-http.conf").exists()
+    base = [
+        "run",
+        "--vcf-url", "https://vcf.local",
+        "--mock-vcf",
+        "--collector", "10.10.10.50",
+        "--target-host", "node01.corp.local",
+    ]
+    for extra in (["--mode", "script"], ["--output-dir", "./bundle"], ["--connection", "package"]):
+        result = runner.invoke(cli, base + extra)
+        assert result.exit_code == 2, extra
+        assert "Error" in result.output
 
 
 def test_cli_ssh_and_winrm_default_users(monkeypatch):
@@ -673,8 +643,16 @@ def test_cli_version_option():
     assert __version__ in res_short.output
 
 
-def test_cli_vms_command_listing_and_filtering():
-    """Verify vms command queries inventory and applies OS and query filters."""
+@pytest.fixture
+def wide_console(monkeypatch):
+    """Render CLI tables at a realistic operator width so cells are not wrapped mid-word."""
+    from vcf_ops_telegraf_helper.cli import main as cli_main
+
+    monkeypatch.setattr(cli_main.console, "width", 200)
+
+
+def test_cli_vms_command_listing_and_filtering(wide_console):
+    """Verify vms command queries inventory and applies OS, query, power, and status filters."""
     runner = CliRunner()
     res = runner.invoke(
         cli,
@@ -716,6 +694,52 @@ def test_cli_vms_command_listing_and_filtering():
     assert res_q.exit_code == 0
     assert "k8s-node01" in res_q.output
     assert "dbdemo01" not in res_q.output
+
+    # Powered-off VMs are hidden by default and shown on request
+    assert "legacy-app01" not in res.output
+    res_off = runner.invoke(
+        cli,
+        ["vms", "--vcf-url", "https://vcf-ops.local", "--mock-vcf", "--include-powered-off"],
+    )
+    assert res_off.exit_code == 0
+    assert "legacy-app01" in res_off.output
+    assert "Powered Off" in res_off.output
+
+    # Agent status filter uses the values reported by VCF Operations
+    res_rep = runner.invoke(
+        cli,
+        ["vms", "--vcf-url", "https://vcf-ops.local", "--mock-vcf", "--status", "reporting"],
+    )
+    assert res_rep.exit_code == 0
+    assert "webapp01" in res_rep.output
+    assert "Reporting" in res_rep.output
+    assert "dbdemo01" not in res_rep.output
+
+    res_nd = runner.invoke(
+        cli,
+        ["vms", "--vcf-url", "https://vcf-ops.local", "--mock-vcf", "--status", "no-data"],
+    )
+    assert res_nd.exit_code == 0
+    assert "k8s-node01" in res_nd.output
+    assert "webapp01" not in res_nd.output
+
+
+def test_cli_vms_shows_multiple_registrations(monkeypatch, wide_console):
+    """A VM with more than one agent registration shows the count next to its status."""
+    from vcf_ops_telegraf_helper.adapters.mock import MockVCFOpsIntegration
+    from vcf_ops_telegraf_helper.models.vcf import VirtualMachineResource
+
+    dup = VirtualMachineResource(
+        resource_id="r1", name="mssqldemo", ip_address="172.31.4.80", vm_mor="vm-1005", vc_id="vc-1",
+        os_family="WINDOWS", power_state="Powered On", telegraf_status="No data", agent_registrations=2,
+        collector_group="CP Group 1",
+    )
+    monkeypatch.setattr(MockVCFOpsIntegration, "list_virtual_machines", lambda self, strict=False: [dup])
+    runner = CliRunner()
+    res = runner.invoke(cli, ["vms", "--vcf-url", "https://vcf-ops.local", "--mock-vcf"])
+    assert res.exit_code == 0
+    assert "No data (2 registrations)" in res.output
+    assert "CP Group 1" in res.output
 
 
 def test_cli_run_ca_cert_and_vm_binding(tmp_path):

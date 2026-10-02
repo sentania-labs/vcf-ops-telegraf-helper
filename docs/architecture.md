@@ -59,7 +59,6 @@ Endpoint interactions are abstracted behind `EndpointExecutor`:
 * `LocalExecutor`: Executes directly on the local machine (useful for testing or local endpoints).
 * `MockExecutor`: Provides simulated responses for unit and integration testing without network dependencies.
 * `SSHExecutor`: Handles secure remote command execution and SFTP uploads on Linux endpoints via Paramiko.
-* `PackageExecutor`: Generates deployment bundles (shell scripts, configs, instructions) without remote execution.
 
 ### 5. Validation Layer
 Validation never collapses into a generic success status. It reports discrete statuses across independent failure domains:

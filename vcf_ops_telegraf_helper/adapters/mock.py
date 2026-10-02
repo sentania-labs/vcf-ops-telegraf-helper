@@ -142,62 +142,38 @@ class MockVCFOpsIntegration(VCFOpsIntegration):
         if hasattr(self, "_vms") and self._vms is not None:
             return self._vms
 
+        def _vm(idx: int, name: str, ip: str, mor: str, os_name: str, power: str = "Powered On",
+                status: str = "Not installed", collector: Optional[str] = None) -> VirtualMachineResource:
+            return VirtualMachineResource(
+                resource_id=f"res-vm-{idx:03d}",
+                name=name,
+                ip_address=ip,
+                hostname=name,
+                vm_mor=mor,
+                vc_id=f"423b-81f0-91a2-{idx:04d}",
+                os_name=os_name,
+                os_family="WINDOWS" if "windows" in os_name.lower() else "LINUX",
+                power_state=power,
+                collector_group="Simulated CP Group" if collector else None,
+                collector_address=collector,
+                telegraf_status=status,
+                agent_registrations=0 if status == "Not installed" else 1,
+            )
+
         return [
-            VirtualMachineResource(
-                resource_id="res-vm-001",
-                name="dbdemo01",
-                ip_address="172.17.0.2",
-                vm_mor="vm-1001",
-                vc_id="423b-81f0-91a2-0001",
-                os_name="Windows Server 2022 Datacenter",
-                os_family="WINDOWS",
-                collector_group="Default Collector Group",
-                telegraf_status="MISSING",
-            ),
-            VirtualMachineResource(
-                resource_id="res-vm-002",
-                name="mssqldemo2",
-                ip_address="172.16.3.80",
-                vm_mor="vm-1042",
-                vc_id="423b-81f0-91a2-0002",
-                os_name="Windows Server 2025 Standard",
-                os_family="WINDOWS",
-                collector_group="Default Collector Group",
-                telegraf_status="MISSING",
-            ),
-            VirtualMachineResource(
-                resource_id="res-vm-003",
-                name="oraclesrv01",
-                ip_address="172.18.2.14",
-                vm_mor="vm-1004",
-                vc_id="423b-81f0-91a2-0003",
-                os_name="Red Hat Enterprise Linux 9.4",
-                os_family="LINUX",
-                collector_group="DMZ Collector Group",
-                telegraf_status="MISSING",
-            ),
-            VirtualMachineResource(
-                resource_id="res-vm-004",
-                name="webapp01",
-                ip_address="172.16.10.5",
-                vm_mor="vm-1020",
-                vc_id="423b-81f0-91a2-0004",
-                os_name="Ubuntu 24.04 LTS",
-                os_family="LINUX",
-                collector_group="Default Collector Group",
-                telegraf_status="ACTIVE",
-                telegraf_version="1.40.1",
-            ),
-            VirtualMachineResource(
-                resource_id="res-vm-005",
-                name="k8s-node01",
-                ip_address="172.19.1.50",
-                vm_mor="vm-2005",
-                vc_id="423b-81f0-91a2-0005",
-                os_name="Ubuntu 22.04 LTS",
-                os_family="LINUX",
-                collector_group="PCI Cluster Group",
-                telegraf_status="STOPPED",
-            ),
+            _vm(1, "dbdemo01", "172.17.0.2", "vm-1001", "Microsoft Windows Server 2022 (64-bit)"),
+            _vm(2, "mssqldemo2", "172.16.3.80", "vm-1042", "Microsoft Windows Server 2025 (64-bit)"),
+            _vm(3, "oraclesrv01", "172.18.2.14", "vm-1004", "Red Hat Enterprise Linux 9 (64-bit)"),
+            _vm(4, "webapp01", "172.16.10.5", "vm-1020", "Ubuntu Linux (64-bit)", status="Reporting", collector="10.10.10.51"),
+            _vm(5, "k8s-node01", "172.19.1.50", "vm-2005", "Ubuntu Linux (64-bit)", status="No data", collector="10.10.10.52"),
+            _vm(6, "legacy-app01", "172.19.1.60", "vm-2006", "Ubuntu Linux (64-bit)", power="Powered Off"),
+        ]
+
+    def list_collector_targets(self) -> list[CollectorInfo]:
+        """Return a simulated collector group with a virtual IP and two cloud proxies."""
+        return [
+            CollectorInfo(address="10.10.10.50", name="Simulated CP Group", is_collector_group=True),
+            CollectorInfo(address="10.10.10.51", name="Simulated CP Group", display_name="cloudproxy01"),
+            CollectorInfo(address="10.10.10.52", name="Simulated CP Group", display_name="cloudproxy02"),
         ]
 

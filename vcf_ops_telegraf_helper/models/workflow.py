@@ -11,11 +11,9 @@ from vcf_ops_telegraf_helper.utils import local_now_formatted
 
 
 class DeploymentMode(str, Enum):
-    """Supported deployment modes."""
+    """Supported deployment modes. Only direct push over SSH or WinRM is offered."""
 
     PUSH = "push"
-    SCRIPT = "script"
-    CONFIG_ONLY = "config_only"
 
 
 class WorkflowStage(str, Enum):
@@ -83,7 +81,6 @@ class WorkflowOptions(BaseModel):
 
     mode: DeploymentMode = DeploymentMode.PUSH
     dry_run: bool = False
-    output_dir: Optional[str] = None
     restart_service: bool = True
     skip_collector_check: bool = False
     preview_only: bool = False

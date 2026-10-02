@@ -373,52 +373,131 @@ def test_vcf91_fetch_mandatory_tag_script_fallback():
     assert "BOOTSTRAP_FQDN" in script_bat
 
 
-def test_vcf91_list_virtual_machines():
-    """Verify list_virtual_machines parses Suite API resources and identifier properties."""
-    env = VCFEnvironment(
+def _vm_res(rid, name, mor, vcid, state="STARTED"):
+    return {
+        "identifier": rid,
+        "resourceKey": {
+            "name": name,
+            "adapterKindKey": "VMWARE",
+            "resourceKindKey": "VirtualMachine",
+            "resourceIdentifiers": [
+                {"identifierType": {"name": "VMEntityName"}, "value": name},
+                {"identifierType": {"name": "VMEntityObjectID"}, "value": mor},
+                {"identifierType": {"name": "VMEntityVCID"}, "value": vcid},
+            ],
+        },
+        "resourceStatusStates": [{"resourceState": state, "adapterInstanceId": "vc-adapter"}],
+    }
+
+
+def _fake_suite_api():
+    """Session whose GET answers mirror VCF Operations 9.1 response shapes for inventory calls."""
+    vms = [
+        _vm_res("r-win", "win-app01", "vm-201", "vc-1"),
+        _vm_res("r-lin", "lin-db01", "vm-202", "vc-1"),
+        _vm_res("r-tmpl", "ubuntu-template", "vm-203", "vc-1"),
+        _vm_res("r-gone", "deleted-vm", "vm-204", "vc-1", state="NOT_EXISTING"),
+    ]
+    props = {
+        "r-win": {"summary|runtime|powerState": "Powered On", "summary|config|isTemplate": "false",
+                  "summary|guest|ipAddress": "192.168.1.100", "summary|guest|hostName": "win-app01.corp.local",
+                  "config|guestFullName": "Microsoft Windows Server 2022 (64-bit)"},
+        "r-lin": {"summary|runtime|powerState": "Powered Off", "summary|config|isTemplate": "false",
+                  "summary|guest|ipAddress": "none", "config|guestFullName": "Ubuntu Linux (64-bit)"},
+        "r-tmpl": {"summary|runtime|powerState": "Powered Off", "summary|config|isTemplate": "true"},
+    }
+    agents = [{
+        "identifier": "a-1",
+        "resourceKey": {
+            "name": "Windows OS on win-app01", "resourceKindKey": "win",
+            "resourceIdentifiers": [
+                {"identifierType": {"name": "VCID"}, "value": "vc-1"},
+                {"identifierType": {"name": "VMMOR"}, "value": "vm-201"},
+            ],
+        },
+        "resourceStatusStates": [{"resourceState": "STARTED", "resourceStatus": "DATA_RECEIVING", "adapterInstanceId": "ai-1"}],
+    }]
+
+    def _resp(payload):
+        r = MagicMock()
+        r.status_code = 200
+        r.json.return_value = payload
+        return r
+
+    def get(url, headers=None, params=None, timeout=None):
+        if url.endswith("/resources/properties"):
+            ids = [v for k, v in params if k == "resourceId"]
+            return _resp({"resourcePropertiesList": [
+                {"resourceId": i, "property": [{"name": k, "value": v} for k, v in props.get(i, {}).items()]} for i in ids
+            ]})
+        if url.endswith("/resources") and params.get("adapterKind") == "APPOSUCP":
+            return _resp({"resourceList": agents, "pageInfo": {"totalCount": len(agents)}})
+        if url.endswith("/resources"):
+            return _resp({"resourceList": vms, "pageInfo": {"totalCount": len(vms)}})
+        if url.endswith("/adapters"):
+            return _resp({"adapterInstancesInfoDto": [{"id": "ai-1", "collectorId": 3}]})
+        if url.endswith("/collectors"):
+            return _resp({"collector": [
+                {"id": "3", "name": "cp01", "hostName": "10.0.0.52", "type": "UNIFIED_CLOUD_PROXY"},
+                {"id": "4", "name": "cp02", "hostName": "10.0.0.53", "type": "UNIFIED_CLOUD_PROXY"},
+                {"id": "5", "name": "ops-node", "hostName": "10.0.0.42", "type": "INTERNAL"},
+            ]})
+        if url.endswith("/collectorGroups") or url.endswith("/collectorgroups"):
+            return _resp({"collectorGroups": [
+                {"name": "CP Group 1", "collectorId": [3, 4], "virtualIP": "10.0.0.54"},
+                {"name": "Default collector group", "collectorId": [5]},
+            ]})
+        raise AssertionError(f"unexpected GET {url}")
+
+    session = MagicMock(spec=requests.Session)
+    session.get.side_effect = get
+    return session
+
+
+def _api_env():
+    return VCFEnvironment(
         name="test",
         url="https://vcf-ops.corp.local",
         username="admin",
         token="test-token-123",
         collector=CollectorInfo(address="10.10.10.50"),
     )
-    mock_session = MagicMock(spec=requests.Session)
-    mock_resp = MagicMock()
-    mock_resp.status_code = 200
-    mock_resp.json.return_value = {
-        "resourceList": [
-            {
-                "identifier": "res-uuid-001",
-                "resourceKey": {
-                    "name": "win-app01",
-                    "adapterKindKey": "VMWARE",
-                    "resourceKindKey": "VirtualMachine",
-                    "resourceIdentifiers": [
-                        {"identifierType": {"name": "VMEntityName"}, "value": "win-app01"},
-                        {"identifierType": {"name": "VMEntityObjectID"}, "value": "vm-201"},
-                        {"identifierType": {"name": "VMEntityVCID"}, "value": "vc-uuid-1"},
-                    ],
-                },
-                "resourceProperties": [
-                    {"name": "summary|guest|operatingSystem", "value": "Microsoft Windows Server 2022"},
-                    {"name": "summary|guest|ipAddress", "value": "192.168.1.100"},
-                ],
-            }
-        ]
-    }
-    mock_session.get.return_value = mock_resp
 
-    adapter = VCF91OpenTelegrafIntegration(env, session=mock_session)
-    vms = adapter.list_virtual_machines()
 
-    assert len(vms) == 1
-    assert vms[0].resource_id == "res-uuid-001"
-    assert vms[0].name == "win-app01"
-    assert vms[0].ip_address == "192.168.1.100"
-    assert vms[0].vm_mor == "vm-201"
-    assert vms[0].vc_id == "vc-uuid-1"
-    assert vms[0].os_family == "WINDOWS"
+def test_vcf91_list_virtual_machines():
+    """Inventory reads guest details from bulk properties, drops templates and deleted VMs, and joins agent status."""
+    adapter = VCF91OpenTelegrafIntegration(_api_env(), session=_fake_suite_api())
+    vms = {vm.name: vm for vm in adapter.list_virtual_machines()}
 
+    assert set(vms) == {"win-app01", "lin-db01"}
+    win = vms["win-app01"]
+    assert win.ip_address == "192.168.1.100"
+    assert win.hostname == "win-app01.corp.local"
+    assert win.os_family == "WINDOWS"
+    assert win.is_powered_on is True
+    assert win.vm_mor == "vm-201" and win.vc_id == "vc-1"
+    assert win.telegraf_status == "Reporting"
+    assert win.agent_registrations == 1
+    assert win.collector_address == "10.0.0.52"
+    assert win.collector_group == "CP Group 1"
+
+    lin = vms["lin-db01"]
+    assert lin.ip_address is None  # "none" from VMware Tools means no address
+    assert lin.os_family == "LINUX"
+    assert lin.is_powered_on is False
+    assert lin.telegraf_status == "Not installed"
+    assert lin.collector_group is None
+
+
+def test_vcf91_list_collector_targets():
+    """Only groups with cloud proxies are offered, via their virtual IP, plus each proxy."""
+    adapter = VCF91OpenTelegrafIntegration(_api_env(), session=_fake_suite_api())
+    targets = [(t.address, t.name, t.is_collector_group, t.display_name) for t in adapter.list_collector_targets()]
+    assert targets == [
+        ("10.0.0.54", "CP Group 1", True, None),
+        ("10.0.0.52", "CP Group 1", False, "cp01"),
+        ("10.0.0.53", "CP Group 1", False, "cp02"),
+    ]
 
 def test_vcf91_reuse_existing_cert_bundle():
     """Verify prepare_telegraf_integration reuses valid existing cert bundle to avoid cert minting."""
@@ -541,25 +620,28 @@ def test_vcf91_explicit_vm_binding_skips_ip_discovery():
 
 
 def test_vcf91_vm_binding_mor_only_resolution():
-    """A bare MOR resolves through inventory, and fails loudly when missing or ambiguous."""
+    """A bare MOR resolves through inventory, and fails loudly when missing, deleted, or ambiguous."""
     import pytest
-    from vcf_ops_telegraf_helper.models.vcf import VirtualMachineResource
 
     adapter = _cert_adapter("10.10.10.50")
-
-    def _vm(mor, vcid, name):
-        return VirtualMachineResource(resource_id=name, name=name, vm_mor=mor, vc_id=vcid)
-
-    adapter.list_virtual_machines = MagicMock(return_value=[_vm("vm-201", "vc-1", "app01"), _vm("vm-300", "vc-1", "x")])
+    adapter._fetch_paged_resources = MagicMock(return_value=[
+        _vm_res("r1", "app01", "vm-201", "vc-1"),
+        _vm_res("r2", "x", "vm-300", "vc-1"),
+        _vm_res("r3", "gone", "vm-400", "vc-1", state="NOT_EXISTING"),
+    ])
     assert adapter.resolve_bound_vm("vm-201") == (True, "app01", "vc-1", "vm-201")
 
     with pytest.raises(RuntimeError, match="not found"):
         adapter.resolve_bound_vm("vm-999")
+    with pytest.raises(RuntimeError, match="not found"):
+        adapter.resolve_bound_vm("vm-400")
 
-    adapter.list_virtual_machines = MagicMock(return_value=[_vm("vm-201", "vc-1", "a"), _vm("vm-201", "vc-2", "b")])
+    adapter._fetch_paged_resources = MagicMock(return_value=[
+        _vm_res("r1", "a", "vm-201", "vc-1"),
+        _vm_res("r2", "b", "vm-201", "vc-2"),
+    ])
     with pytest.raises(RuntimeError, match="more than one vCenter"):
         adapter.resolve_bound_vm("vm-201")
-
 
 def test_vcf91_cert_reuse_requires_matching_client_identity():
     """A cert issued for a different client identity is not reused; a matching one is."""
@@ -618,11 +700,166 @@ def test_vcf91_vm_binding_reports_inventory_failure_not_missing_vm():
 def test_vcf91_vm_binding_mor_without_vc_id_message():
     """A MOR present in inventory without a vCenter ID gets a specific message."""
     import pytest
-    from vcf_ops_telegraf_helper.models.vcf import VirtualMachineResource
 
     adapter = _cert_adapter("10.10.10.50")
-    adapter.list_virtual_machines = MagicMock(
-        return_value=[VirtualMachineResource(resource_id="r", name="a", vm_mor="vm-201", vc_id=None)]
-    )
+    res = _vm_res("r", "a", "vm-201", "vc-1")
+    res["resourceKey"]["resourceIdentifiers"] = [
+        i for i in res["resourceKey"]["resourceIdentifiers"] if i["identifierType"]["name"] != "VMEntityVCID"
+    ]
+    adapter._fetch_paged_resources = MagicMock(return_value=[res])
     with pytest.raises(RuntimeError, match="has no vCenter ID"):
         adapter.resolve_bound_vm("vm-201")
+
+
+def _patched_api(overrides):
+    """Fake Suite API where specific URL suffixes return a given status code or payload."""
+    base = _fake_suite_api().get.side_effect
+
+    def get(url, headers=None, params=None, timeout=None):
+        for suffix, (code, payload) in overrides.items():
+            key_ok = suffix(url, params) if callable(suffix) else url.endswith(suffix)
+            if key_ok:
+                r = MagicMock()
+                r.status_code = code
+                r.json.return_value = payload
+                r.text = ""
+                return r
+        return base(url, headers=headers, params=params, timeout=timeout)
+
+    session = MagicMock(spec=requests.Session)
+    session.get.side_effect = get
+    return session
+
+
+def test_vcf91_agent_lookup_failure_degrades_to_unknown():
+    """If agent objects cannot be read, VMs are still listed with status Unknown and a warning."""
+    apposucp = lambda url, params: url.endswith("/resources") and (params or {}).get("adapterKind") == "APPOSUCP"  # noqa: E731
+    adapter = VCF91OpenTelegrafIntegration(_api_env(), session=_patched_api({apposucp: (404, {})}))
+    vms = adapter.list_virtual_machines(strict=True)
+    assert {vm.name for vm in vms} == {"win-app01", "lin-db01"}
+    assert {vm.telegraf_status for vm in vms} == {"Unknown"}
+    assert "Agent status unavailable" in adapter.inventory_warning
+
+
+def test_vcf91_collector_query_failure_raises_for_targets():
+    """A failed collector query is an error, not an empty list of cloud proxies."""
+    import pytest
+
+    adapter = VCF91OpenTelegrafIntegration(_api_env(), session=_patched_api({"/collectors": (500, {})}))
+    with pytest.raises(RuntimeError, match="collector query failed"):
+        adapter.list_collector_targets()
+
+
+def test_vcf91_proxy_without_address_is_skipped_and_vip_keys():
+    """A proxy with no hostName is skipped instead of breaking the list; vip key variants are honoured."""
+    adapter = VCF91OpenTelegrafIntegration(_api_env(), session=_patched_api({
+        "/collectors": (200, {"collector": [
+            {"id": "3", "name": "cp01", "hostName": "10.0.0.52", "type": "UNIFIED_CLOUD_PROXY"},
+            {"id": "4", "name": "cp02", "hostName": None, "type": "UNIFIED_CLOUD_PROXY"},
+        ]}),
+        "/collectorGroups": (200, {"collectorGroups": [{"name": "CP Group 1", "collectorId": [3, 4], "vip": "10.0.0.54"}]}),
+    }))
+    targets = [(t.address, t.is_collector_group) for t in adapter.list_collector_targets()]
+    assert targets == [("10.0.0.54", True), ("10.0.0.52", False)]
+
+
+def test_vcf91_agent_status_uses_agent_adapter_state():
+    """Agent status comes from the application monitoring adapter's state, not whichever state is listed first."""
+    agent = {
+        "identifier": "a-1",
+        "resourceKey": {
+            "name": "Windows OS on win-app01", "resourceKindKey": "win",
+            "resourceIdentifiers": [
+                {"identifierType": {"name": "VCID"}, "value": "vc-1"},
+                {"identifierType": {"name": "VMMOR"}, "value": "vm-201"},
+            ],
+        },
+        "resourceStatusStates": [
+            {"resourceState": "STARTED", "resourceStatus": "NO_DATA_RECEIVING", "adapterInstanceId": "other"},
+            {"resourceState": "STARTED", "resourceStatus": "DATA_RECEIVING", "adapterInstanceId": "ai-1"},
+        ],
+    }
+    apposucp = lambda url, params: url.endswith("/resources") and (params or {}).get("adapterKind") == "APPOSUCP"  # noqa: E731
+    adapter = VCF91OpenTelegrafIntegration(_api_env(), session=_patched_api({apposucp: (200, {"resourceList": [agent]})}))
+    win = next(vm for vm in adapter.list_virtual_machines() if vm.name == "win-app01")
+    assert win.telegraf_status == "Reporting"
+    assert win.collector_address == "10.0.0.52"
+
+
+def test_vcf91_verify_credentials_rejects_401():
+    """A reachable API that answers 401 must not count as validated credentials."""
+    import pytest
+
+    adapter = VCF91OpenTelegrafIntegration(_api_env(), session=_patched_api({"/versions/current": (401, {})}))
+    with pytest.raises(RuntimeError, match="rejected the credentials"):
+        adapter.verify_credentials()
+
+    ok = VCF91OpenTelegrafIntegration(_api_env(), session=_patched_api({"/versions/current": (200, {})}))
+    ok.verify_credentials()
+
+
+def test_vcf91_stale_agent_object_is_not_a_registration():
+    """An agent object whose states are all NOT_EXISTING does not count as an installed agent."""
+    agent = {
+        "identifier": "a-1",
+        "resourceKey": {
+            "name": "Windows OS on win-app01", "resourceKindKey": "win",
+            "resourceIdentifiers": [
+                {"identifierType": {"name": "VCID"}, "value": "vc-1"},
+                {"identifierType": {"name": "VMMOR"}, "value": "vm-201"},
+            ],
+        },
+        "resourceStatusStates": [{"resourceState": "NOT_EXISTING", "resourceStatus": "NO_DATA_RECEIVING", "adapterInstanceId": "ai-1"}],
+    }
+    apposucp = lambda url, params: url.endswith("/resources") and (params or {}).get("adapterKind") == "APPOSUCP"  # noqa: E731
+    adapter = VCF91OpenTelegrafIntegration(_api_env(), session=_patched_api({apposucp: (200, {"resourceList": [agent]})}))
+    win = next(vm for vm in adapter.list_virtual_machines() if vm.name == "win-app01")
+    assert win.telegraf_status == "Not installed"
+    assert win.agent_registrations == 0
+    assert win.collector_address is None
+
+
+def test_vcf91_collector_group_virtualIP_accepted_at_enrollment():
+    """A group VIP reported as virtualIP (the 9.1 spelling) is a valid collector target when enrolling."""
+    env = VCFEnvironment(
+        name="test",
+        url="https://vcf-ops.corp.local",
+        username="admin",
+        token="test-token-123",
+        collector=CollectorInfo(address="10.0.0.54"),
+    )
+    adapter = VCF91OpenTelegrafIntegration(env, session=MagicMock(spec=requests.Session))
+    adapter.get_collector_groups = MagicMock(return_value=[
+        {"name": "CP Group 1", "collectorId": [3, 4], "virtualIP": "10.0.0.54"},
+        {"name": "CP Group 2", "collectorId": [7], "virtualIP": "10.0.1.54"},
+    ])
+    adapter.get_collectors = MagicMock(return_value=[{"id": "3", "name": "cp01", "hostName": "10.0.0.52"}])
+    adapter.resolve_collector_group_name = MagicMock(return_value="CP Group 1")
+    adapter.detect_managed_vm = MagicMock(return_value=(False, None, None, None))
+    adapter.fetch_mandatory_tag_script = MagicMock(return_value="#!/bin/sh\n")
+    adapter.fetch_client_certificate_bundle = MagicMock(return_value=dict(_BUNDLE))
+
+    artifacts = adapter.prepare_telegraf_integration(target_ip="172.16.1.10", target_hostname="host10")
+    assert artifacts.collector_address == "10.0.0.54"
+
+
+def test_vcf91_unregistered_ip_not_matched_by_first_octet():
+    """An address that only shares a first octet with a known collector is not accepted."""
+    import pytest
+
+    env = VCFEnvironment(
+        name="test",
+        url="https://vcf-ops.corp.local",
+        username="admin",
+        token="test-token-123",
+        collector=CollectorInfo(address="10.9.9.9"),
+    )
+    adapter = VCF91OpenTelegrafIntegration(env, session=MagicMock(spec=requests.Session))
+    adapter.get_collector_groups = MagicMock(return_value=[
+        {"name": "CP Group 1", "collectorId": [3], "virtualIP": "10.0.0.54"},
+        {"name": "CP Group 2", "collectorId": [7], "virtualIP": "10.0.1.54"},
+    ])
+    adapter.get_collectors = MagicMock(return_value=[{"id": "3", "name": "cp01", "hostName": "10.0.0.52"}])
+    with pytest.raises(RuntimeError, match="is not registered"):
+        adapter.prepare_telegraf_integration(target_ip="172.16.1.10", target_hostname="host10")
+

@@ -41,7 +41,6 @@ from PySide6.QtWidgets import (
     QStackedWidget,
     QTableWidget,
     QTableWidgetItem,
-    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -50,7 +49,6 @@ from vcf_ops_telegraf_helper.adapters.base import VCFOpsIntegration
 from vcf_ops_telegraf_helper.adapters.factory import get_adapter
 from vcf_ops_telegraf_helper.executors.base import EndpointExecutor
 from vcf_ops_telegraf_helper.executors.local import LocalExecutor
-from vcf_ops_telegraf_helper.executors.package import PackageExecutor
 from vcf_ops_telegraf_helper.executors.ssh import SSHExecutor
 from vcf_ops_telegraf_helper.executors.winrm import WinRMExecutor
 from vcf_ops_telegraf_helper.gui.theme import build_stylesheet
@@ -86,7 +84,6 @@ from vcf_ops_telegraf_helper.models.vcf import (
     VirtualMachineResource,
 )
 from vcf_ops_telegraf_helper.models.workflow import (
-    DeploymentMode,
     RunSummary,
     StageResult,
     UninstallOptions,
@@ -207,6 +204,12 @@ class MainWindow(QMainWindow):
         self.bound_vm: Optional[VirtualMachineResource] = None
         self.selected_vc_id: Optional[str] = None
         self.selected_vm_name: Optional[str] = None
+        self.discovered_hostname: Optional[str] = None
+        self._vcf_validated = False
+        self._validated_url: Optional[str] = None
+        self._endpoint_detected = False
+        self._current_step = 0
+        self._next_buttons: dict[int, QPushButton] = {}
 
         self.setWindowTitle("VCF Operations Open Telegraf Helper")
         self.resize(1150, 840)
@@ -301,12 +304,14 @@ class MainWindow(QMainWindow):
 
         self.step_list = QListWidget()
         self.step_list.setProperty("class", "step-list")
+        self.step_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         steps = [
-            "1. VCF Operations",
-            "2. Endpoint Target",
-            "3. Monitoring Inputs",
-            "4. Review & Preview",
-            "5. Execute & Verify",
+            "1. Connect",
+            "2. Select VM",
+            "3. Configure Target VM",
+            "4. Monitoring Inputs",
+            "5. Review & Preview",
+            "6. Execute & Verify",
         ]
         for s in steps:
             item = QListWidgetItem(s)
@@ -333,31 +338,148 @@ class MainWindow(QMainWindow):
 
         # Right Stacked Pages
         self.page_stack = QStackedWidget()
-        self.page_stack.addWidget(self._build_step1_page())
-        self.page_stack.addWidget(self._build_step2_page())
-        self.page_stack.addWidget(self._build_step3_page())
-        self.page_stack.addWidget(self._build_step4_page())
-        self.page_stack.addWidget(self._build_step5_page())
+        self.page_stack.addWidget(self._build_connect_page())
+        self.page_stack.addWidget(self._build_select_vm_page())
+        self.page_stack.addWidget(self._build_target_page())
+        self._monitoring_page = self._build_monitoring_page()
+        self.page_stack.addWidget(self._monitoring_page)
+        self.page_stack.addWidget(self._build_review_page())
+        self.page_stack.addWidget(self._build_execute_page())
+
+        # Any monitoring input toggle can lock or unlock the steps after it
+        for *_, chk in self.catalog_items:
+            chk.toggled.connect(lambda _: self._refresh_step_gating())
 
         body_layout.addWidget(self.page_stack, 1)
         main_layout.addLayout(body_layout, 1)
+        self._refresh_step_gating()
 
     def _on_step_changed(self, row: int) -> None:
-        if row == 3:  # Review & Preview
+        if row < 0:
+            return
+        reason = self._gate_reason(row) if row > self._current_step else None
+        if reason is not None:
+            # Locked: stay on the current step
+            self.step_list.blockSignals(True)
+            self.step_list.setCurrentRow(self._current_step)
+            self.step_list.blockSignals(False)
+            return
+        self._current_step = row
+        if row == self.STEP_TARGET:
+            self._update_target_summary()
+        elif row == self.STEP_REVIEW:
             self._update_preview()
-        elif row == 4:  # Execution
+        elif row == self.STEP_EXECUTE:
             self._update_cli_command()
         self.page_stack.setCurrentIndex(row)
 
     # --------------------------------------------------------------------------
-    # Step 1: VCF Operations
+    # Step gating
     # --------------------------------------------------------------------------
-    def _build_step1_page(self) -> QWidget:
+    STEP_CONNECT, STEP_SELECT_VM, STEP_TARGET, STEP_MONITORING, STEP_REVIEW, STEP_EXECUTE = range(6)
+
+    def _gate_reason(self, step: int) -> Optional[str]:
+        """Return why the given step cannot be entered yet, or None when it is unlocked."""
+        if step > self.STEP_CONNECT and not self._vcf_validated:
+            return "Validate the VCF Operations connection first."
+        if step > self.STEP_SELECT_VM and self.bound_vm is None:
+            return "Select a virtual machine first."
+        if step > self.STEP_TARGET:
+            if self._selected_collector() is None:
+                return "Choose a collector or collector group first."
+            if not self._endpoint_detected:
+                return "Detect the endpoint with the entered credentials first."
+        if step > self.STEP_MONITORING and not self._has_monitoring_inputs():
+            return "Enable at least one monitoring input first."
+        return None
+
+    def _max_unlocked_step(self) -> int:
+        step = self.STEP_CONNECT
+        while step < self.STEP_EXECUTE and self._gate_reason(step + 1) is None:
+            step += 1
+        return step
+
+    def _refresh_step_gating(self) -> None:
+        if not hasattr(self, "step_list"):
+            return
+        max_step = self._max_unlocked_step()
+        for idx in range(self.step_list.count()):
+            item = self.step_list.item(idx)
+            flags = item.flags()
+            if idx <= max_step:
+                item.setFlags(flags | Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+                item.setToolTip("")
+            else:
+                item.setFlags(flags & ~Qt.ItemIsEnabled & ~Qt.ItemIsSelectable)
+                item.setToolTip(self._gate_reason(idx) or "")
+        for idx, btn in getattr(self, "_next_buttons", {}).items():
+            reason = self._gate_reason(idx + 1)
+            btn.setEnabled(reason is None)
+            btn.setToolTip(reason or "")
+
+    def _has_monitoring_inputs(self) -> bool:
+        items = getattr(self, "catalog_items", None)
+        if not items:
+            return True
+        return any(chk.isChecked() and chk.isEnabled() for *_, chk in items)
+
+    def _invalidate_vcf_connection(self, *_: Any) -> None:
+        if not getattr(self, "_vcf_validated", False):
+            return
+        self._vcf_validated = False
+        if hasattr(self, "vcf_status_label"):
+            self.vcf_status_label.setText("Status: Not checked (settings changed)")
+            self.vcf_status_label.setStyleSheet("")
+        self._refresh_step_gating()
+
+    def _invalidate_endpoint_detection(self, *_: Any) -> None:
+        self._endpoint_detected = False
+        if hasattr(self, "ep_status_label"):
+            self.ep_status_label.setText("Not detected yet")
+            self.ep_status_label.setStyleSheet("")
+        if hasattr(self, "ep_details_box"):
+            self.ep_details_box.setPlainText("Endpoint details will appear here after detection.")
+        if hasattr(self, "ep_missing_banner"):
+            self.ep_missing_banner.setVisible(False)
+        self._refresh_step_gating()
+
+    def _build_nav(self, step: int, back_label: Optional[str], next_label: Optional[str]) -> tuple[QFrame, Optional[QHBoxLayout]]:
+        """Bottom navigation bar; the Next button is registered for gating."""
+        nav_frame = QFrame()
+        nav_frame.setProperty("class", "lattice-card")
+        nav_layout = QHBoxLayout(nav_frame)
+        nav_layout.setContentsMargins(16, 10, 16, 10)
+        if back_label:
+            back_btn = QPushButton(f"<- Back: {back_label}")
+            back_btn.clicked.connect(lambda: self.step_list.setCurrentRow(step - 1))
+            nav_layout.addWidget(back_btn)
+        nav_layout.addStretch()
+        if next_label:
+            next_btn = QPushButton(f"Next: {next_label} ->")
+            next_btn.setProperty("class", "primary")
+            next_btn.clicked.connect(lambda: self.step_list.setCurrentRow(step + 1))
+            nav_layout.addWidget(next_btn)
+            self._next_buttons[step] = next_btn
+        return nav_frame, nav_layout
+
+    @staticmethod
+    def _wrap_page(content: QWidget, nav_frame: QFrame) -> QWidget:
         page = QWidget()
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setWidget(content)
+        v = QVBoxLayout(page)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(0)
+        v.addWidget(scroll, 1)
+        v.addWidget(nav_frame)
+        return page
 
+    # --------------------------------------------------------------------------
+    # Step 1: Connect to VCF Operations
+    # --------------------------------------------------------------------------
+    def _build_connect_page(self) -> QWidget:
         content = QWidget()
         layout = QVBoxLayout(content)
         layout.setContentsMargins(24, 20, 24, 20)
@@ -368,13 +490,13 @@ class MainWindow(QMainWindow):
         c_layout = QVBoxLayout(card)
         c_layout.setSpacing(12)
 
-        lbl = QLabel("STEP 1: VCF OPERATIONS ENVIRONMENT")
+        lbl = QLabel("STEP 1: CONNECT TO VCF OPERATIONS")
         lbl.setProperty("class", "lattice-section-label")
         c_layout.addWidget(lbl)
 
         desc = QLabel(
-            "Configure the target VCF Operations 9.1 environment and Cloud Proxy metrics collector. "
-            "Telemetry is routed to Cloud Proxy on port 443 via Broadcom Wavefront format."
+            "Connect to the VCF Operations 9.1 instance that will monitor the endpoint. "
+            "The inventory, cloud proxies, and agent status in the next steps come from this connection."
         )
         desc.setProperty("class", "lattice-muted")
         desc.setWordWrap(True)
@@ -387,50 +509,43 @@ class MainWindow(QMainWindow):
         self.vcf_url_input = QLineEdit("https://vcf-ops.local")
         grid.addWidget(self.vcf_url_input, 0, 1)
 
-        grid.addWidget(QLabel("Cloud Proxy Collector IP/FQDN:"), 1, 0)
-        self.vcf_collector_input = QLineEdit("10.10.10.50")
-        grid.addWidget(self.vcf_collector_input, 1, 1)
-
-        self.vcf_collector_group_label = QLabel("Collector Group Name (optional):")
-        self.vcf_collector_group_input = QLineEdit()
-        self.vcf_collector_group_input.setPlaceholderText("Auto-detected from Cloud Proxy if blank")
-        grid.addWidget(self.vcf_collector_group_label, 2, 0)
-        grid.addWidget(self.vcf_collector_group_input, 2, 1)
-
         self.vcf_auth_type_label = QLabel("Authentication:")
         self.vcf_auth_type_combo = QComboBox()
         self.vcf_auth_type_combo.addItems(["API Token / Key", "Username & Password"])
         self.vcf_auth_type_combo.currentTextChanged.connect(self._on_vcf_auth_type_changed)
-        grid.addWidget(self.vcf_auth_type_label, 3, 0)
-        grid.addWidget(self.vcf_auth_type_combo, 3, 1)
+        grid.addWidget(self.vcf_auth_type_label, 1, 0)
+        grid.addWidget(self.vcf_auth_type_combo, 1, 1)
 
         self.vcf_token_label = QLabel("API Token / Key:")
         self.vcf_token_input = QLineEdit()
         self.vcf_token_input.setPlaceholderText("Paste VCF Operations API token or service key")
         self.vcf_token_input.setEchoMode(QLineEdit.Password)
-        grid.addWidget(self.vcf_token_label, 4, 0)
-        grid.addWidget(self.vcf_token_input, 4, 1)
+        grid.addWidget(self.vcf_token_label, 2, 0)
+        grid.addWidget(self.vcf_token_input, 2, 1)
 
         self.vcf_user_label = QLabel("Username:")
         self.vcf_user_input = QLineEdit("admin")
-        grid.addWidget(self.vcf_user_label, 5, 0)
-        grid.addWidget(self.vcf_user_input, 5, 1)
+        grid.addWidget(self.vcf_user_label, 3, 0)
+        grid.addWidget(self.vcf_user_input, 3, 1)
 
         self.vcf_pass_label = QLabel("Password: *")
         self.vcf_pass_input = QLineEdit()
         self.vcf_pass_input.setPlaceholderText("Required for username authentication")
         self.vcf_pass_input.setEchoMode(QLineEdit.Password)
-        grid.addWidget(self.vcf_pass_label, 6, 0)
-        grid.addWidget(self.vcf_pass_input, 6, 1)
+        grid.addWidget(self.vcf_pass_label, 4, 0)
+        grid.addWidget(self.vcf_pass_input, 4, 1)
 
         c_layout.addLayout(grid)
         self._update_vcf_auth_visibility()
 
         self.vcf_ssl_check = QCheckBox("Verify TLS certificates (disable for self-signed lab certs)")
         self.vcf_ssl_check.setChecked(True)
+        self.vcf_ssl_check.toggled.connect(self._on_vcf_ssl_toggled)
         c_layout.addWidget(self.vcf_ssl_check)
 
-        ca_row = QHBoxLayout()
+        self.vcf_ca_widget = QWidget()
+        ca_row = QHBoxLayout(self.vcf_ca_widget)
+        ca_row.setContentsMargins(0, 0, 0, 0)
         ca_row.setSpacing(8)
         ca_label = QLabel("Enterprise CA Bundle (optional):")
         self.vcf_ca_input = QLineEdit()
@@ -441,7 +556,7 @@ class MainWindow(QMainWindow):
         ca_row.addWidget(ca_label)
         ca_row.addWidget(self.vcf_ca_input, 1)
         ca_row.addWidget(self.vcf_ca_browse_btn)
-        c_layout.addLayout(ca_row)
+        c_layout.addWidget(self.vcf_ca_widget)
 
         test_row = QHBoxLayout()
         self.test_vcf_btn = QPushButton("Validate VCF Connection")
@@ -454,40 +569,44 @@ class MainWindow(QMainWindow):
         test_row.addStretch()
         c_layout.addLayout(test_row)
 
+        for w in (self.vcf_url_input, self.vcf_token_input, self.vcf_user_input, self.vcf_pass_input, self.vcf_ca_input):
+            w.textChanged.connect(self._invalidate_vcf_connection)
+        self.vcf_auth_type_combo.currentTextChanged.connect(self._invalidate_vcf_connection)
+        self.vcf_ssl_check.toggled.connect(self._invalidate_vcf_connection)
+
         layout.addWidget(card)
         layout.addStretch()
 
-        scroll.setWidget(content)
+        nav_frame, _ = self._build_nav(self.STEP_CONNECT, None, "Select VM")
+        return self._wrap_page(content, nav_frame)
 
-        nav_frame = QFrame()
-        nav_frame.setProperty("class", "lattice-card")
-        nav_layout = QHBoxLayout(nav_frame)
-        nav_layout.setContentsMargins(16, 10, 16, 10)
-        nav_layout.addStretch()
-        next_btn = QPushButton("Next: Endpoint Target ->")
-        next_btn.setProperty("class", "primary")
-        next_btn.clicked.connect(lambda: self.step_list.setCurrentRow(1))
-        nav_layout.addWidget(next_btn)
-
-        v = QVBoxLayout(page)
-        v.setContentsMargins(0, 0, 0, 0)
-        v.setSpacing(0)
-        v.addWidget(scroll, 1)
-        v.addWidget(nav_frame)
-        return page
+    def _on_vcf_ssl_toggled(self, checked: bool) -> None:
+        # A CA bundle only matters when certificates are verified
+        if hasattr(self, "vcf_ca_widget"):
+            self.vcf_ca_widget.setVisible(checked)
 
     def _test_vcf_connection(self) -> None:
         self.vcf_status_label.setText("Testing connection...")
+        self._vcf_validated = False
         try:
             env = self._get_vcf_env()
             self.logger.info("Validating VCF connection to %s", env.url)
             adapter = get_adapter(env)
             valid = adapter.validate_connection()
             if valid:
+                # Reachability alone is not enough: an HTTP 401 still counts as reachable
+                adapter.verify_credentials()
                 self.logger.info("VCF connection validated successfully to %s", env.url)
                 self.vcf_status_label.setText("Status: PASS (Connected)")
                 self.vcf_status_label.setStyleSheet("color: #199e70; font-weight: 600;")
                 self.state_store.save_environment(env)
+                self._vcf_validated = True
+                if self._validated_url is not None and self._validated_url != env.url:
+                    # A different VCF Operations instance: nothing selected against the old one carries over
+                    self._clear_vm_binding()
+                self._validated_url = env.url
+                self._load_collector_targets(adapter)
+                self._fetch_vcf_inventory(adapter)
             else:
                 self.logger.warning("VCF connection refused or unreachable for %s", env.url)
                 self.vcf_status_label.setText("Status: FAIL (Connection refused or unreachable)")
@@ -495,16 +614,12 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             self.vcf_status_label.setText(f"Error: {exc}")
             self.vcf_status_label.setStyleSheet("color: #d95926; font-weight: 600;")
+        self._refresh_step_gating()
 
     # --------------------------------------------------------------------------
-    # Step 2: Endpoint Target
+    # Step 2: Select VM
     # --------------------------------------------------------------------------
-    def _build_step2_page(self) -> QWidget:
-        page = QWidget()
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.NoFrame)
-
+    def _build_select_vm_page(self) -> QWidget:
         content = QWidget()
         layout = QVBoxLayout(content)
         layout.setContentsMargins(24, 20, 24, 20)
@@ -515,36 +630,23 @@ class MainWindow(QMainWindow):
         c_layout = QVBoxLayout(card)
         c_layout.setSpacing(12)
 
-        lbl = QLabel("STEP 2: ENDPOINT TARGET & INVENTORY")
+        lbl = QLabel("STEP 2: SELECT VIRTUAL MACHINE")
         lbl.setProperty("class", "lattice-section-label")
         c_layout.addWidget(lbl)
 
         desc = QLabel(
-            "Select a target host from VCF Operations inventory or configure an endpoint directly. "
-            "The helper will detect OS, architecture, existing Telegraf version, and service state."
+            "Choose the virtual machine to monitor. Guest IP, OS, power state, and agent status are read from "
+            "VCF Operations. Templates and VMs no longer present in vCenter are not listed."
         )
         desc.setProperty("class", "lattice-muted")
         desc.setWordWrap(True)
         c_layout.addWidget(desc)
 
-        # Tabs for Step 2: Inventory Browser vs Manual Target Entry
-        self.step2_tabs = QTabWidget()
-        self.step2_tabs.setProperty("class", "lattice-card")
-
-        # ----------------------------------------------------------------------
-        # Tab 0: VCF Inventory Browser
-        # ----------------------------------------------------------------------
-        inv_tab = QWidget()
-        inv_layout = QVBoxLayout(inv_tab)
-        inv_layout.setContentsMargins(12, 12, 12, 12)
-        inv_layout.setSpacing(10)
-
-        # Filter bar
         filter_row = QHBoxLayout()
         filter_row.setSpacing(8)
 
         self.vm_search_input = QLineEdit()
-        self.vm_search_input.setPlaceholderText("Filter VMs by name or IP...")
+        self.vm_search_input.setPlaceholderText("Filter by name, IP, hostname, or MOR...")
         self.vm_search_input.textChanged.connect(self._filter_vm_table)
         filter_row.addWidget(self.vm_search_input, 2)
 
@@ -553,74 +655,218 @@ class MainWindow(QMainWindow):
         self.vm_os_filter.currentTextChanged.connect(self._filter_vm_table)
         filter_row.addWidget(self.vm_os_filter, 1)
 
-        self.vm_cg_filter = QComboBox()
-        self.vm_cg_filter.addItem("All Collector Groups")
-        self.vm_cg_filter.currentTextChanged.connect(self._filter_vm_table)
-        filter_row.addWidget(self.vm_cg_filter, 1)
-
         self.vm_status_filter = QComboBox()
-        self.vm_status_filter.addItems(["All Agent States", "Installed", "Not Installed", "Unknown"])
+        self.vm_status_filter.addItems(["All Agent States", "Not installed", "Reporting", "No data"])
         self.vm_status_filter.currentTextChanged.connect(self._filter_vm_table)
         filter_row.addWidget(self.vm_status_filter, 1)
 
-        self.fetch_vms_btn = QPushButton("Query VCF Inventory")
+        self.vm_show_off_check = QCheckBox("Show powered-off VMs")
+        self.vm_show_off_check.setChecked(False)
+        self.vm_show_off_check.toggled.connect(self._filter_vm_table)
+        filter_row.addWidget(self.vm_show_off_check)
+
+        self.fetch_vms_btn = QPushButton("Refresh")
         self.fetch_vms_btn.setProperty("class", "secondary")
-        self.fetch_vms_btn.clicked.connect(self._fetch_vcf_inventory)
+        self.fetch_vms_btn.clicked.connect(lambda: self._fetch_vcf_inventory())
         filter_row.addWidget(self.fetch_vms_btn)
 
         self.vm_count_label = QLabel("0 VMs")
         self.vm_count_label.setProperty("class", "lattice-caption")
         filter_row.addWidget(self.vm_count_label)
 
-        inv_layout.addLayout(filter_row)
+        c_layout.addLayout(filter_row)
 
-        # VM Table
         self.vm_table = QTableWidget()
         self.vm_table.setColumnCount(6)
-        self.vm_table.setHorizontalHeaderLabels([
-            "VM Name", "IP Address", "OS Family", "VM MOR", "Collector Group", "Agent Status"
-        ])
-        self.vm_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
-        self.vm_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
-        self.vm_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
-        self.vm_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
-        self.vm_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeToContents)
-        self.vm_table.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeToContents)
+        self.vm_table.setHorizontalHeaderLabels(["VM Name", "IP Address", "Guest OS", "Power", "VM MOR", "Agent Status"])
+        header = self.vm_table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.Stretch)
+        for col in range(1, 6):
+            header.setSectionResizeMode(col, QHeaderView.ResizeToContents)
         self.vm_table.verticalHeader().setVisible(False)
         self.vm_table.setSelectionBehavior(QTableWidget.SelectRows)
         self.vm_table.setSelectionMode(QTableWidget.SingleSelection)
-        self.vm_table.setMinimumHeight(240)
+        self.vm_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.vm_table.setMinimumHeight(320)
         self.vm_table.itemSelectionChanged.connect(self._on_vm_row_selected)
         self.vm_table.cellDoubleClicked.connect(self._on_vm_double_clicked)
-        inv_layout.addWidget(self.vm_table, 1)
+        c_layout.addWidget(self.vm_table, 1)
 
-        # Selected VM Inspector
-        self.vm_inspector = QFrame()
-        self.vm_inspector.setProperty("class", "lattice-card")
-        vi_layout = QHBoxLayout(self.vm_inspector)
-        vi_layout.setContentsMargins(10, 8, 10, 8)
-        vi_layout.setSpacing(12)
-
-        self.vm_inspector_label = QLabel("No VM selected. Click a row to bind target.")
+        self.vm_inspector_label = QLabel("No VM selected.")
         self.vm_inspector_label.setProperty("class", "lattice-caption")
-        vi_layout.addWidget(self.vm_inspector_label, 1)
+        self.vm_inspector_label.setWordWrap(True)
+        c_layout.addWidget(self.vm_inspector_label)
 
-        self.btn_select_vm = QPushButton("Use Selected VM ->")
-        self.btn_select_vm.setProperty("class", "primary")
-        self.btn_select_vm.setEnabled(False)
-        self.btn_select_vm.clicked.connect(self._apply_selected_vm_to_form)
-        vi_layout.addWidget(self.btn_select_vm)
+        layout.addWidget(card)
 
-        inv_layout.addWidget(self.vm_inspector)
-        self.step2_tabs.addTab(inv_tab, "VCF Operations Inventory")
+        nav_frame, _ = self._build_nav(self.STEP_SELECT_VM, "Connect", "Configure Target VM")
+        return self._wrap_page(content, nav_frame)
 
-        # ----------------------------------------------------------------------
-        # Tab 1: Manual / Target Host Details
-        # ----------------------------------------------------------------------
-        manual_tab = QWidget()
-        manual_layout = QVBoxLayout(manual_tab)
-        manual_layout.setContentsMargins(12, 12, 12, 12)
-        manual_layout.setSpacing(10)
+    def _fetch_vcf_inventory(self, adapter: Optional[VCFOpsIntegration] = None) -> None:
+        self.fetch_vms_btn.setEnabled(False)
+        self.vm_count_label.setText("Querying VCF Operations...")
+        try:
+            adapter = adapter or get_adapter(self._get_vcf_env())
+            self._cached_vms = adapter.list_virtual_machines(strict=True)
+            self._populate_vm_table(self._cached_vms)
+            self._filter_vm_table()
+            self._reconcile_binding()
+            if adapter.inventory_warning:
+                self.vm_count_label.setText(f"{self.vm_count_label.text()} | {adapter.inventory_warning}")
+            self.logger.info("Retrieved %d VMs from VCF Operations inventory", len(self._cached_vms))
+        except Exception as exc:
+            self._cached_vms = []
+            self._populate_vm_table([])
+            self._clear_vm_binding()
+            self.vm_count_label.setText(f"Query error: {exc}")
+            self.logger.warning("Failed to retrieve VM inventory: %s", exc)
+        finally:
+            self.fetch_vms_btn.setEnabled(True)
+
+    def _reconcile_binding(self) -> None:
+        """Keep the bound VM only if it is still in the freshly loaded inventory."""
+        if self.bound_vm is None:
+            return
+        fresh = next((vm for vm in self._cached_vms if vm.resource_id == self.bound_vm.resource_id), None)
+        if fresh is None:
+            self._clear_vm_binding()
+        else:
+            self.bound_vm = self.selected_vm = fresh
+            self._update_target_summary()
+
+    def _clear_vm_binding(self) -> None:
+        self.bound_vm = None
+        self.selected_vm = None
+        self.selected_vm_mor = None
+        self.selected_vc_id = None
+        self.selected_vm_name = None
+        self.discovered_hostname = None
+        if hasattr(self, "vm_inspector_label"):
+            self.vm_inspector_label.setText("No VM selected.")
+        self._update_target_summary()
+        self._invalidate_endpoint_detection()
+
+    @staticmethod
+    def _agent_status_text(vm: VirtualMachineResource) -> str:
+        if vm.agent_registrations > 1:
+            return f"{vm.telegraf_status} ({vm.agent_registrations} registrations)"
+        return vm.telegraf_status
+
+    def _populate_vm_table(self, vms: list[VirtualMachineResource]) -> None:
+        self.vm_table.setSortingEnabled(False)
+        self.vm_table.clearSelection()
+        self.vm_table.setRowCount(len(vms))
+        for row, vm in enumerate(vms):
+            name_item = QTableWidgetItem(vm.name)
+            name_item.setData(Qt.UserRole, vm)
+            self.vm_table.setItem(row, 0, name_item)
+            self.vm_table.setItem(row, 1, QTableWidgetItem(vm.ip_address or "No IP"))
+            self.vm_table.setItem(row, 2, QTableWidgetItem(vm.os_name or vm.os_family.capitalize()))
+            self.vm_table.setItem(row, 3, QTableWidgetItem(vm.power_state or "Unknown"))
+            self.vm_table.setItem(row, 4, QTableWidgetItem(vm.vm_mor or "N/A"))
+            st_item = QTableWidgetItem(self._agent_status_text(vm))
+            if vm.telegraf_status == "Reporting":
+                st_item.setForeground(Qt.darkGreen)
+            elif vm.telegraf_status == "No data":
+                st_item.setForeground(Qt.darkYellow)
+            self.vm_table.setItem(row, 5, st_item)
+        self.vm_table.setSortingEnabled(True)
+
+    def _filter_vm_table(self) -> None:
+        if not getattr(self, "_cached_vms", None):
+            self.vm_count_label.setText("0 VMs")
+            return
+        query = self.vm_search_input.text().strip().lower()
+        os_filter = self.vm_os_filter.currentText().lower()
+        status_filter = self.vm_status_filter.currentText()
+        show_off = self.vm_show_off_check.isChecked()
+
+        visible_count = 0
+        for row in range(self.vm_table.rowCount()):
+            item = self.vm_table.item(row, 0)
+            vm = item.data(Qt.UserRole) if item else None
+            if not vm:
+                continue
+            haystack = " ".join(filter(None, (vm.name, vm.ip_address, vm.hostname, vm.vm_mor))).lower()
+            show = True
+            if query and query not in haystack:
+                show = False
+            elif "win" in os_filter and vm.os_family.lower() != "windows":
+                show = False
+            elif "lin" in os_filter and vm.os_family.lower() != "linux":
+                show = False
+            elif status_filter != "All Agent States" and vm.telegraf_status != status_filter:
+                show = False
+            elif not show_off and not vm.is_powered_on:
+                show = False
+            self.vm_table.setRowHidden(row, not show)
+            if show:
+                visible_count += 1
+        self.vm_count_label.setText(f"{visible_count} / {len(self._cached_vms)} VMs")
+
+    def _on_vm_row_selected(self) -> None:
+        items = self.vm_table.selectedItems()
+        if not items:
+            return
+        item0 = self.vm_table.item(items[0].row(), 0)
+        vm: Optional[VirtualMachineResource] = item0.data(Qt.UserRole) if item0 else None
+        if not vm:
+            return
+        self.selected_vm = vm
+        self._bind_vm(vm)
+
+    def _on_vm_double_clicked(self, row: int, col: int) -> None:
+        self._on_vm_row_selected()
+        if self._gate_reason(self.STEP_TARGET) is None:
+            self.step_list.setCurrentRow(self.STEP_TARGET)
+
+    def _bind_vm(self, vm: VirtualMachineResource) -> None:
+        """Make the chosen VM the target: identity, connection address, OS, and collector default."""
+        changed = self.bound_vm is None or self.bound_vm.resource_id != vm.resource_id
+        self.bound_vm = vm
+        self.selected_vm_mor = vm.vm_mor
+        self.selected_vc_id = vm.vc_id
+        self.selected_vm_name = vm.name
+
+        registration = (
+            f"registered via {vm.collector_address} ({vm.collector_group})" if vm.collector_address else "no agent registration"
+        )
+        self.vm_inspector_label.setText(
+            f"Selected: {vm.name} | {vm.ip_address or 'No IP'} | {vm.os_name or vm.os_family.capitalize()} | "
+            f"{vm.power_state or 'Unknown power state'} | MOR {vm.vm_mor or 'N/A'} | Agent: {self._agent_status_text(vm)}, {registration}"
+        )
+        if changed:
+            self.ep_os_combo.setCurrentText("Windows" if vm.os_family.lower() == "windows" else "Linux")
+            self.ep_host_input.setText(vm.ip_address or vm.hostname or vm.name)
+            self._preselect_collector(vm)
+            self.discovered_hostname = None
+            self._invalidate_endpoint_detection()
+        self._update_target_summary()
+        self.logger.info("Selected VM %s (%s) as target", vm.name, vm.vm_mor)
+        self._refresh_step_gating()
+
+    # --------------------------------------------------------------------------
+    # Step 3: Configure Target VM
+    # --------------------------------------------------------------------------
+    def _build_target_page(self) -> QWidget:
+        content = QWidget()
+        layout = QVBoxLayout(content)
+        layout.setContentsMargins(24, 20, 24, 20)
+        layout.setSpacing(16)
+
+        card = QFrame()
+        card.setProperty("class", "lattice-card")
+        c_layout = QVBoxLayout(card)
+        c_layout.setSpacing(12)
+
+        lbl = QLabel("STEP 3: CONFIGURE TARGET VM")
+        lbl.setProperty("class", "lattice-section-label")
+        c_layout.addWidget(lbl)
+
+        self.target_summary_label = QLabel("No VM selected.")
+        self.target_summary_label.setProperty("class", "lattice-caption")
+        self.target_summary_label.setWordWrap(True)
+        c_layout.addWidget(self.target_summary_label)
 
         grid = QGridLayout()
         grid.setSpacing(10)
@@ -631,17 +877,11 @@ class MainWindow(QMainWindow):
         self.ep_os_combo.currentTextChanged.connect(self._on_os_changed)
         grid.addWidget(self.ep_os_combo, 0, 1)
 
-        grid.addWidget(QLabel("Hostname or IP Address:"), 1, 0)
-        self.ep_host_input = QLineEdit("10.10.10.101")
+        grid.addWidget(QLabel("Connect To (IP or FQDN):"), 1, 0)
+        self.ep_host_input = QLineEdit()
         self.ep_host_input.textChanged.connect(self._on_target_host_changed)
         grid.addWidget(self.ep_host_input, 1, 1)
 
-        grid.addWidget(QLabel("vCenter VM Binding:"), 2, 0)
-        self.ep_mor_badge = QLabel("Unmanaged host (not bound to vCenter VM)")
-        self.ep_mor_badge.setProperty("class", "lattice-caption")
-        grid.addWidget(self.ep_mor_badge, 2, 1)
-
-        # Linux authentication radio toggle
         self.ep_auth_type_label = QLabel("Authentication:")
         self.ep_auth_radio_widget = QWidget()
         ar_layout = QHBoxLayout(self.ep_auth_radio_widget)
@@ -658,34 +898,26 @@ class MainWindow(QMainWindow):
         ar_layout.addWidget(self.ep_auth_radio_pass)
         ar_layout.addWidget(self.ep_auth_radio_key)
         ar_layout.addStretch()
-        grid.addWidget(self.ep_auth_type_label, 3, 0)
-        grid.addWidget(self.ep_auth_radio_widget, 3, 1)
+        grid.addWidget(self.ep_auth_type_label, 2, 0)
+        grid.addWidget(self.ep_auth_radio_widget, 2, 1)
 
         self.ep_user_label = QLabel("Username:")
         self.ep_user_input = QLineEdit("root")
-        grid.addWidget(self.ep_user_label, 4, 0)
-        grid.addWidget(self.ep_user_input, 4, 1)
+        grid.addWidget(self.ep_user_label, 3, 0)
+        grid.addWidget(self.ep_user_input, 3, 1)
 
         self.ep_pass_label = QLabel("Password:")
         self.ep_pass_input = QLineEdit()
         self.ep_pass_input.setEchoMode(QLineEdit.Password)
-        grid.addWidget(self.ep_pass_label, 5, 0)
-        grid.addWidget(self.ep_pass_input, 5, 1)
+        grid.addWidget(self.ep_pass_label, 4, 0)
+        grid.addWidget(self.ep_pass_input, 4, 1)
 
-        self.ep_advanced_check = QCheckBox("Show advanced connection options")
-        self.ep_advanced_check.setChecked(False)
-        self.ep_advanced_check.toggled.connect(self._on_advanced_toggled)
-        grid.addWidget(self.ep_advanced_check, 6, 0, 1, 2)
+        self.ep_winrm_ssl_check = QCheckBox("Use HTTPS for WinRM (port 5986)")
+        self.ep_winrm_ssl_check.setChecked(False)
+        self.ep_winrm_ssl_check.toggled.connect(self._on_winrm_ssl_toggled)
+        grid.addWidget(self.ep_winrm_ssl_check, 5, 0, 1, 2)
 
-        self.ep_port_label = QLabel("Port:")
-        self.ep_port_input = QLineEdit("22")
-        self.ep_port_label.setVisible(False)
-        self.ep_port_input.setVisible(False)
-        grid.addWidget(self.ep_port_label, 7, 0)
-        grid.addWidget(self.ep_port_input, 7, 1)
-
-        # Telegraf version selection replacing redundant checkbox
-        grid.addWidget(QLabel("Telegraf Distribution:"), 8, 0)
+        grid.addWidget(QLabel("Telegraf Distribution:"), 6, 0)
         self.ep_version_combo = QComboBox()
         self.ep_version_combo.setEditable(True)
         self.ep_version_combo.setMinimumWidth(380)
@@ -700,19 +932,33 @@ class MainWindow(QMainWindow):
         if self.ep_version_combo.lineEdit():
             self.ep_version_combo.lineEdit().setCursorPosition(0)
         self.ep_version_combo.currentIndexChanged.connect(self._on_version_combo_changed)
-        grid.addWidget(self.ep_version_combo, 8, 1)
+        grid.addWidget(self.ep_version_combo, 6, 1)
 
-        manual_layout.addLayout(grid)
-        self.step2_tabs.addTab(manual_tab, "Target Host Configuration")
-        c_layout.addWidget(self.step2_tabs)
+        grid.addWidget(QLabel("Collector / Collector Group:"), 7, 0)
+        self.ep_collector_combo = QComboBox()
+        self.ep_collector_combo.setPlaceholderText("Validate the VCF Operations connection to load cloud proxies")
+        self.ep_collector_combo.currentIndexChanged.connect(lambda _: self._refresh_step_gating())
+        grid.addWidget(self.ep_collector_combo, 7, 1)
 
+        self.ep_advanced_check = QCheckBox("Show advanced connection options")
+        self.ep_advanced_check.setChecked(False)
+        self.ep_advanced_check.toggled.connect(self._on_advanced_toggled)
+        grid.addWidget(self.ep_advanced_check, 8, 0, 1, 2)
+
+        self.ep_port_label = QLabel("Port:")
+        self.ep_port_input = QLineEdit("22")
+        self.ep_port_label.setVisible(False)
+        self.ep_port_input.setVisible(False)
+        grid.addWidget(self.ep_port_label, 9, 0)
+        grid.addWidget(self.ep_port_input, 9, 1)
+
+        c_layout.addLayout(grid)
         self._update_auth_and_endpoint_visibility()
 
-        # Missing agent guidance banner
         self.ep_missing_banner = QFrame()
-        self.ep_missing_banner.setProperty("class", "lattice-card")
+        self.ep_missing_banner.setObjectName("epMissingBanner")
         self.ep_missing_banner.setStyleSheet(
-            "border-left: 4px solid #d97706; background-color: rgba(217, 119, 6, 0.12); padding: 10px; border-radius: 6px;"
+            "#epMissingBanner { border-left: 4px solid #d97706; background-color: rgba(217, 119, 6, 0.12); border-radius: 6px; }"
         )
         mb_layout = QVBoxLayout(self.ep_missing_banner)
         mb_layout.setContentsMargins(10, 8, 10, 8)
@@ -750,41 +996,109 @@ class MainWindow(QMainWindow):
         self.ep_details_box = QPlainTextEdit()
         self.ep_details_box.setProperty("class", "code-block")
         self.ep_details_box.setReadOnly(True)
-        self.ep_details_box.setMaximumHeight(100)
+        self.ep_details_box.setMaximumHeight(140)
         self.ep_details_box.setPlainText("Endpoint details will appear here after detection.")
         c_layout.addWidget(self.ep_details_box)
+
+        # Anything that changes how we reach the endpoint invalidates a previous detection
+        for w in (self.ep_user_input, self.ep_pass_input, self.ep_port_input):
+            w.textChanged.connect(self._invalidate_endpoint_detection)
+        self.ep_auth_radio_key.toggled.connect(self._invalidate_endpoint_detection)
 
         layout.addWidget(card)
         layout.addStretch()
 
-        scroll.setWidget(content)
+        nav_frame, _ = self._build_nav(self.STEP_TARGET, "Select VM", "Monitoring Inputs")
+        return self._wrap_page(content, nav_frame)
 
-        nav_frame = QFrame()
-        nav_frame.setProperty("class", "lattice-card")
-        nav_layout = QHBoxLayout(nav_frame)
-        nav_layout.setContentsMargins(16, 10, 16, 10)
-        back_btn = QPushButton("<- Back: VCF Ops")
-        back_btn.clicked.connect(lambda: self.step_list.setCurrentRow(0))
-        nav_layout.addWidget(back_btn)
-        nav_layout.addStretch()
+    def _update_target_summary(self) -> None:
+        vm = self.bound_vm
+        if not hasattr(self, "target_summary_label"):
+            return
+        if vm is None:
+            self.target_summary_label.setText("No VM selected. Go back to Step 2 and choose a virtual machine.")
+            return
+        registration = (
+            f"currently registered via {vm.collector_address} ({vm.collector_group})"
+            if vm.collector_address
+            else "no existing agent registration"
+        )
+        self.target_summary_label.setText(
+            f"Target VM: {vm.name} (MOR {vm.vm_mor or 'N/A'}, vCenter {vm.vc_id or 'N/A'}). "
+            f"VCF Operations reports {vm.os_name or 'an unknown guest OS'}, {vm.power_state or 'unknown power state'}, "
+            f"agent {self._agent_status_text(vm).lower()}, {registration}."
+        )
 
-        next_btn = QPushButton("Next: Monitoring Inputs ->")
-        next_btn.setProperty("class", "primary")
-        next_btn.clicked.connect(lambda: self.step_list.setCurrentRow(2))
-        nav_layout.addWidget(next_btn)
+    def _load_collector_targets(self, adapter: VCFOpsIntegration) -> None:
+        previous = self._selected_collector()
+        error = None
+        try:
+            targets = adapter.list_collector_targets()
+        except Exception as exc:
+            self.logger.warning("Failed to load collector targets: %s", exc)
+            error = str(exc)
+            targets = []
+        self.ep_collector_combo.blockSignals(True)
+        self.ep_collector_combo.clear()
+        for t in targets:
+            if t.is_collector_group:
+                label = f"Collector group: {t.name} (virtual IP {t.address})"
+            elif t.name:
+                label = f"Cloud proxy: {t.display_name or t.address} ({t.address}) in {t.name}"
+            else:
+                label = f"Cloud proxy: {t.display_name or t.address} ({t.address})"
+            self.ep_collector_combo.addItem(label, t)
+        restore = -1
+        if previous is not None:
+            restore = next(
+                (
+                    i for i in range(self.ep_collector_combo.count())
+                    if self.ep_collector_combo.itemData(i).model_dump() == previous.model_dump()
+                ),
+                -1,
+            )
+        self.ep_collector_combo.setCurrentIndex(restore if restore >= 0 else (0 if targets else -1))
+        self.ep_collector_combo.blockSignals(False)
+        if error:
+            self.ep_collector_combo.setPlaceholderText(f"Could not load cloud proxies: {error}")
+        elif not targets:
+            self.ep_collector_combo.setPlaceholderText("No cloud proxies found in VCF Operations")
+        if restore < 0 and self.bound_vm is not None:
+            self._preselect_collector(self.bound_vm)
+        self._refresh_step_gating()
 
-        v = QVBoxLayout(page)
-        v.setContentsMargins(0, 0, 0, 0)
-        v.setSpacing(0)
-        v.addWidget(scroll, 1)
-        v.addWidget(nav_frame)
-        return page
+    def _preselect_collector(self, vm: VirtualMachineResource) -> None:
+        """Default to where the VM's agent already reports: its group's virtual IP, else that proxy."""
+        if not vm.collector_address or not hasattr(self, "ep_collector_combo"):
+            return
+        group_idx = proxy_idx = -1
+        for idx in range(self.ep_collector_combo.count()):
+            t: CollectorInfo = self.ep_collector_combo.itemData(idx)
+            if t.is_collector_group and t.name == vm.collector_group:
+                group_idx = idx
+            elif not t.is_collector_group and t.address == vm.collector_address:
+                proxy_idx = idx
+        idx = group_idx if group_idx >= 0 else proxy_idx
+        if idx >= 0:
+            self.ep_collector_combo.setCurrentIndex(idx)
+
+    def _selected_collector(self) -> Optional[CollectorInfo]:
+        if not hasattr(self, "ep_collector_combo") or self.ep_collector_combo.currentIndex() < 0:
+            return None
+        return self.ep_collector_combo.currentData()
+
+    def _on_winrm_ssl_toggled(self, checked: bool) -> None:
+        if self.ep_port_input.text().strip() in ("", "5985", "5986"):
+            self.ep_port_input.setText("5986" if checked else "5985")
+        self._invalidate_endpoint_detection()
 
     def _update_auth_and_endpoint_visibility(self) -> None:
         if not hasattr(self, "ep_os_combo"):
             return
         is_win = self.ep_os_combo.currentText().lower().startswith("win")
 
+        if hasattr(self, "ep_winrm_ssl_check"):
+            self.ep_winrm_ssl_check.setVisible(is_win)
         if is_win:
             if hasattr(self, "ep_auth_type_label"):
                 self.ep_auth_type_label.setVisible(False)
@@ -820,165 +1134,6 @@ class MainWindow(QMainWindow):
             self.ep_pass_input.clear()
         self._update_auth_and_endpoint_visibility()
 
-    def _fetch_vcf_inventory(self) -> None:
-        self.fetch_vms_btn.setEnabled(False)
-        self.fetch_vms_btn.setText("Querying Inventory...")
-        self.vm_count_label.setText("Querying VCF Operations...")
-        try:
-            env = self._get_vcf_env()
-            adapter = get_adapter(env)
-            self._cached_vms = adapter.list_virtual_machines()
-            self._populate_vm_table(self._cached_vms)
-            self._update_cg_filter_options(self._cached_vms)
-            self.vm_count_label.setText(f"{len(self._cached_vms)} VMs loaded")
-            self.logger.info("Retrieved %d VMs from VCF Operations inventory", len(self._cached_vms))
-        except Exception as exc:
-            self.vm_count_label.setText(f"Query error: {exc}")
-            self.logger.warning("Failed to retrieve VM inventory: %s", exc)
-        finally:
-            self.fetch_vms_btn.setEnabled(True)
-            self.fetch_vms_btn.setText("Query VCF Inventory")
-
-    def _update_cg_filter_options(self, vms: list[VirtualMachineResource]) -> None:
-        if not hasattr(self, "vm_cg_filter"):
-            return
-        current_cg = self.vm_cg_filter.currentText()
-        cgs = sorted({vm.collector_group for vm in vms if vm.collector_group})
-        self.vm_cg_filter.blockSignals(True)
-        self.vm_cg_filter.clear()
-        self.vm_cg_filter.addItem("All Collector Groups")
-        for cg in cgs:
-            self.vm_cg_filter.addItem(cg)
-        idx = self.vm_cg_filter.findText(current_cg)
-        if idx >= 0:
-            self.vm_cg_filter.setCurrentIndex(idx)
-        self.vm_cg_filter.blockSignals(False)
-
-    def _populate_vm_table(self, vms: list[VirtualMachineResource]) -> None:
-        self.vm_table.setSortingEnabled(False)
-        self.vm_table.setRowCount(len(vms))
-        for row, vm in enumerate(vms):
-            name_item = QTableWidgetItem(vm.name)
-            name_item.setData(Qt.UserRole, vm)
-            self.vm_table.setItem(row, 0, name_item)
-
-            ip_item = QTableWidgetItem(vm.ip_address or "N/A")
-            self.vm_table.setItem(row, 1, ip_item)
-
-            os_item = QTableWidgetItem(vm.os_family.capitalize())
-            self.vm_table.setItem(row, 2, os_item)
-
-            mor_item = QTableWidgetItem(vm.vm_mor or "N/A")
-            self.vm_table.setItem(row, 3, mor_item)
-
-            cg_item = QTableWidgetItem(vm.collector_group or "Default")
-            self.vm_table.setItem(row, 4, cg_item)
-
-            st_item = QTableWidgetItem(vm.telegraf_status or "Unknown")
-            if vm.telegraf_status == "Installed":
-                st_item.setForeground(Qt.darkGreen)
-            elif vm.telegraf_status == "Not Installed":
-                st_item.setForeground(Qt.darkYellow)
-            self.vm_table.setItem(row, 5, st_item)
-        self.vm_table.setSortingEnabled(True)
-
-    def _filter_vm_table(self) -> None:
-        if not hasattr(self, "_cached_vms") or not self._cached_vms:
-            return
-        query = self.vm_search_input.text().strip().lower()
-        os_filter = self.vm_os_filter.currentText().lower()
-        cg_filter = self.vm_cg_filter.currentText().lower()
-        status_filter = self.vm_status_filter.currentText().lower()
-
-        total = self.vm_table.rowCount()
-        visible_count = 0
-        for row in range(total):
-            item = self.vm_table.item(row, 0)
-            vm = item.data(Qt.UserRole) if item else None
-            if not vm:
-                continue
-            show = True
-            if query and query not in vm.name.lower() and query not in (vm.ip_address or "").lower() and query not in (vm.vm_mor or "").lower():
-                show = False
-            elif "win" in os_filter and vm.os_family.lower() != "windows":
-                show = False
-            elif "lin" in os_filter and vm.os_family.lower() != "linux":
-                show = False
-            elif cg_filter != "all collector groups" and cg_filter != (vm.collector_group or "").lower():
-                show = False
-            elif status_filter != "all agent states":
-                st = (vm.telegraf_status or "").lower()
-                if "not" in status_filter or "missing" in status_filter:
-                    if "not" not in st and "missing" not in st:
-                        show = False
-                elif "installed" in status_filter or "active" in status_filter:
-                    if ("installed" not in st and "active" not in st) or "not" in st:
-                        show = False
-                elif "unknown" in status_filter:
-                    if st not in ("unknown", "n/a", ""):
-                        show = False
-            self.vm_table.setRowHidden(row, not show)
-            if show:
-                visible_count += 1
-        self.vm_count_label.setText(f"{visible_count} / {len(self._cached_vms)} VMs")
-
-    def _on_vm_row_selected(self) -> None:
-        items = self.vm_table.selectedItems()
-        if not items:
-            self.btn_select_vm.setEnabled(False)
-            self.vm_inspector_label.setText("No VM selected. Click a row to bind target.")
-            return
-        row = items[0].row()
-        item0 = self.vm_table.item(row, 0)
-        if not item0:
-            return
-        vm: Optional[VirtualMachineResource] = item0.data(Qt.UserRole)
-        if not vm:
-            return
-        self.selected_vm = vm
-        self.btn_select_vm.setEnabled(True)
-        self._update_vm_inspector(vm)
-
-    def _update_vm_inspector(self, vm: VirtualMachineResource) -> None:
-        cg_str = vm.collector_group or "Auto-assign"
-        mor_str = vm.vm_mor or "N/A"
-        vcid_str = vm.vc_id or "N/A"
-        txt = (
-            f"Selected: {vm.name} ({vm.ip_address or 'No IP'}) | OS: {vm.os_family.capitalize()} | "
-            f"MOR: {mor_str} | VCID: {vcid_str} | Collector Group: {cg_str} | Agent: {vm.telegraf_status}"
-        )
-        self.vm_inspector_label.setText(txt)
-
-    def _on_vm_double_clicked(self, row: int, col: int) -> None:
-        self._on_vm_row_selected()
-        self._apply_selected_vm_to_form()
-
-    def _apply_selected_vm_to_form(self) -> None:
-        if not self.selected_vm:
-            return
-        vm = self.selected_vm
-        self.bound_vm = vm
-        self.selected_vm_mor = vm.vm_mor
-        self.selected_vc_id = vm.vc_id
-        self.selected_vm_name = vm.name
-
-        self.ep_host_input.setText(vm.ip_address or vm.name)
-        if vm.os_family.lower() == "windows":
-            self.ep_os_combo.setCurrentText("Windows")
-        else:
-            self.ep_os_combo.setCurrentText("Linux")
-
-        if vm.collector_group and hasattr(self, "vcf_collector_group_input"):
-            self.vcf_collector_group_input.setText(vm.collector_group)
-
-        if hasattr(self, "ep_mor_badge"):
-            mor_display = f"Bound to vCenter VM: {vm.vm_mor} (vCenter ID: {vm.vc_id or 'auto'})"
-            self.ep_mor_badge.setText(mor_display)
-            self.ep_mor_badge.setStyleSheet("color: #199e70; font-weight: 600;")
-
-        self.step2_tabs.setCurrentIndex(1)
-        self.logger.info("Applied VM %s (%s) to target configuration", vm.name, vm.vm_mor)
-
     def _update_vcf_auth_visibility(self) -> None:
         if not hasattr(self, "vcf_auth_type_combo"):
             return
@@ -996,36 +1151,21 @@ class MainWindow(QMainWindow):
             self.state_store.save_preference("vcf_auth_mode", text)
 
     def _on_target_host_changed(self, text: str) -> None:
-        if hasattr(self, "ep_status_label"):
-            self.ep_status_label.setText("Not detected yet")
-        if hasattr(self, "ep_details_box"):
-            self.ep_details_box.setPlainText("Endpoint details will appear here after detection.")
-        if hasattr(self, "ep_missing_banner"):
-            self.ep_missing_banner.setVisible(False)
-        # Compare against the VM actually applied to the form, not the row merely highlighted
-        bound_vm = getattr(self, "bound_vm", None)
-        if bound_vm and text.strip() not in (bound_vm.ip_address, bound_vm.name):
-            self.bound_vm = None
-            self.selected_vm_mor = None
-            self.selected_vc_id = None
-            self.selected_vm_name = None
-            if hasattr(self, "ep_mor_badge"):
-                self.ep_mor_badge.setText("Unmanaged host (not bound to vCenter VM)")
-                self.ep_mor_badge.setStyleSheet("")
+        # The VM identity comes from Step 2; the address only changes how we reach it
+        self._invalidate_endpoint_detection()
 
     def _on_os_changed(self, os_name: str) -> None:
-        # Reset detection state, but keep a VM binding that still matches the entered host
-        self._on_target_host_changed(self.ep_host_input.text() if hasattr(self, "ep_host_input") else "")
+        self._invalidate_endpoint_detection()
         is_win = os_name.lower().startswith("win")
         if is_win:
             if not self.ep_advanced_check.isChecked() or self.ep_port_input.text() == "22":
-                self.ep_port_input.setText("5985")
+                self.ep_port_input.setText("5986" if self.ep_winrm_ssl_check.isChecked() else "5985")
             if self.ep_user_input.text() == "root":
                 self.ep_user_input.setText("Administrator")
             if hasattr(self, "docker_endpoint_input") and self.docker_endpoint_input.text().strip() in ("", "unix:///var/run/docker.sock"):
                 self.docker_endpoint_input.setText("npipe:////./pipe/docker_engine")
         else:
-            if not self.ep_advanced_check.isChecked() or self.ep_port_input.text() == "5985":
+            if not self.ep_advanced_check.isChecked() or self.ep_port_input.text() in ("5985", "5986"):
                 self.ep_port_input.setText("22")
             if self.ep_user_input.text() == "Administrator":
                 self.ep_user_input.setText("root")
@@ -1151,6 +1291,13 @@ class MainWindow(QMainWindow):
         QMessageBox.critical(self, "Uninstall Failed", f"Failed to execute uninstallation: {error_str}")
 
     def _detect_endpoint(self) -> None:
+        self._endpoint_detected = False
+        try:
+            self._run_endpoint_detection()
+        finally:
+            self._refresh_step_gating()
+
+    def _run_endpoint_detection(self) -> None:
         self.ep_status_label.setText("Detecting...")
         if hasattr(self, "ep_missing_banner"):
             self.ep_missing_banner.setVisible(False)
@@ -1194,9 +1341,10 @@ class MainWindow(QMainWindow):
 
                 self.ep_missing_banner.setVisible(not installed)
 
+                self._endpoint_detected = True
                 self.ep_status_label.setText("Connected & Discovered (Windows)")
                 self.ep_status_label.setStyleSheet("color: #199e70; font-weight: 600;")
-                auto_install = self.ep_auto_install_check.isChecked() if hasattr(self, "ep_auto_install_check") else False
+                auto_install = "Do Not Install" not in self.ep_version_combo.currentText()
                 if installed:
                     inst_str = "YES"
                 elif auto_install:
@@ -1262,10 +1410,11 @@ class MainWindow(QMainWindow):
 
             self.ep_missing_banner.setVisible(not installed)
 
+            self._endpoint_detected = True
             self.ep_status_label.setText("Connected & Discovered")
             self.ep_status_label.setStyleSheet("color: #199e70; font-weight: 600;")
 
-            auto_install = self.ep_auto_install_check.isChecked() if hasattr(self, "ep_auto_install_check") else False
+            auto_install = "Do Not Install" not in self.ep_version_combo.currentText()
             if installed:
                 inst_str = "YES"
             elif auto_install:
@@ -1302,7 +1451,7 @@ class MainWindow(QMainWindow):
     # --------------------------------------------------------------------------
     # Step 3: Monitoring Inputs
     # --------------------------------------------------------------------------
-    def _build_step3_page(self) -> QWidget:
+    def _build_monitoring_page(self) -> QWidget:
         page = QWidget()
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -1318,7 +1467,7 @@ class MainWindow(QMainWindow):
         c_layout = QVBoxLayout(card)
         c_layout.setSpacing(14)
 
-        lbl = QLabel("STEP 3: MONITORING INPUTS & DEPLOYMENT MODE")
+        lbl = QLabel("STEP 4: MONITORING INPUTS")
         lbl.setProperty("class", "lattice-section-label")
         c_layout.addWidget(lbl)
 
@@ -1329,43 +1478,6 @@ class MainWindow(QMainWindow):
         desc.setProperty("class", "lattice-muted")
         desc.setWordWrap(True)
         c_layout.addWidget(desc)
-
-        # Deployment Mode Selection Card
-        mode_card = QFrame()
-        mode_card.setProperty("class", "lattice-card")
-        mc_layout = QVBoxLayout(mode_card)
-        mc_layout.setContentsMargins(12, 10, 12, 10)
-        mc_layout.setSpacing(8)
-
-        mc_title = QLabel("DEPLOYMENT MODE")
-        mc_title.setProperty("class", "lattice-section-label")
-        mc_layout.addWidget(mc_title)
-
-        mode_row = QHBoxLayout()
-        mode_row.addWidget(QLabel("Target Mode:"))
-        self.deployment_mode_combo = QComboBox()
-        self.deployment_mode_combo.addItem("Direct Push (Deploy remotely via SSH / WinRM)", "push")
-        self.deployment_mode_combo.addItem("Standalone Script (Generate offline bundle with deploy script)", "script")
-        self.deployment_mode_combo.addItem("Configuration Only (Generate TOML config bundle without scripts)", "config_only")
-        self.deployment_mode_combo.currentIndexChanged.connect(self._on_deployment_mode_changed)
-        mode_row.addWidget(self.deployment_mode_combo, 1)
-        mc_layout.addLayout(mode_row)
-
-        self.bundle_dir_widget = QWidget()
-        bd_layout = QHBoxLayout(self.bundle_dir_widget)
-        bd_layout.setContentsMargins(0, 0, 0, 0)
-        bd_layout.setSpacing(8)
-        bd_layout.addWidget(QLabel("Bundle Directory:"))
-        self.bundle_dir_input = QLineEdit("./vcf-telegraf-bundle")
-        self.bundle_dir_input.textChanged.connect(self._update_cli_command)
-        bd_layout.addWidget(self.bundle_dir_input, 1)
-        self.bundle_browse_btn = QPushButton("Browse...")
-        self.bundle_browse_btn.clicked.connect(self._browse_bundle_dir)
-        bd_layout.addWidget(self.bundle_browse_btn)
-        mc_layout.addWidget(self.bundle_dir_widget)
-        self.bundle_dir_widget.setVisible(False)
-
-        c_layout.addWidget(mode_card)
 
         sec_in = QLabel("PLUGIN SELECTION & CONFIGURATION")
         sec_in.setProperty("class", "lattice-section-label")
@@ -1747,18 +1859,7 @@ class MainWindow(QMainWindow):
 
         scroll.setWidget(content)
 
-        nav_frame = QFrame()
-        nav_frame.setProperty("class", "lattice-card")
-        nav_layout = QHBoxLayout(nav_frame)
-        nav_layout.setContentsMargins(16, 10, 16, 10)
-        back_btn = QPushButton("<- Back: Endpoint Target")
-        back_btn.clicked.connect(lambda: self.step_list.setCurrentRow(1))
-        nav_layout.addWidget(back_btn)
-        nav_layout.addStretch()
-        next_btn = QPushButton("Next: Review & Preview ->")
-        next_btn.setProperty("class", "primary")
-        next_btn.clicked.connect(lambda: self.step_list.setCurrentRow(3))
-        nav_layout.addWidget(next_btn)
+        nav_frame, _ = self._build_nav(self.STEP_MONITORING, "Configure Target VM", "Review & Preview")
 
         v = QVBoxLayout(page)
         v.setContentsMargins(0, 0, 0, 0)
@@ -1862,32 +1963,6 @@ class MainWindow(QMainWindow):
                     self.custom_toml_check.setChecked(False)
             elif not self.custom_toml_check.isChecked() and not getattr(self, "_custom_toml_manually_unchecked", False) and not self._updating_catalog:
                 self.custom_toml_check.setChecked(True)
-
-    def _on_deployment_mode_changed(self) -> None:
-        if not hasattr(self, "deployment_mode_combo"):
-            return
-        mode_data = self.deployment_mode_combo.currentData()
-        is_bundle = mode_data in ("script", "config_only")
-        if hasattr(self, "bundle_dir_widget"):
-            self.bundle_dir_widget.setVisible(is_bundle)
-        if hasattr(self, "cli_command_box"):
-            self._update_cli_command()
-        if hasattr(self, "review_summary_box"):
-            self._update_preview()
-
-    def _browse_bundle_dir(self) -> None:
-        init_dir = (
-            self.bundle_dir_input.text().strip()
-            if hasattr(self, "bundle_dir_input") and self.bundle_dir_input.text().strip()
-            else "."
-        )
-        selected_dir = QFileDialog.getExistingDirectory(
-            self,
-            "Select Bundle Output Directory",
-            init_dir,
-        )
-        if selected_dir:
-            self.bundle_dir_input.setText(selected_dir)
 
     def _browse_ca_cert(self) -> None:
         init_file = (
@@ -2209,7 +2284,7 @@ class MainWindow(QMainWindow):
             )
     # Step 4: Review & Preview
     # --------------------------------------------------------------------------
-    def _build_step4_page(self) -> QWidget:
+    def _build_review_page(self) -> QWidget:
         page = QWidget()
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -2225,7 +2300,7 @@ class MainWindow(QMainWindow):
         c_layout = QVBoxLayout(card)
         c_layout.setSpacing(12)
 
-        lbl = QLabel("STEP 4: CONFIGURATION REVIEW & PREVIEW")
+        lbl = QLabel("STEP 5: CONFIGURATION REVIEW & PREVIEW")
         lbl.setProperty("class", "lattice-section-label")
         c_layout.addWidget(lbl)
 
@@ -2272,23 +2347,10 @@ class MainWindow(QMainWindow):
 
         scroll.setWidget(content)
 
-        nav_frame = QFrame()
-        nav_frame.setProperty("class", "lattice-card")
-        nav_layout = QHBoxLayout(nav_frame)
-        nav_layout.setContentsMargins(16, 10, 16, 10)
-        back_btn = QPushButton("<- Back: Monitoring Inputs")
-        back_btn.clicked.connect(lambda: self.step_list.setCurrentRow(2))
-        nav_layout.addWidget(back_btn)
-
+        nav_frame, nav_layout = self._build_nav(self.STEP_REVIEW, "Monitoring Inputs", "Execute & Verify")
         refresh_btn = QPushButton("Refresh Preview")
         refresh_btn.clicked.connect(self._update_preview)
-        nav_layout.addWidget(refresh_btn)
-        nav_layout.addStretch()
-
-        next_btn = QPushButton("Proceed to Execution ->")
-        next_btn.setProperty("class", "primary")
-        next_btn.clicked.connect(lambda: self.step_list.setCurrentRow(4))
-        nav_layout.addWidget(next_btn)
+        nav_layout.insertWidget(1, refresh_btn)
 
         v = QVBoxLayout(page)
         v.setContentsMargins(0, 0, 0, 0)
@@ -2366,45 +2428,23 @@ class MainWindow(QMainWindow):
         else:
             install_desc = "Verify existing pre-installed Telegraf agent"
 
-        mode = self._get_deployment_mode()
-        bundle_dir = (
-            self.bundle_dir_input.text().strip()
-            if hasattr(self, "bundle_dir_input") and self.bundle_dir_input.text().strip()
-            else "./vcf-telegraf-bundle"
-        )
 
+        collector_desc = env.collector.address + (f" ({env.collector.name})" if env.collector.name else "")
         plan_lines = [
+            f"Target VM:       {self.bound_vm.name if self.bound_vm else 'none selected'} (MOR {target.vm_mor or 'N/A'})",
             f"Target Endpoint: {target.hostname} ({target.connection_method.value.upper()}, OS: {target.os_family.value}, Port: {target.port})",
-            f"VCF Collector:   {env.collector.address} (SSL Verify: {env.verify_ssl})",
-            f"Deployment Mode: {mode.value.upper()}",
+            f"VCF Collector:   {collector_desc} (SSL Verify: {env.verify_ssl})",
+            "",
+            "PLANNED EXECUTION STAGES:",
+            f"1. Validate Connectivity: Test connection to {target.hostname} via {target.connection_method.value.upper()} (port {target.port}) and verify VCF Ops Collector reachability.",
+            f"2. Acquire Certificates: Connect to VCF Operations Suite API ({env.url}) to acquire mTLS client certificates (ca.cert, client.cert, client.key).",
+            f"3. Agent Provisioning: {install_desc}.",
+            f"4. Monitoring Configuration: Deploy {conf_dir}/vcf-helper-system.conf ({len(active_plugins)} active plugins: {', '.join(active_plugins)}).",
+            f"5. Output Pipeline: Deploy {conf_dir}/cloudproxy-http.conf targeting {env.collector.address} with mTLS authentication.",
+            f"6. Mandatory Metadata: Deploy {'mandatory_tags.bat' if is_win else 'mandatory_tags.sh'} to inject VCF Operations resource tags.",
+            f"7. Syntax Verification: Run telegraf --test on {target.hostname} to ensure valid configuration syntax before starting service.",
+            f"8. Service Activation: Enable and restart Telegraf service ({'Windows Service' if is_win else 'systemd unit'}) and verify telemetry ingestion.",
         ]
-        if mode in (DeploymentMode.SCRIPT, DeploymentMode.CONFIG_ONLY):
-            plan_lines.append(f"Output Directory: {bundle_dir}")
-        plan_lines.append("")
-        plan_lines.append("PLANNED EXECUTION STAGES:")
-        if mode in (DeploymentMode.SCRIPT, DeploymentMode.CONFIG_ONLY):
-            script_name = "deploy-telegraf.ps1" if is_win else "deploy-telegraf.sh"
-            plan_lines.extend([
-                "1. Validate Connectivity: Skipped (offline bundle generation).",
-                f"2. Acquire Certificates: Connect to VCF Operations Suite API ({env.url}) to acquire mTLS client certificates.",
-                "3. Agent Provisioning: Skipped (handled locally by standalone deploy script or existing tooling).",
-                f"4. Monitoring Configuration: Generate {conf_dir}/vcf-helper-system.conf ({len(active_plugins)} active plugins: {', '.join(active_plugins)}).",
-                f"5. Output Pipeline: Generate {conf_dir}/cloudproxy-http.conf targeting {env.collector.address} with mTLS authentication.",
-                f"6. Mandatory Metadata: Generate {'mandatory_tags.bat' if is_win else 'mandatory_tags.sh'} to inject VCF Operations resource tags.",
-                "7. Bundle Packaging: Write artifacts" + (f" and {script_name} installer" if mode == DeploymentMode.SCRIPT else "") + f" to {bundle_dir}.",
-                f"8. Verification: Ready for offline deployment on {target.hostname}.",
-            ])
-        else:
-            plan_lines.extend([
-                f"1. Validate Connectivity: Test connection to {target.hostname} via {target.connection_method.value.upper()} (port {target.port}) and verify VCF Ops Collector reachability.",
-                f"2. Acquire Certificates: Connect to VCF Operations Suite API ({env.url}) to acquire mTLS client certificates (ca.cert, client.cert, client.key).",
-                f"3. Agent Provisioning: {install_desc}.",
-                f"4. Monitoring Configuration: Deploy {conf_dir}/vcf-helper-system.conf ({len(active_plugins)} active plugins: {', '.join(active_plugins)}).",
-                f"5. Output Pipeline: Deploy {conf_dir}/cloudproxy-http.conf targeting {env.collector.address} with mTLS authentication.",
-                f"6. Mandatory Metadata: Deploy {'mandatory_tags.bat' if is_win else 'mandatory_tags.sh'} to inject VCF Operations resource tags.",
-                f"7. Syntax Verification: Run telegraf --test on {target.hostname} to ensure valid configuration syntax before starting service.",
-                f"8. Service Activation: Enable and restart Telegraf service ({'Windows Service' if is_win else 'systemd unit'}) and verify telemetry ingestion.",
-            ])
         self.review_summary_box.setPlainText("\n".join(plan_lines))
         self.preview_system_box.setPlainText(sys_toml)
         self.preview_output_box.setPlainText(out_toml)
@@ -2412,7 +2452,7 @@ class MainWindow(QMainWindow):
     # --------------------------------------------------------------------------
     # Step 5: Execution & Honest Verification
     # --------------------------------------------------------------------------
-    def _build_step5_page(self) -> QWidget:
+    def _build_execute_page(self) -> QWidget:
         page = QWidget()
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -2428,7 +2468,7 @@ class MainWindow(QMainWindow):
         c_layout = QVBoxLayout(card)
         c_layout.setSpacing(12)
 
-        lbl = QLabel("STEP 5: EXECUTION & VERIFICATION")
+        lbl = QLabel("STEP 6: EXECUTION & VERIFICATION")
         lbl.setProperty("class", "lattice-section-label")
         c_layout.addWidget(lbl)
 
@@ -2506,14 +2546,7 @@ class MainWindow(QMainWindow):
 
         scroll.setWidget(content)
 
-        nav_frame = QFrame()
-        nav_frame.setProperty("class", "lattice-card")
-        nav_layout = QHBoxLayout(nav_frame)
-        nav_layout.setContentsMargins(16, 10, 16, 10)
-        back_btn = QPushButton("<- Back: Review & Preview")
-        back_btn.clicked.connect(lambda: self.step_list.setCurrentRow(3))
-        nav_layout.addWidget(back_btn)
-        nav_layout.addStretch()
+        nav_frame, _ = self._build_nav(self.STEP_EXECUTE, "Review & Preview", None)
 
         v = QVBoxLayout(page)
         v.setContentsMargins(0, 0, 0, 0)
@@ -2536,8 +2569,6 @@ class MainWindow(QMainWindow):
         env = self._get_vcf_env()
         mon = self._get_monitoring_config()
         dry_run = getattr(self, "dry_run_check", None) and self.dry_run_check.isChecked()
-        mode = self._get_deployment_mode()
-
         parts = ["vcf-telegraf-helper run"]
         parts.append(f"--vcf-url {shlex.quote(env.url)}")
         use_token_auth = hasattr(self, "vcf_auth_type_combo") and "token" in self.vcf_auth_type_combo.currentText().lower()
@@ -2557,31 +2588,21 @@ class MainWindow(QMainWindow):
             parts.append(f"--ca-cert {shlex.quote(env.ca_cert_path)}")
 
         parts.append(f"--target-host {shlex.quote(target.hostname)}")
-        if mode != DeploymentMode.PUSH:
-            parts.append(f"--mode {mode.value}")
-            parts.append(f"--os {target.os_family.value}")
-            out_dir = (
-                self.bundle_dir_input.text().strip()
-                if hasattr(self, "bundle_dir_input") and self.bundle_dir_input.text().strip()
-                else "./vcf-telegraf-bundle"
-            )
-            if out_dir != "./vcf-telegraf-bundle":
-                parts.append(f"--output-dir {shlex.quote(out_dir)}")
+        parts.append(f"--os {target.os_family.value}")
+        parts.append(f"--connection {shlex.quote(target.connection_method.value)}")
+        std_port = (5986 if target.winrm_use_ssl else 5985) if target.os_family == OSFamily.WINDOWS else 22
+        if target.port != std_port:
+            parts.append(f"--port {target.port}")
+
+        if target.username:
+            parts.append(f"--ssh-user {shlex.quote(target.username)}")
+        if target.key_filename:
+            parts.append(f"--ssh-key {shlex.quote(target.key_filename)}")
         else:
-            parts.append(f"--connection {shlex.quote(target.connection_method.value)}")
-            std_port = 5985 if target.os_family == OSFamily.WINDOWS else 22
-            if target.port != std_port:
-                parts.append(f"--port {target.port}")
+            parts.append('--ssh-pass "<password>"')
 
-            if target.username:
-                parts.append(f"--ssh-user {shlex.quote(target.username)}")
-            if target.key_filename:
-                parts.append(f"--ssh-key {shlex.quote(target.key_filename)}")
-            else:
-                parts.append('--ssh-pass "<password>"')
-
-            if target.winrm_use_ssl:
-                parts.append("--winrm-ssl")
+        if target.winrm_use_ssl:
+            parts.append("--winrm-ssl")
 
         if target.install_telegraf:
             parts.append("--install-telegraf")
@@ -2670,18 +2691,9 @@ class MainWindow(QMainWindow):
         target = self._get_endpoint_target()
         env = self._get_vcf_env()
         mon = self._get_monitoring_config()
-        mode = self._get_deployment_mode()
-        out_dir = (
-            self.bundle_dir_input.text().strip()
-            if hasattr(self, "bundle_dir_input") and self.bundle_dir_input.text().strip()
-            else "./vcf-telegraf-bundle"
-        )
-
         opts = WorkflowOptions(
-            mode=mode,
             dry_run=self.dry_run_check.isChecked(),
-            output_dir=out_dir if mode in (DeploymentMode.SCRIPT, DeploymentMode.CONFIG_ONLY) else None,
-            restart_service=(mode == DeploymentMode.PUSH and not self.dry_run_check.isChecked()),
+            restart_service=not self.dry_run_check.isChecked(),
             install_telegraf=target.install_telegraf,
             telegraf_version=target.telegraf_version,
         )
@@ -2762,12 +2774,8 @@ class MainWindow(QMainWindow):
     # Helper methods: State & Models
     # --------------------------------------------------------------------------
     def _get_vcf_env(self) -> VCFEnvironment:
-        collector_addr = self.vcf_collector_input.text().strip() or "10.10.10.50"
-        collector_group = (
-            self.vcf_collector_group_input.text().strip()
-            if hasattr(self, "vcf_collector_group_input")
-            else None
-        ) or None
+        # The collector is chosen per target in Step 3; before that only the API connection matters
+        collector = self._selected_collector() or CollectorInfo(address="")
         use_key = hasattr(self, "vcf_auth_type_combo") and (
             "key" in self.vcf_auth_type_combo.currentText().lower()
             or "token" in self.vcf_auth_type_combo.currentText().lower()
@@ -2787,7 +2795,7 @@ class MainWindow(QMainWindow):
             username=username,
             password=password,
             token=token,
-            collector=CollectorInfo(address=collector_addr, name=collector_group),
+            collector=collector,
             verify_ssl=self.vcf_ssl_check.isChecked(),
             ca_cert_path=ca_cert,
         )
@@ -2801,7 +2809,7 @@ class MainWindow(QMainWindow):
         try:
             port_val = int(self.ep_port_input.text().strip())
         except Exception:
-            port_val = 5985 if is_win else 22
+            port_val = (5986 if self.ep_winrm_ssl_check.isChecked() else 5985) if is_win else 22
         ver_text = self.ep_version_combo.currentText() if hasattr(self, "ep_version_combo") else "1.40.1"
         if "Do Not Install" in ver_text:
             auto_install = False
@@ -2825,14 +2833,14 @@ class MainWindow(QMainWindow):
         reg_hname = getattr(self, "selected_vm_name", None) or getattr(self, "discovered_hostname", None)
 
         target = EndpointTarget(
-            hostname=self.ep_host_input.text().strip() or "10.10.10.101",
+            hostname=self.ep_host_input.text().strip(),
             os_family=os_family,
             connection_method=method,
             port=port_val,
             username=self.ep_user_input.text().strip() or default_user,
             password=password,
             key_filename=key_filename,
-            winrm_use_ssl=(port_val == 5986),
+            winrm_use_ssl=bool(is_win and self.ep_winrm_ssl_check.isChecked()),
             install_telegraf=auto_install,
             telegraf_version=ver_str,
             registered_hostname=reg_hname,
@@ -2900,30 +2908,10 @@ class MainWindow(QMainWindow):
             custom_toml=custom_txt,
         )
 
-    def _get_deployment_mode(self) -> DeploymentMode:
-        if not hasattr(self, "deployment_mode_combo"):
-            return DeploymentMode.PUSH
-        data = self.deployment_mode_combo.currentData()
-        if data == "script":
-            return DeploymentMode.SCRIPT
-        if data == "config_only":
-            return DeploymentMode.CONFIG_ONLY
-        return DeploymentMode.PUSH
-
     def _create_executor(self, target: EndpointTarget) -> Any:
-        mode = self._get_deployment_mode()
-        out_dir = (
-            self.bundle_dir_input.text().strip()
-            if hasattr(self, "bundle_dir_input") and self.bundle_dir_input.text().strip()
-            else "./vcf-telegraf-bundle"
-        )
-        if mode in (DeploymentMode.SCRIPT, DeploymentMode.CONFIG_ONLY):
-            return PackageExecutor(output_dir=out_dir)
         m = target.connection_method.value
         if m == "local":
             return LocalExecutor()
-        if m == "package":
-            return PackageExecutor(output_dir=out_dir)
         if m == "winrm":
             return WinRMExecutor(
                 hostname=target.hostname,
@@ -2945,7 +2933,6 @@ class MainWindow(QMainWindow):
         if recent_envs:
             latest = recent_envs[0]
             self.vcf_url_input.setText(latest.url)
-            self.vcf_collector_input.setText(latest.collector.address)
             self.vcf_user_input.setText(latest.username or "")
             self.vcf_ssl_check.setChecked(latest.verify_ssl)
 
@@ -2956,6 +2943,4 @@ class MainWindow(QMainWindow):
                 self.vcf_auth_type_combo.setCurrentIndex(idx)
         self._update_vcf_auth_visibility()
 
-        state = self.state_store.load()
-        if state.recent_endpoints:
-            self.ep_host_input.setText(state.recent_endpoints[0])
+        self._on_vcf_ssl_toggled(self.vcf_ssl_check.isChecked())

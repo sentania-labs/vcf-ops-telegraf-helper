@@ -6,6 +6,7 @@ Implements the official Broadcom workflow for VCF Operations 9.1 open-source Tel
 from __future__ import annotations
 
 import io
+import ipaddress
 import os
 import re
 import socket
@@ -66,6 +67,20 @@ class VCF91OpenTelegrafIntegration(VCFOpsIntegration):
                 return resp.status_code in (200, 301, 302, 401)
             except Exception:
                 return False
+
+    def verify_credentials(self) -> None:
+        """Confirm the token, or the username and password, are accepted by the Suite API."""
+        if not self.env.token:
+            if not (self.env.username and self.env.password):
+                raise RuntimeError("No API token or username and password supplied")
+            self.acquire_token(self.env.username, self.env.password)
+        resp = self.session.get(
+            f"{self.base_url}/suite-api/api/versions/current", headers=self._api_headers(), timeout=10
+        )
+        if resp.status_code in (401, 403):
+            raise RuntimeError(f"VCF Operations rejected the credentials (HTTP {resp.status_code})")
+        if resp.status_code != 200:
+            raise RuntimeError(f"Credential check failed with HTTP {resp.status_code}")
 
     def detect_version(self) -> str:
         """Detect remote release version using Suite API versions endpoint."""
@@ -200,7 +215,20 @@ class VCF91OpenTelegrafIntegration(VCFOpsIntegration):
         """
         if vc_id:
             return True, None, vc_id, vm_mor
-        candidates = [vm for vm in self.list_virtual_machines(strict=True) if vm.vm_mor == vm_mor]
+        candidates = []
+        for res in self._fetch_paged_resources(strict=True, adapterKind="VMWARE", resourceKind="VirtualMachine"):
+            if self._is_stale(res):
+                continue
+            idents = {
+                i.get("identifierType", {}).get("name"): i.get("value")
+                for i in res.get("resourceKey", {}).get("resourceIdentifiers", [])
+            }
+            mor, vcid = idents.get("VMEntityObjectID"), idents.get("VMEntityVCID")
+            name = idents.get("VMEntityName") or res.get("resourceKey", {}).get("name")
+            if mor == vm_mor:
+                candidates.append(VirtualMachineResource(
+                    resource_id=res.get("identifier") or "", name=name or "", vm_mor=mor, vc_id=vcid
+                ))
         matches = [vm for vm in candidates if vm.vc_id]
         if not matches:
             if candidates:
@@ -242,9 +270,14 @@ class VCF91OpenTelegrafIntegration(VCFOpsIntegration):
             return True, vm_name or res_key.get("name"), vcid, vm_mor
         return False, None, None, None
 
-    def get_collector_groups(self) -> List[Dict[str, Any]]:
-        """Retrieve list of collector groups from VCF Operations Suite API."""
+    def get_collector_groups(self, strict: bool = False) -> List[Dict[str, Any]]:
+        """Retrieve list of collector groups from VCF Operations Suite API.
+
+        With strict=True a failed query raises instead of looking like an empty list.
+        """
         if not self.env.token:
+            if strict:
+                raise RuntimeError("Cannot query VCF Operations collector groups: no API token")
             return []
 
         headers = {
@@ -270,11 +303,18 @@ class VCF91OpenTelegrafIntegration(VCFOpsIntegration):
                     )
             except Exception as e:
                 logger.warning("Failed querying collector groups at %s: %s", endpoint, e)
+        if strict:
+            raise RuntimeError("VCF Operations collector group query failed (see log for details)")
         return []
 
-    def get_collectors(self) -> List[Dict[str, Any]]:
-        """Retrieve list of collectors from VCF Operations Suite API."""
+    def get_collectors(self, strict: bool = False) -> List[Dict[str, Any]]:
+        """Retrieve list of collectors from VCF Operations Suite API.
+
+        With strict=True a failed query raises instead of looking like an empty list.
+        """
         if not self.env.token:
+            if strict:
+                raise RuntimeError("Cannot query VCF Operations collectors: no API token")
             return []
 
         headers = {
@@ -294,6 +334,8 @@ class VCF91OpenTelegrafIntegration(VCFOpsIntegration):
                 logger.warning("Collectors query returned HTTP %d: %s", resp.status_code, resp.text)
         except Exception as e:
             logger.warning("Failed querying collectors: %s", e)
+        if strict:
+            raise RuntimeError("VCF Operations collector query failed (see log for details)")
         return []
 
     def resolve_collector_group_name(self, collector_target: str) -> str:
@@ -313,7 +355,7 @@ class VCF91OpenTelegrafIntegration(VCFOpsIntegration):
             g_name = str(g.get("name", "")).strip()
             g_id = str(g.get("id", "")).strip()
             g_vip = str(g.get("vip", "")).strip()
-            g_virtual_ip = str(g.get("virtualIp", "")).strip()
+            g_virtual_ip = str(g.get("virtualIP") or g.get("virtualIp") or "").strip()
             g_ip = str(g.get("ipAddress", "")).strip()
             g_configured_vip = str(g.get("configuredVip", "")).strip()
             g_fqdn = str(g.get("fqdn", "")).strip()
@@ -605,14 +647,14 @@ class VCF91OpenTelegrafIntegration(VCFOpsIntegration):
             known_targets = set()
             has_ip_info = False
             for g in all_groups:
-                for k in ("name", "id", "vip", "virtualIp", "ipAddress", "configuredVip", "fqdn", "hostName"):
+                for k in ("name", "id", "vip", "virtualIP", "virtualIp", "ipAddress", "configuredVip", "fqdn", "hostName"):
                     val = str(g.get(k, "")).strip().lower()
                     if val:
                         clean_v = val.split(":")[0]
                         known_targets.add(clean_v)
-                        if "." in clean_v:
+                        if "." in clean_v and not self._looks_like_ip(clean_v):
                             known_targets.add(clean_v.split(".")[0])
-                if any(g.get(k) for k in ("vip", "virtualIp", "ipAddress", "configuredVip")):
+                if any(g.get(k) for k in ("vip", "virtualIP", "virtualIp", "ipAddress", "configuredVip")):
                     has_ip_info = True
             for c in all_collectors:
                 for k in ("ipAddress", "name", "hostName"):
@@ -620,13 +662,16 @@ class VCF91OpenTelegrafIntegration(VCFOpsIntegration):
                     if val:
                         clean_v = val.split(":")[0]
                         known_targets.add(clean_v)
-                        if "." in clean_v:
+                        if "." in clean_v and not self._looks_like_ip(clean_v):
                             known_targets.add(clean_v.split(".")[0])
                 if c.get("ipAddress"):
                     has_ip_info = True
 
             target_clean = collector_addr.strip().lower().split(":")[0]
-            target_short = target_clean.split(".")[0] if "." in target_clean else target_clean
+            # Short names only apply to FQDNs; shortening an IP would match on its first octet
+            target_short = (
+                target_clean.split(".")[0] if "." in target_clean and not self._looks_like_ip(target_clean) else target_clean
+            )
 
             is_target_ip = False
             try:
@@ -812,99 +857,231 @@ class VCF91OpenTelegrafIntegration(VCFOpsIntegration):
         except Exception:
             return "UNKNOWN"
 
-    def list_virtual_machines(self, strict: bool = False) -> List[VirtualMachineResource]:
-        """Discover virtual machines from VCF Operations inventory.
+    def _api_headers(self) -> Dict[str, str]:
+        return {
+            "Accept": "application/json",
+            "Authorization": f"vRealizeOpsToken {self.env.token}",
+        }
 
-        With strict=True an API or authentication failure raises instead of returning a
-        partial list, so callers can tell "not in inventory" from "could not ask".
-        """
+    def _ensure_token(self) -> None:
         if not self.env.token and self.env.username and self.env.password:
             try:
                 self.acquire_token(self.env.username, self.env.password)
             except Exception:
                 pass
+
+    def _fetch_paged_resources(self, strict: bool, **query: Any) -> List[Dict[str, Any]]:
+        """Page through GET /resources. With strict=True a failure raises instead of truncating."""
+        self._ensure_token()
         if not self.env.token:
             if strict:
                 raise RuntimeError("Cannot query VCF Operations inventory: no API token (check credentials)")
             return []
 
-        headers = {
-            "Accept": "application/json",
-            "Authorization": f"vRealizeOpsToken {self.env.token}",
-        }
         url = f"{self.base_url}/suite-api/api/resources"
-        vms: List[VirtualMachineResource] = []
+        resources: List[Dict[str, Any]] = []
         page = 0
         page_size = 1000
-
         while True:
-            params = {
-                "adapterKind": "VMWARE",
-                "resourceKind": "VirtualMachine",
-                "page": page,
-                "pageSize": page_size,
-            }
+            params = dict(query, page=page, pageSize=page_size)
             try:
-                resp = self.session.get(url, headers=headers, params=params, timeout=20)
-                if resp.status_code != 200:
-                    logger.warning("Suite API resource query failed on page %d with status %d", page, resp.status_code)
-                    if strict:
-                        raise RuntimeError(
-                            f"VCF Operations inventory query failed on page {page} with HTTP {resp.status_code}"
-                        )
-                    break
-
-                data = resp.json()
-                res_list = data.get("resourceList", [])
-                if not res_list:
-                    break
-
-                for res in res_list:
-                    res_id = res.get("identifier") or ""
-                    res_key = res.get("resourceKey", {})
-                    name = res_key.get("name") or "Unknown VM"
-                    _, vm_name, vcid, vm_mor = self._extract_vm_identifiers(res)
-
-                    ip_addr = None
-                    os_name = None
-                    for prop in res.get("resourceProperties", []):
-                        pname = prop.get("name")
-                        pval = prop.get("value")
-                        if pname in ("summary|guest|ipAddress", "guest|ipAddress"):
-                            ip_addr = pval
-                        elif pname in ("summary|guest|operatingSystem", "guest|operatingSystem"):
-                            os_name = pval
-
-                    os_fam = "WINDOWS" if os_name and "windows" in os_name.lower() else "LINUX"
-
-                    vms.append(
-                        VirtualMachineResource(
-                            resource_id=res_id,
-                            name=vm_name or name,
-                            ip_address=ip_addr,
-                            vm_mor=vm_mor,
-                            vc_id=vcid,
-                            os_name=os_name,
-                            os_family=os_fam,
-                            collector_group=self.env.collector.name or "Default Collector Group",
-                            telegraf_status="MISSING",
-                        )
-                    )
-
-                page_info = data.get("pageInfo", {})
-                total_count = page_info.get("totalCount")
-                if total_count is not None and len(vms) >= total_count:
-                    break
-                if len(res_list) < page_size:
-                    break
-                page += 1
+                resp = self.session.get(url, headers=self._api_headers(), params=params, timeout=30)
             except Exception as exc:
                 if strict:
-                    if isinstance(exc, RuntimeError) and "inventory query failed" in str(exc):
-                        raise
                     raise RuntimeError(f"VCF Operations inventory query failed on page {page}: {exc}") from exc
-                logger.warning("Failed to list virtual machines on page %d from VCF Operations: %s", page, exc)
+                logger.warning("Failed to list resources on page %d from VCF Operations: %s", page, exc)
                 break
+            if resp.status_code != 200:
+                if strict:
+                    raise RuntimeError(f"VCF Operations inventory query failed on page {page} with HTTP {resp.status_code}")
+                logger.warning("Suite API resource query failed on page %d with status %d", page, resp.status_code)
+                break
+            data = resp.json()
+            res_list = data.get("resourceList", [])
+            resources.extend(res_list)
+            total_count = (data.get("pageInfo") or {}).get("totalCount")
+            if not res_list or len(res_list) < page_size:
+                break
+            if total_count is not None and len(resources) >= total_count:
+                break
+            page += 1
+        return resources
 
+    @staticmethod
+    def _is_stale(resource: Dict[str, Any]) -> bool:
+        """True when every adapter reports the object as no longer existing (deleted in vCenter)."""
+        states = [s.get("resourceState") for s in resource.get("resourceStatusStates") or []]
+        return bool(states) and all(st == "NOT_EXISTING" for st in states)
+
+    def _fetch_properties(self, resource_ids: List[str]) -> Dict[str, Dict[str, str]]:
+        """Bulk-read properties for many resources; returns {resource_id: {property: value}}."""
+        url = f"{self.base_url}/suite-api/api/resources/properties"
+        result: Dict[str, Dict[str, str]] = {}
+        chunk = 100  # keeps the repeated resourceId query string well under URL length limits
+        for i in range(0, len(resource_ids), chunk):
+            ids = resource_ids[i:i + chunk]
+            resp = self.session.get(
+                url, headers=self._api_headers(), params=[("resourceId", rid) for rid in ids], timeout=60
+            )
+            if resp.status_code != 200:
+                raise RuntimeError(f"VCF Operations property query failed with HTTP {resp.status_code}")
+            for entry in resp.json().get("resourcePropertiesList", []):
+                result[entry.get("resourceId")] = {
+                    p.get("name"): p.get("value") for p in entry.get("property", []) or []
+                }
+        return result
+
+    def _collector_maps(self) -> Tuple[Dict[str, Dict[str, Any]], Dict[str, str], List[Dict[str, Any]]]:
+        """Return ({collector_id: collector}, {collector_id: group_name}, groups); raises on query failure."""
+        collectors = {str(c.get("id")): c for c in self.get_collectors(strict=True)}
+        groups = self.get_collector_groups(strict=True)
+        group_of: Dict[str, str] = {}
+        for g in groups:
+            for cid in g.get("collectorId") or []:
+                group_of[str(cid)] = g.get("name")
+        return collectors, group_of, groups
+
+    @staticmethod
+    def _looks_like_ip(value: str) -> bool:
+        try:
+            ipaddress.ip_address(value)
+            return True
+        except ValueError:
+            return False
+
+    @staticmethod
+    def _group_vip(group: Dict[str, Any]) -> Optional[str]:
+        for key in ("virtualIP", "virtualIp", "vip", "configuredVip"):
+            if group.get(key):
+                return str(group[key]).strip()
+        return None
+
+    def _fetch_agent_registrations(self) -> Dict[Tuple[str, str], List[Dict[str, Any]]]:
+        """Map (vcid, vm_mor) to the agent OS objects (application monitoring adapter) bound to that VM."""
+        resources = self._fetch_paged_resources(strict=True, adapterKind="APPOSUCP")
+        resp = self.session.get(
+            f"{self.base_url}/suite-api/api/adapters",
+            headers=self._api_headers(),
+            params={"adapterKindKey": "APPOSUCP"},
+            timeout=30,
+        )
+        if resp.status_code != 200:
+            raise RuntimeError(f"VCF Operations adapter instance query failed with HTTP {resp.status_code}")
+        instance_collector: Dict[str, str] = {
+            inst.get("id"): str(inst.get("collectorId")) for inst in resp.json().get("adapterInstancesInfoDto", [])
+        }
+        collectors, group_of, _ = self._collector_maps()
+
+        registrations: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
+        for res in resources:
+            res_key = res.get("resourceKey", {})
+            if res_key.get("resourceKindKey") not in ("linux", "win") or self._is_stale(res):
+                continue
+            ids = {i.get("identifierType", {}).get("name"): i.get("value") for i in res_key.get("resourceIdentifiers", [])}
+            key = (ids.get("VCID"), ids.get("VMMOR"))
+            if not key[0] or not key[1]:
+                continue
+            states = res.get("resourceStatusStates") or [{}]
+            # Prefer the state reported by the application monitoring adapter instance itself
+            status = next((st for st in states if st.get("adapterInstanceId") in instance_collector), states[0])
+            collector_id = instance_collector.get(status.get("adapterInstanceId"))
+            collector = collectors.get(collector_id or "", {})
+            registrations.setdefault(key, []).append({
+                "receiving": status.get("resourceStatus") == "DATA_RECEIVING",
+                "collector_address": collector.get("hostName"),
+                "collector_group": group_of.get(collector_id or ""),
+            })
+        return registrations
+
+    def list_virtual_machines(self, strict: bool = False) -> List[VirtualMachineResource]:
+        """Discover candidate virtual machines from VCF Operations inventory.
+
+        Templates and objects for VMs already deleted from vCenter are excluded. Guest IP,
+        hostname, OS, and power state come from VM properties; agent status comes from the
+        agent OS objects that carry the VM's vCenter ID and MOR.
+        """
+        raw = [
+            r for r in self._fetch_paged_resources(strict, adapterKind="VMWARE", resourceKind="VirtualMachine")
+            if not self._is_stale(r)
+        ]
+        if not raw:
+            return []
+        props = self._fetch_properties([r.get("identifier") for r in raw if r.get("identifier")])
+        self.inventory_warning = None
+        registrations: Optional[Dict[Tuple[str, str], List[Dict[str, Any]]]]
+        try:
+            registrations = self._fetch_agent_registrations()
+        except Exception as exc:
+            # Agent status is supplementary; keep the VM list and say plainly what is missing
+            logger.warning("Agent status lookup failed: %s", exc)
+            self.inventory_warning = f"Agent status unavailable: {exc}"
+            registrations = None
+
+        vms: List[VirtualMachineResource] = []
+        for res in raw:
+            pr = props.get(res.get("identifier"), {})
+            if str(pr.get("summary|config|isTemplate", "")).lower() == "true":
+                continue
+            _, vm_name, vcid, vm_mor = self._extract_vm_identifiers(res)
+            ip_addr = (pr.get("summary|guest|ipAddress") or "").strip()
+            if ip_addr.lower() in ("", "none", "unknown"):
+                ip_addr = None
+            hostname = (pr.get("summary|guest|hostName") or "").strip() or None
+            os_name = pr.get("config|guestFullName") or pr.get("summary|guest|fullName")
+            regs = registrations.get((vcid, vm_mor), []) if registrations is not None else []
+            if registrations is None:
+                status = "Unknown"
+            elif not regs:
+                status = "Not installed"
+            else:
+                status = "Reporting" if any(r["receiving"] for r in regs) else "No data"
+            primary = next((r for r in regs if r["receiving"]), regs[0] if regs else {})
+            vms.append(
+                VirtualMachineResource(
+                    resource_id=res.get("identifier") or "",
+                    name=vm_name or res.get("resourceKey", {}).get("name") or "Unknown VM",
+                    ip_address=ip_addr,
+                    hostname=hostname,
+                    vm_mor=vm_mor,
+                    vc_id=vcid,
+                    os_name=os_name,
+                    os_family="WINDOWS" if os_name and "windows" in os_name.lower() else "LINUX",
+                    power_state=pr.get("summary|runtime|powerState"),
+                    collector_group=primary.get("collector_group"),
+                    collector_address=primary.get("collector_address"),
+                    telegraf_status=status,
+                    agent_registrations=len(regs),
+                )
+            )
         return vms
 
+    def list_collector_targets(self) -> List[CollectorInfo]:
+        """List where an agent can send telemetry: each collector group containing cloud proxies
+        (via its virtual IP when it has one) and each cloud proxy individually."""
+        self._ensure_token()
+        collectors, group_of, groups = self._collector_maps()
+        proxies = {}
+        for cid, c in collectors.items():
+            if c.get("type") != "UNIFIED_CLOUD_PROXY":
+                continue
+            if not c.get("hostName"):
+                logger.warning("Skipping cloud proxy %s (%s): no address reported", cid, c.get("name"))
+                continue
+            proxies[cid] = c
+        targets: List[CollectorInfo] = []
+        for g in groups:
+            member_proxies = [proxies[str(cid)] for cid in g.get("collectorId") or [] if str(cid) in proxies]
+            if not member_proxies:
+                continue
+            vip = self._group_vip(g)
+            if vip:
+                targets.append(CollectorInfo(address=vip, name=g.get("name"), is_collector_group=True))
+            for p in member_proxies:
+                targets.append(
+                    CollectorInfo(address=p.get("hostName"), name=g.get("name"), display_name=p.get("name"))
+                )
+        grouped = {str(cid) for cid in group_of}
+        for cid, p in proxies.items():
+            if cid not in grouped:
+                targets.append(CollectorInfo(address=p.get("hostName"), display_name=p.get("name")))
+        return targets

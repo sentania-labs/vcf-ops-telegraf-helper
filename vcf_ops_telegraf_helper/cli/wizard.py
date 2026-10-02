@@ -17,7 +17,6 @@ from vcf_ops_telegraf_helper.cli.display import (
 )
 from vcf_ops_telegraf_helper.executors.local import LocalExecutor
 from vcf_ops_telegraf_helper.executors.mock import MockExecutor
-from vcf_ops_telegraf_helper.executors.package import PackageExecutor
 from vcf_ops_telegraf_helper.executors.ssh import SSHExecutor
 from vcf_ops_telegraf_helper.executors.winrm import WinRMExecutor
 from vcf_ops_telegraf_helper.models.endpoint import (
@@ -37,7 +36,7 @@ from vcf_ops_telegraf_helper.models.monitoring import (
     WinServicesInputConfig,
 )
 from vcf_ops_telegraf_helper.models.vcf import CollectorInfo, VCFEnvironment
-from vcf_ops_telegraf_helper.models.workflow import DeploymentMode, WorkflowOptions
+from vcf_ops_telegraf_helper.models.workflow import WorkflowOptions
 from vcf_ops_telegraf_helper.renderer.renderer import TelegrafRenderer
 from vcf_ops_telegraf_helper.storage.state import StateStore
 from vcf_ops_telegraf_helper.workflow.engine import ConfigureEndpointWorkflow
@@ -93,7 +92,7 @@ def run_wizard(console: Optional[Console] = None) -> None:
     target_host = Prompt.ask("Target Hostname or IP", default="localhost", console=con)
     conn_choice = Prompt.ask(
         "Connection method",
-        choices=["ssh", "winrm", "mock", "local", "package"],
+        choices=["ssh", "winrm", "mock", "local"],
         default="mock" if target_host == "localhost" else "ssh",
         console=con,
     )
@@ -156,8 +155,6 @@ def run_wizard(console: Optional[Console] = None) -> None:
         executor = MockExecutor(connected=True, telegraf_installed=True)
     elif conn_method == ConnectionMethod.LOCAL:
         executor = LocalExecutor()
-    elif conn_method == ConnectionMethod.PACKAGE:
-        executor = PackageExecutor(output_dir=f"./vcf-bundle-{target_host}")
     elif conn_method == ConnectionMethod.WINRM:
         executor = WinRMExecutor(
             hostname=target_host,
@@ -271,7 +268,6 @@ def run_wizard(console: Optional[Console] = None) -> None:
     con.print("\n[bold blue]Step 5: Guided Execution[/bold blue]")
     reporter = RichTerminalProgressReporter(con)
     options = WorkflowOptions(
-        mode=DeploymentMode.PUSH if conn_method != ConnectionMethod.PACKAGE else DeploymentMode.SCRIPT,
         restart_service=True,
         install_telegraf=auto_install,
         telegraf_version=telegraf_ver,
