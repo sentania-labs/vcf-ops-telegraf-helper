@@ -8,6 +8,7 @@ from typing import Optional, Union
 
 from vcf_ops_telegraf_helper.executors.base import CommandResult, EndpointExecutor
 from vcf_ops_telegraf_helper.logger import get_logger
+from vcf_ops_telegraf_helper.security.redaction import redact_secrets
 from vcf_ops_telegraf_helper.models.discovery import (
     DiscoveredDatabase,
     DiscoveredPerfmonSet,
@@ -73,6 +74,8 @@ class WinRMExecutor(EndpointExecutor):
             return True
         # The GUI shows a short message; the underlying WinRM error goes to the log (never the password)
         detail = (res.stderr or "").strip() or f"exit code {res.exit_code} with no output"
+        # Errors can echo input back; never let the password reach the persistent log
+        detail = redact_secrets(detail, [self.password] if self.password else None)
         logger.warning(
             "WinRM connection test failed for %s://%s:%d/wsman as user %r (transport %s): %s",
             "https" if self.use_ssl else "http",

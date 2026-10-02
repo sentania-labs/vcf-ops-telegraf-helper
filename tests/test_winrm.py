@@ -182,3 +182,17 @@ def test_winrm_execute_failure_keeps_exception_class():
     assert res.exit_code == 1
     assert res.stderr == "TimeoutError: timed out"
 
+
+def test_winrm_test_connection_redacts_password_echoed_in_error(caplog):
+    """If an error message ever quotes the password, the log line masks it."""
+    import logging
+
+    executor = WinRMExecutor(hostname="win-host.local", username="admin", password="S3cret-pw")
+    mock_session = MagicMock()
+    mock_session.run_ps.side_effect = RuntimeError("login failed for admin with S3cret-pw")
+    with patch.object(executor, "_get_session", return_value=mock_session):
+        with caplog.at_level(logging.WARNING, logger="vcf_ops_telegraf_helper"):
+            assert executor.test_connection() is False
+    assert "login failed for admin" in caplog.text
+    assert "S3cret-pw" not in caplog.text
+

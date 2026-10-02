@@ -270,3 +270,16 @@ def test_ssh_test_connection_logs_non_linux_target(caplog):
             assert executor.test_connection() is False
     assert "reported 'FreeBSD' instead of Linux" in caplog.text
 
+
+def test_ssh_test_connection_redacts_password_and_lists_auth_sources(caplog):
+    """The log masks an echoed password and names every auth source paramiko was given."""
+    import logging
+
+    executor = SSHExecutor(hostname="linux01.corp.local", username="root", password="S3cret-pw", key_filename="/tmp/id_test")
+    with patch.object(executor, "_ensure_connected", side_effect=OSError("bad passphrase S3cret-pw for key")):
+        with caplog.at_level(logging.WARNING, logger="vcf_ops_telegraf_helper"):
+            assert executor.test_connection() is False
+    logged = caplog.text
+    assert "S3cret-pw" not in logged
+    assert "key file /tmp/id_test, password (also used as key passphrase), SSH agent, default keys" in logged
+

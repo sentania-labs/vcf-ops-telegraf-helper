@@ -10,6 +10,7 @@ import paramiko
 
 from vcf_ops_telegraf_helper.executors.base import CommandResult, EndpointExecutor
 from vcf_ops_telegraf_helper.logger import get_logger
+from vcf_ops_telegraf_helper.security.redaction import redact_secrets
 from vcf_ops_telegraf_helper.models.discovery import (
     DiscoveredDatabase,
     DiscoveredService,
@@ -79,13 +80,19 @@ class SSHExecutor(EndpointExecutor):
             detail = f"connected, but 'uname -s' reported {res.stdout.strip()!r} instead of Linux"
         else:
             detail = (res.stderr or "").strip() or f"exit code {res.exit_code} with no output"
+        # Errors can echo input back; never let the password (also the key passphrase) reach the log
+        detail = redact_secrets(detail, [self.password] if self.password else None)
+        # paramiko offers every one of these that is available, so name them all
+        sources = [f"key file {self.key_filename}"] if self.key_filename else []
+        if self.password:
+            sources.append("password" if not self.key_filename else "password (also used as key passphrase)")
+        sources.extend(["SSH agent", "default keys"])
         logger.warning(
             "SSH connection test failed for %s:%d as user %r (%s): %s",
             self.hostname,
             self.port,
             self.username,
-            # paramiko also tries the SSH agent and ~/.ssh default keys, so name what was offered
-            f"key file {self.key_filename}" if self.key_filename else "password, SSH agent, and default keys",
+            ", ".join(sources),
             detail[:2000],
         )
         return False
