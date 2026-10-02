@@ -930,3 +930,20 @@ def test_main_window_nav_labels_show_ampersand(qapp, tmp_path):
     assert window._next_buttons[window.STEP_MONITORING].text() == "Next: Review && Preview ->"
     assert window._next_buttons[window.STEP_REVIEW].text() == "Next: Execute && Verify ->"
 
+
+def test_gui_ampersand_texts_escaped(qapp, tmp_path):
+    """Buttons and checkboxes that contain '&' escape it so Qt shows it instead of a shortcut underline."""
+    from PySide6.QtWidgets import QAbstractButton, QDialogButtonBox
+
+    from vcf_ops_telegraf_helper.gui.discovery_dialogs import DatabaseConnectDialog
+
+    window = MainWindow(state_store=StateStore(state_file=tmp_path / "state.json"))
+    dlg = DatabaseConnectDialog(None, "Microsoft SQL Server", default_port=1433)
+    buttons = window.findChildren(QAbstractButton) + dlg.findChildren(QAbstractButton)
+    texts = [b.text() for b in buttons if "&" in b.text()]
+    assert texts, "expected some buttons with ampersands"
+    for text in texts:
+        assert "&" not in text.replace("&&", ""), f"unescaped ampersand in {text!r}"
+    assert window.sys_check.text() == "Enable System Load && Uptime"
+    assert dlg.findChild(QDialogButtonBox).button(QDialogButtonBox.Ok).text() == "Connect && Discover"
+

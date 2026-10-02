@@ -531,7 +531,7 @@ class DatabaseConnectDialog(QDialog):
         layout.addStretch()
 
         btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        btns.button(QDialogButtonBox.Ok).setText("Connect & Discover")
+        btns.button(QDialogButtonBox.Ok).setText("Connect && Discover")
         btns.button(QDialogButtonBox.Ok).setProperty("class", "primary")
         btns.accepted.connect(self._on_submit)
         btns.rejected.connect(self.reject)

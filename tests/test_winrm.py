@@ -168,5 +168,17 @@ def test_winrm_test_connection_logs_real_error_without_password(caplog):
     assert "RuntimeError" in logged
     assert "http://automic.corp.local:5985/wsman" in logged
     assert "user 'INT\\\\sadmin'" in logged  # repr() doubles the backslash
+    # Guards against the log format ever including the executor's password field
     assert "S3cret-pw" not in logged
+
+
+def test_winrm_execute_failure_keeps_exception_class():
+    """A failed WinRM call reports the exception class in stderr so the cause is identifiable."""
+    executor = WinRMExecutor(hostname="win-host.local", username="admin", password="secret")
+    mock_session = MagicMock()
+    mock_session.run_ps.side_effect = TimeoutError("timed out")
+    with patch.object(executor, "_get_session", return_value=mock_session):
+        res = executor.execute("hostname")
+    assert res.exit_code == 1
+    assert res.stderr == "TimeoutError: timed out"
 

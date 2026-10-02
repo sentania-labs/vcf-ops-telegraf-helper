@@ -84,7 +84,8 @@ class SSHExecutor(EndpointExecutor):
             self.hostname,
             self.port,
             self.username,
-            "key file" if self.key_filename else "password",
+            # paramiko also tries the SSH agent and ~/.ssh default keys, so name what was offered
+            f"key file {self.key_filename}" if self.key_filename else "password, SSH agent, and default keys",
             detail[:2000],
         )
         return False

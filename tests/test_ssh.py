@@ -254,5 +254,19 @@ def test_ssh_test_connection_logs_real_error_without_password(caplog):
     logged = caplog.text
     assert "Authentication failed." in logged
     assert "linux01.corp.local:22" in logged
+    # Guards against the log format ever including the executor's password field
     assert "S3cret-pw" not in logged
+
+
+def test_ssh_test_connection_logs_non_linux_target(caplog):
+    """Reaching a host that is not Linux is logged with what it reported."""
+    import logging
+
+    executor = SSHExecutor(hostname="bsd01.corp.local", username="root", password="pw")
+    with patch.object(executor, "_ensure_connected"), patch.object(
+        executor, "execute", return_value=CommandResult(exit_code=0, stdout="FreeBSD\n", command="uname -s")
+    ):
+        with caplog.at_level(logging.WARNING, logger="vcf_ops_telegraf_helper"):
+            assert executor.test_connection() is False
+    assert "reported 'FreeBSD' instead of Linux" in caplog.text
 
