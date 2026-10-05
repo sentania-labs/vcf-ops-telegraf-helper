@@ -115,6 +115,8 @@ def test_detect_windows_telegraf_running_process():
     det = detect_windows_telegraf(mock_exec)
     assert det.installed is True
     assert det.binary_path == r"D:\Agents\telegraf.exe"
+    assert det.service_name is None
+    assert det.service_state == "Standalone"
     assert det.running is True
     assert det.version == "Telegraf 1.29.1"
 
@@ -432,4 +434,51 @@ def test_windows_paths_with_apostrophe_escaped_in_workflow():
         in c
         for c in executed_commands
     )
+
+
+def test_standalone_process_registers_service_on_restart():
+    """When a standalone process exists without a Windows service, register and start the service."""
+    mock_exec = MagicMock()
+    executed_commands = []
+
+    def _exec(cmd, **kw):
+        executed_commands.append(cmd)
+        if "version" in cmd:
+            return CommandResult(exit_code=0, stdout="Telegraf 1.30.0\n", command=cmd)
+        if "--service install" in cmd:
+            return CommandResult(exit_code=0, stdout="Service telegraf installed", command=cmd)
+        if "Restart-Service" in cmd:
+            return CommandResult(exit_code=0, stdout="Restarted", command=cmd)
+        return CommandResult(exit_code=0, stdout="", command=cmd)
+
+    mock_exec.execute.side_effect = _exec
+
+    env = VCFEnvironment(name="test", url="https://vcf.local", username="admin", collector=CollectorInfo(address="10.10.10.50"))
+    target = EndpointTarget(
+        hostname="win-app02.local",
+        os_family=OSFamily.WINDOWS,
+        connection_method=ConnectionMethod.WINRM,
+    )
+    wf = ConfigureEndpointWorkflow(
+        environment=env,
+        target=target,
+        monitoring=MonitoringConfig(),
+        executor=mock_exec,
+        adapter=MagicMock(),
+        options=WorkflowOptions(mode=DeploymentMode.PUSH),
+    )
+    wf.discovery = EndpointDiscoveryResult(
+        hostname="win-app02",
+        telegraf_installed=True,
+        telegraf_bin_path=r"C:\telegraf\telegraf.exe",
+        main_config_path=r"C:\telegraf\telegraf.conf",
+        config_dir=r"C:\telegraf\telegraf.d",
+        service_name=None,  # No service registered
+    )
+    restart_res = wf.restart_if_needed()
+    assert restart_res.status == StageStatus.PASS
+    assert wf.discovery.service_name == "telegraf"
+    assert any("--service install" in c for c in executed_commands)
+    assert any("Restart-Service telegraf -Force" in c for c in executed_commands)
+
 

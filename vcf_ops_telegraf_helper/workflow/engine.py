@@ -35,6 +35,9 @@ from vcf_ops_telegraf_helper.security.redaction import redact_secrets
 from vcf_ops_telegraf_helper.validation.validator import Validator
 from vcf_ops_telegraf_helper.workflow.progress import ProgressReporter, SilentProgressReporter
 from vcf_ops_telegraf_helper.workflow.windows import detect_windows_telegraf
+from vcf_ops_telegraf_helper.logger import get_logger
+
+logger = get_logger("workflow.engine")
 
 
 class ConfigureEndpointWorkflow:
@@ -242,7 +245,7 @@ class ConfigureEndpointWorkflow:
                     config_dir="C:\\telegraf\\telegraf.d",
                     main_config_path="C:\\telegraf\\telegraf.conf",
                     telegraf_bin_path=telegraf_bin,
-                    service_name=win_det.service_name or "telegraf",
+                    service_name=win_det.service_name,
                     host_uuid=host_uuid,
                     host_ip=host_ip,
                 )
@@ -1158,8 +1161,21 @@ class ConfigureEndpointWorkflow:
                 svc_name = (
                     self.discovery.service_name
                     if self.discovery and self.discovery.service_name
-                    else "telegraf"
+                    else None
                 )
+                if not svc_name:
+                    # Register service if not yet installed in Windows SCM
+                    safe_bin = telegraf_bin.replace("'", "''")
+                    safe_cfg = main_cfg.replace("'", "''")
+                    safe_dir = config_dir.replace("'", "''")
+                    self.executor.execute("Stop-Process -Name telegraf -Force -ErrorAction SilentlyContinue", timeout=10)
+                    reg_cmd = f"& '{safe_bin}' --service install --config '{safe_cfg}' --config-directory '{safe_dir}'"
+                    reg_res = self.executor.execute(reg_cmd, timeout=15)
+                    logger.info("Registered Telegraf Windows service: exit_code=%s", reg_res.exit_code)
+                    svc_name = "telegraf"
+                    if self.discovery:
+                        self.discovery.service_name = "telegraf"
+
                 safe_svc = svc_name.replace("'", "''")
                 restart_cmd = (
                     "Restart-Service telegraf -Force"
@@ -1167,6 +1183,16 @@ class ConfigureEndpointWorkflow:
                     else f"Restart-Service '{safe_svc}' -Force"
                 )
                 restart_res = self.executor.execute(restart_cmd, timeout=15)
+                if not restart_res.success:
+                    start_cmd = (
+                        "Start-Service telegraf"
+                        if svc_name == "telegraf"
+                        else f"Start-Service '{safe_svc}'"
+                    )
+                    start_res = self.executor.execute(start_cmd, timeout=15)
+                    if start_res.success:
+                        restart_res = start_res
+                        restart_cmd = start_cmd
             else:
                 restart_cmd = "systemctl restart telegraf"
                 restart_res = self.executor.execute(restart_cmd, timeout=15)

@@ -100,7 +100,7 @@ def detect_windows_telegraf(executor: EndpointExecutor) -> WindowsTelegrafDetect
 
     def _query_service_status(svc_name: str) -> tuple[Optional[str], bool]:
         if "\n" in svc_name or "\r" in svc_name:
-            return "Stopped", False
+            return None, False
         safe_name_ps = svc_name.replace("'", "''")
         res = executor.execute(f"(Get-Service '{safe_name_ps}' -ErrorAction SilentlyContinue).Status", timeout=5)
         if _is_valid_stdout(res):
@@ -111,7 +111,7 @@ def detect_windows_telegraf(executor: EndpointExecutor) -> WindowsTelegrafDetect
         if _is_valid_stdout(sc_res):
             running = "RUNNING" in sc_res.stdout.upper()
             return "Running" if running else "Stopped", running
-        return "Stopped", False
+        return None, False
 
     def _check_file_exists(path: str) -> bool:
         try:
@@ -166,13 +166,14 @@ def detect_windows_telegraf(executor: EndpointExecutor) -> WindowsTelegrafDetect
         if b_path:
             ver = _query_version(b_path)
             s_state, is_running = _query_service_status("telegraf")
-            logger.info("Found Windows Telegraf via running process: %s", b_path)
+            svc_name = "telegraf" if s_state else None
+            logger.info("Found Windows Telegraf via running process: %s (service: %s)", b_path, svc_name)
             return WindowsTelegrafDetection(
                 installed=True,
                 binary_path=b_path,
-                service_name="telegraf",
+                service_name=svc_name,
                 version=ver,
-                service_state="Running",
+                service_state=s_state or "Standalone",
                 running=True,
             )
 
@@ -184,13 +185,14 @@ def detect_windows_telegraf(executor: EndpointExecutor) -> WindowsTelegrafDetect
         if b_path:
             ver = _query_version(b_path)
             s_state, is_running = _query_service_status("telegraf")
-            logger.info("Found Windows Telegraf in PATH: %s", b_path)
+            svc_name = "telegraf" if s_state else None
+            logger.info("Found Windows Telegraf in PATH: %s (service: %s)", b_path, svc_name)
             return WindowsTelegrafDetection(
                 installed=True,
                 binary_path=b_path,
-                service_name="telegraf",
+                service_name=svc_name,
                 version=ver,
-                service_state=s_state or "Stopped",
+                service_state=s_state or ("Running" if is_running else "Stopped"),
                 running=is_running,
             )
 
@@ -226,13 +228,14 @@ def detect_windows_telegraf(executor: EndpointExecutor) -> WindowsTelegrafDetect
         if _check_file_exists(p):
             ver = _query_version(p)
             s_state, is_running = _query_service_status("telegraf")
-            logger.info("Found Windows Telegraf at known folder: %s", p)
+            svc_name = "telegraf" if s_state else None
+            logger.info("Found Windows Telegraf at known folder: %s (service: %s)", p, svc_name)
             return WindowsTelegrafDetection(
                 installed=True,
                 binary_path=p,
-                service_name="telegraf",
+                service_name=svc_name,
                 version=ver,
-                service_state=s_state or "Stopped",
+                service_state=s_state or ("Running" if is_running else "Stopped"),
                 running=is_running,
             )
 
