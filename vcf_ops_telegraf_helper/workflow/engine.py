@@ -242,6 +242,7 @@ class ConfigureEndpointWorkflow:
                     config_dir="C:\\telegraf\\telegraf.d",
                     main_config_path="C:\\telegraf\\telegraf.conf",
                     telegraf_bin_path=telegraf_bin,
+                    service_name=win_det.service_name or "telegraf",
                     host_uuid=host_uuid,
                     host_ip=host_ip,
                 )
@@ -1140,7 +1141,17 @@ class ConfigureEndpointWorkflow:
 
             # Restart service
             if is_win:
-                restart_cmd = "Restart-Service telegraf -Force"
+                svc_name = (
+                    self.discovery.service_name
+                    if self.discovery and self.discovery.service_name
+                    else "telegraf"
+                )
+                safe_svc = svc_name.replace("'", "''")
+                restart_cmd = (
+                    "Restart-Service telegraf -Force"
+                    if svc_name == "telegraf"
+                    else f"Restart-Service '{safe_svc}' -Force"
+                )
                 restart_res = self.executor.execute(restart_cmd, timeout=15)
             else:
                 restart_cmd = "systemctl restart telegraf"
@@ -1159,7 +1170,7 @@ class ConfigureEndpointWorkflow:
                 self._rollback_configs(config_dir, is_win)
                 # Attempt to restart with restored backup
                 if is_win:
-                    self.executor.execute("Restart-Service telegraf -Force", timeout=15)
+                    self.executor.execute(restart_cmd, timeout=15)
                 else:
                     self.executor.execute("systemctl restart telegraf", timeout=15)
                 res = StageResult(
@@ -1205,7 +1216,14 @@ class ConfigureEndpointWorkflow:
 
             if not self.options.dry_run:
                 # 3. Service running check
-                svc_val = Validator.validate_service_state(self.executor, is_windows=is_win)
+                svc_name = (
+                    self.discovery.service_name
+                    if self.discovery and self.discovery.service_name
+                    else "telegraf"
+                )
+                svc_val = Validator.validate_service_state(
+                    self.executor, is_windows=is_win, service_name=svc_name
+                )
                 self.verifications["Service running"] = "PASS" if svc_val.is_valid else "FAIL"
 
                 # 4. Local metrics generated

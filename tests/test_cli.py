@@ -855,3 +855,27 @@ def test_cli_vcf_auth_source_option_reaches_environment(monkeypatch):
     assert res.exit_code == 0, res.output
     assert seen["sources"] == ["VCF SSO", "VCF SSO"]
 
+
+def test_cli_vcf_auth_source_envvar_reaches_environment(monkeypatch):
+    """VCF_AUTH_SOURCE environment variable is accepted by run and vms."""
+    from vcf_ops_telegraf_helper.cli import main as cli_main
+
+    seen = {}
+    real_env = cli_main.VCFEnvironment
+
+    def capture(**kwargs):
+        seen.setdefault("sources", []).append(kwargs.get("auth_source"))
+        return real_env(**kwargs)
+
+    monkeypatch.setattr(cli_main, "VCFEnvironment", capture)
+    monkeypatch.setenv("VCF_AUTH_SOURCE", "Corp AD")
+    runner = CliRunner()
+    res = runner.invoke(cli, ["vms", "--vcf-url", "https://vcf-ops.local", "--mock-vcf"])
+    assert res.exit_code == 0, res.output
+    res = runner.invoke(cli, [
+        "run", "--vcf-url", "https://vcf-ops.local", "--mock-vcf", "--collector", "10.10.10.50",
+        "--target-host", "10.10.10.101", "--connection", "mock", "--preview",
+    ])
+    assert res.exit_code == 0, res.output
+    assert seen["sources"] == ["Corp AD", "Corp AD"]
+

@@ -71,5 +71,6 @@ class EndpointDiscoveryResult(BaseModel):
     config_dir: str = Field(default="/etc/telegraf/telegraf.d")
     main_config_path: str = Field(default="/etc/telegraf/telegraf.conf")
     telegraf_bin_path: str = Field(default="/usr/bin/telegraf")
+    service_name: Optional[str] = Field(default="telegraf", description="Discovered Windows service name or systemd unit")
     host_uuid: str = Field(default="", description="Target DMI UUID or machine-id")
     host_ip: str = Field(default="", description="Primary IP address of target")

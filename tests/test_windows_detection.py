@@ -251,3 +251,123 @@ def test_gui_and_engine_consistent_on_custom_path(qapp, tmp_path):
     assert "Telegraf Installed: YES" in details
     assert r"Telegraf Binary: C:\Program Files\VMware\vcf-telegraf\telegraf.exe" in details
     assert "Service Name: vcf-telegraf" in details
+
+
+def test_detect_windows_telegraf_rejects_non_telegraf_service():
+    """Verify service mentioning telegraf in arguments is rejected if binary is not telegraf.exe."""
+    mock_exec = MagicMock()
+    mock_exec.file_exists.return_value = False
+
+    def _exec(cmd, **kw):
+        if "Win32_Service" in cmd:
+            return CommandResult(
+                exit_code=0,
+                stdout="watchdog|Running|C:\\Tools\\watchdog.exe --config C:\\telegraf\\telegraf.conf\n",
+                command=cmd,
+            )
+        return CommandResult(exit_code=0, stdout="", command=cmd)
+
+    mock_exec.execute.side_effect = _exec
+    det = detect_windows_telegraf(mock_exec)
+    assert det.installed is False
+
+
+def test_detect_windows_telegraf_escapes_quotes_in_version():
+    """Verify single quotes in binary path are properly doubled to prevent PowerShell injection."""
+    mock_exec = MagicMock()
+    mock_exec.file_exists.return_value = False
+
+    executed_commands = []
+
+    def _exec(cmd, **kw):
+        executed_commands.append(cmd)
+        if "Win32_Service" in cmd:
+            return CommandResult(
+                exit_code=0,
+                stdout="telegraf|Running|C:\\Scott's Tools\\telegraf.exe\n",
+                command=cmd,
+            )
+        if "version" in cmd:
+            return CommandResult(exit_code=0, stdout="Telegraf 1.30.0\n", command=cmd)
+        return CommandResult(exit_code=0, stdout="", command=cmd)
+
+    mock_exec.execute.side_effect = _exec
+    det = detect_windows_telegraf(mock_exec)
+    assert det.installed is True
+    version_cmds = [c for c in executed_commands if "version" in c]
+    assert any("& 'C:\\Scott''s Tools\\telegraf.exe' version" in c for c in version_cmds)
+
+
+def test_detect_windows_telegraf_sc_fallback_uses_double_quotes():
+    """Verify sc.exe query fallback quotes service name with double quotes."""
+    mock_exec = MagicMock()
+    mock_exec.file_exists.return_value = False
+
+    executed_commands = []
+
+    def _exec(cmd, **kw):
+        executed_commands.append(cmd)
+        if "Get-Process" in cmd:
+            return CommandResult(exit_code=0, stdout="C:\\telegraf\\telegraf.exe\n", command=cmd)
+        if "Get-Service" in cmd:
+            return CommandResult(exit_code=1, stdout="", stderr="Error", command=cmd)
+        if "sc.exe query" in cmd:
+            return CommandResult(exit_code=0, stdout="STATE : 4  RUNNING\n", command=cmd)
+        if "version" in cmd:
+            return CommandResult(exit_code=0, stdout="Telegraf 1.30.0\n", command=cmd)
+        return CommandResult(exit_code=0, stdout="", command=cmd)
+
+    mock_exec.execute.side_effect = _exec
+    det = detect_windows_telegraf(mock_exec)
+    assert det.installed is True
+    assert det.running is True
+    sc_cmds = [c for c in executed_commands if "sc.exe query" in c]
+    assert any('sc.exe query "telegraf"' in c for c in sc_cmds)
+
+
+def test_workflow_restart_uses_discovered_custom_service():
+    """Verify workflow restart uses discovered service_name instead of hardcoding 'telegraf'."""
+    env = VCFEnvironment(
+        name="test",
+        url="https://vcf.local",
+        username="admin",
+        collector=CollectorInfo(address="10.10.10.50"),
+    )
+    target = EndpointTarget(
+        hostname="win-custom.local",
+        os_family=OSFamily.WINDOWS,
+        connection_method=ConnectionMethod.WINRM,
+        install_telegraf=True,
+    )
+    mock_exec = MagicMock()
+    executed_commands = []
+
+    def _exec(cmd, **kw):
+        executed_commands.append(cmd)
+        if "Win32_Service" in cmd and "telegraf" in cmd:
+            return CommandResult(
+                exit_code=0,
+                stdout="vcf-telegraf|Running|C:\\Ops\\telegraf.exe\n",
+                command=cmd,
+            )
+        if "version" in cmd:
+            return CommandResult(exit_code=0, stdout="Telegraf 1.30.0\n", command=cmd)
+        if "Restart-Service" in cmd:
+            return CommandResult(exit_code=0, stdout="Restarted", command=cmd)
+        return CommandResult(exit_code=0, stdout="", command=cmd)
+
+    mock_exec.execute.side_effect = _exec
+    wf = ConfigureEndpointWorkflow(
+        environment=env,
+        target=target,
+        monitoring=MonitoringConfig(),
+        executor=mock_exec,
+        adapter=MagicMock(),
+        options=WorkflowOptions(mode=DeploymentMode.PUSH, install_telegraf=True),
+    )
+    wf.detect_telegraf()
+    assert wf.discovery.service_name == "vcf-telegraf"
+
+    restart_res = wf.restart_if_needed()
+    assert restart_res.status == StageStatus.PASS
+    assert any("Restart-Service 'vcf-telegraf' -Force" in c for c in executed_commands)

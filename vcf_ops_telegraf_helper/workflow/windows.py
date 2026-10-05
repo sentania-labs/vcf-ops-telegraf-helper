@@ -86,50 +86,77 @@ def detect_windows_telegraf(executor: EndpointExecutor) -> WindowsTelegrafDetect
     logger.debug("Starting Windows Telegraf detection")
 
     def _query_version(bin_path: str) -> Optional[str]:
-        v_res = executor.execute(f"& '{bin_path}' version", timeout=10)
+        if "\n" in bin_path or "\r" in bin_path or "\0" in bin_path:
+            return None
+        safe_path = bin_path.replace("'", "''")
+        v_res = executor.execute(f"& '{safe_path}' version", timeout=10)
         if _is_valid_stdout(v_res):
             return v_res.stdout.strip().splitlines()[0].strip()
-        v_res2 = executor.execute(f"\"{bin_path}\" version", timeout=10)
+        safe_quoted = bin_path.replace('"', '`"')
+        v_res2 = executor.execute(f'& "{safe_quoted}" version', timeout=10)
         if _is_valid_stdout(v_res2):
             return v_res2.stdout.strip().splitlines()[0].strip()
         return None
 
     def _query_service_status(svc_name: str) -> tuple[Optional[str], bool]:
-        safe_name = svc_name.replace("'", "''")
-        res = executor.execute(f"(Get-Service '{safe_name}' -ErrorAction SilentlyContinue).Status", timeout=5)
+        if "\n" in svc_name or "\r" in svc_name:
+            return "Stopped", False
+        safe_name_ps = svc_name.replace("'", "''")
+        res = executor.execute(f"(Get-Service '{safe_name_ps}' -ErrorAction SilentlyContinue).Status", timeout=5)
         if _is_valid_stdout(res):
             st = res.stdout.strip().splitlines()[-1].strip()
             return st, "running" in st.lower()
-        sc_res = executor.execute(f"sc.exe query '{safe_name}'", timeout=5)
+        safe_name_cmd = svc_name.replace('"', "")
+        sc_res = executor.execute(f'sc.exe query "{safe_name_cmd}"', timeout=5)
         if _is_valid_stdout(sc_res):
             running = "RUNNING" in sc_res.stdout.upper()
             return "Running" if running else "Stopped", running
         return "Stopped", False
 
+    def _check_file_exists(path: str) -> bool:
+        try:
+            fe_fn = getattr(executor, "file_exists", None)
+            if callable(fe_fn):
+                fe_res = fe_fn(path)
+                if fe_res is True:
+                    return True
+        except Exception:
+            pass
+        safe_p = path.replace("'", "''")
+        t_res = executor.execute(f"Test-Path -Path '{safe_p}'", timeout=5)
+        return _is_valid_stdout(t_res) and "True" in t_res.stdout
+
     # 1. Services whose binary path mentions telegraf
     svc_cmd = (
         "Get-CimInstance Win32_Service | Where-Object { $_.PathName -match 'telegraf' } "
-        "| Select-Object -First 1 | ForEach-Object { '{0}|{1}|{2}' -f $_.Name, $_.State, $_.PathName }"
+        "| Sort-Object -Property @{Expression={if ($_.State -eq 'Running') {0} else {1}}} "
+        "| ForEach-Object { '{0}|{1}|{2}' -f $_.Name, $_.State, $_.PathName }"
     )
     res = executor.execute(svc_cmd, timeout=10)
     if _is_valid_stdout(res):
-        line = res.stdout.strip().splitlines()[-1].strip()
-        parts = line.split("|", 2)
-        if len(parts) == 3:
-            s_name, s_state, raw_p = parts[0].strip(), parts[1].strip(), parts[2].strip()
-            b_path = _extract_binary_path(raw_p)
-            if b_path:
-                is_running = "running" in s_state.lower()
-                ver = _query_version(b_path)
-                logger.info("Found Windows Telegraf via Win32_Service: %s (path: %s)", s_name, b_path)
-                return WindowsTelegrafDetection(
-                    installed=True,
-                    binary_path=b_path,
-                    service_name=s_name,
-                    version=ver,
-                    service_state=s_state,
-                    running=is_running,
-                )
+        for line in res.stdout.strip().splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            parts = line.split("|", 2)
+            if len(parts) == 3:
+                s_name, s_state, raw_p = parts[0].strip(), parts[1].strip(), parts[2].strip()
+                b_path = _extract_binary_path(raw_p)
+                # Verify that the binary actually ends with telegraf.exe
+                if b_path and b_path.lower().endswith("telegraf.exe"):
+                    # Check file existence if service is stopped
+                    is_running = "running" in s_state.lower()
+                    if is_running or _check_file_exists(b_path):
+                        ver = _query_version(b_path)
+                        logger.info("Found Windows Telegraf via Win32_Service: %s (path: %s)", s_name, b_path)
+                        return WindowsTelegrafDetection(
+                            installed=True,
+                            binary_path=b_path,
+                            service_name=s_name,
+                            version=ver,
+                            service_state=s_state,
+                            running=is_running,
+                        )
 
     # 2. Running process named telegraf
     proc_cmd = "Get-Process telegraf -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty Path"
@@ -168,12 +195,16 @@ def detect_windows_telegraf(executor: EndpointExecutor) -> WindowsTelegrafDetect
             )
 
     # 4. Registry ImagePath for service 'telegraf'
-    reg_cmd = "(Get-ItemProperty -Path 'HKLM:\\SYSTEM\\CurrentControlSet\\Services\\telegraf' -ErrorAction SilentlyContinue).ImagePath"
+    reg_cmd = (
+        "[System.Environment]::ExpandEnvironmentVariables("
+        "(Get-ItemProperty -Path 'HKLM:\\SYSTEM\\CurrentControlSet\\Services\\telegraf' -ErrorAction SilentlyContinue).ImagePath"
+        ")"
+    )
     res = executor.execute(reg_cmd, timeout=10)
     if _is_valid_stdout(res):
         raw_p = res.stdout.strip().splitlines()[-1].strip()
         b_path = _extract_binary_path(raw_p)
-        if b_path:
+        if b_path and b_path.lower().endswith("telegraf.exe"):
             ver = _query_version(b_path)
             s_state, is_running = _query_service_status("telegraf")
             logger.info("Found Windows Telegraf via registry ImagePath: %s", b_path)
@@ -192,22 +223,7 @@ def detect_windows_telegraf(executor: EndpointExecutor) -> WindowsTelegrafDetect
         "C:\\telegraf\\telegraf.exe",
     ]
     for p in known_candidates:
-        exists = False
-        try:
-            fe_fn = getattr(executor, "file_exists", None)
-            if callable(fe_fn):
-                fe_res = fe_fn(p)
-                if isinstance(fe_res, bool):
-                    exists = fe_res
-        except Exception:
-            pass
-        if not exists:
-            safe_p = p.replace("'", "''")
-            t_res = executor.execute(f"Test-Path -Path '{safe_p}'", timeout=5)
-            if _is_valid_stdout(t_res) and "True" in t_res.stdout:
-                exists = True
-
-        if exists:
+        if _check_file_exists(p):
             ver = _query_version(p)
             s_state, is_running = _query_service_status("telegraf")
             logger.info("Found Windows Telegraf at known folder: %s", p)

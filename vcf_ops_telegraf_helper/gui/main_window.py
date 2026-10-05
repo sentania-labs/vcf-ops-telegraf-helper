@@ -602,9 +602,10 @@ class MainWindow(QMainWindow):
         url = self.vcf_url_input.text().strip()
         if not url or url == getattr(self, "_auth_sources_url", None):
             return
-        self._auth_sources_url = url
         try:
             sources = get_adapter(self._get_vcf_env()).list_auth_sources()
+            if sources:
+                self._auth_sources_url = url
         except Exception as exc:
             self.logger.warning("Could not list VCF Operations login sources: %s", exc)
             sources = []
@@ -615,6 +616,8 @@ class MainWindow(QMainWindow):
         for name in sources:
             if name.lower() != "local":
                 self.vcf_auth_source_combo.addItem(name)
+        if current and current.lower() != "local" and current not in sources:
+            self.vcf_auth_source_combo.addItem(current)
         self.vcf_auth_source_combo.setCurrentText(current or "Local")
         self.vcf_auth_source_combo.blockSignals(False)
 
@@ -3007,8 +3010,13 @@ class MainWindow(QMainWindow):
             self.vcf_url_input.setText(latest.url)
             self.vcf_user_input.setText(latest.username or "")
             if latest.auth_source and latest.auth_source.lower() != "local":
-                self.vcf_auth_source_combo.setCurrentText(latest.auth_source)
+                if hasattr(self, "vcf_auth_source_combo"):
+                    if self.vcf_auth_source_combo.findText(latest.auth_source) < 0:
+                        self.vcf_auth_source_combo.addItem(latest.auth_source)
+                    self.vcf_auth_source_combo.setCurrentText(latest.auth_source)
             self.vcf_ssl_check.setChecked(latest.verify_ssl)
+            if latest.url:
+                self._load_auth_sources()
 
         saved_vcf_mode = self.state_store.get_preference("vcf_auth_mode")
         if saved_vcf_mode and hasattr(self, "vcf_auth_type_combo"):

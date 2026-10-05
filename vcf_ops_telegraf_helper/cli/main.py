@@ -233,6 +233,7 @@ def resolve_monitoring_config(
 @click.option("--vcf-token", default=None, help="VCF Operations API token")
 @click.option(
     "--vcf-auth-source",
+    envvar="VCF_AUTH_SOURCE",
     default="local",
     show_default=True,
     help="VCF Operations login source for --vcf-user (a directory or SSO source name)",
