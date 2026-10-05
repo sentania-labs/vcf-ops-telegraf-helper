@@ -273,6 +273,7 @@ def test_wizard_windows_monitoring_flow():
     prompt_answers = [
         "https://vcf-ops.local",  # vcf_url
         "admin",                  # vcf_user
+        "local",                  # vcf_auth_source
         "password",               # vcf_pass
         "10.10.10.50",            # collector_ip
         "172.16.3.80",            # target_host
@@ -830,3 +831,51 @@ def test_cli_run_vc_id_requires_vm_id():
     )
     assert res.exit_code != 0
     assert "--vc-id requires --vm-id" in res.output
+
+
+def test_cli_vcf_auth_source_option_reaches_environment(monkeypatch):
+    """--vcf-auth-source is accepted by run and vms and reaches the VCF environment."""
+    from vcf_ops_telegraf_helper.cli import main as cli_main
+
+    seen = {}
+    real_env = cli_main.VCFEnvironment
+
+    def capture(**kwargs):
+        seen.setdefault("sources", []).append(kwargs.get("auth_source"))
+        return real_env(**kwargs)
+
+    monkeypatch.setattr(cli_main, "VCFEnvironment", capture)
+    runner = CliRunner()
+    res = runner.invoke(cli, ["vms", "--vcf-url", "https://vcf-ops.local", "--mock-vcf", "--vcf-auth-source", "VCF SSO"])
+    assert res.exit_code == 0, res.output
+    res = runner.invoke(cli, [
+        "run", "--vcf-url", "https://vcf-ops.local", "--mock-vcf", "--collector", "10.10.10.50",
+        "--target-host", "10.10.10.101", "--connection", "mock", "--vcf-auth-source", "VCF SSO", "--preview",
+    ])
+    assert res.exit_code == 0, res.output
+    assert seen["sources"] == ["VCF SSO", "VCF SSO"]
+
+
+def test_cli_vcf_auth_source_envvar_reaches_environment(monkeypatch):
+    """VCF_AUTH_SOURCE environment variable is accepted by run and vms."""
+    from vcf_ops_telegraf_helper.cli import main as cli_main
+
+    seen = {}
+    real_env = cli_main.VCFEnvironment
+
+    def capture(**kwargs):
+        seen.setdefault("sources", []).append(kwargs.get("auth_source"))
+        return real_env(**kwargs)
+
+    monkeypatch.setattr(cli_main, "VCFEnvironment", capture)
+    monkeypatch.setenv("VCF_AUTH_SOURCE", "Corp AD")
+    runner = CliRunner()
+    res = runner.invoke(cli, ["vms", "--vcf-url", "https://vcf-ops.local", "--mock-vcf"])
+    assert res.exit_code == 0, res.output
+    res = runner.invoke(cli, [
+        "run", "--vcf-url", "https://vcf-ops.local", "--mock-vcf", "--collector", "10.10.10.50",
+        "--target-host", "10.10.10.101", "--connection", "mock", "--preview",
+    ])
+    assert res.exit_code == 0, res.output
+    assert seen["sources"] == ["Corp AD", "Corp AD"]
+

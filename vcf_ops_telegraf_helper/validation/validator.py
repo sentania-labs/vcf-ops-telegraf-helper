@@ -175,7 +175,10 @@ class Validator:
     ) -> ValidationResult:
         """Run Telegraf test mode to validate all plugins and syntax on the endpoint."""
         if is_windows or type(executor).__name__ == "WinRMExecutor":
-            cmd = f"& '{telegraf_bin}' --test --config '{config_path}' --config-directory '{config_dir}'"
+            safe_bin = telegraf_bin.replace("'", "''")
+            safe_cfg = config_path.replace("'", "''")
+            safe_dir = config_dir.replace("'", "''")
+            cmd = f"& '{safe_bin}' --test --config '{safe_cfg}' --config-directory '{safe_dir}'"
         else:
             cmd = f"{telegraf_bin} --test --config {config_path} --config-directory {config_dir}"
         res = executor.execute(cmd, timeout=15)
@@ -200,18 +203,26 @@ class Validator:
     def validate_service_state(
         executor: EndpointExecutor,
         is_windows: bool = False,
+        service_name: Optional[str] = None,
     ) -> ValidationResult:
         """Verify that the Telegraf service is active on the target."""
+        svc = service_name or "telegraf"
         if is_windows or type(executor).__name__ == "WinRMExecutor":
-            res = executor.execute("(Get-Service telegraf -ErrorAction SilentlyContinue).Status", timeout=5)
+            safe_svc = svc.replace("'", "''")
+            cmd = (
+                "(Get-Service telegraf -ErrorAction SilentlyContinue).Status"
+                if svc == "telegraf"
+                else f"(Get-Service '{safe_svc}' -ErrorAction SilentlyContinue).Status"
+            )
+            res = executor.execute(cmd, timeout=5)
             state = res.stdout.strip()
             if res.exit_code == 0 and "Running" in state:
                 return ValidationResult(
                     domain="Service State",
                     is_valid=True,
-                    message="Telegraf Windows service is active (running)",
+                    message=f"Telegraf Windows service '{svc}' is active (running)",
                 )
-            remediation = "Review 'Get-EventLog -LogName Application -Source telegraf' or service logs for errors."
+            remediation = f"Review 'Get-EventLog -LogName Application -Source {svc}' or service logs for errors."
         else:
             res = executor.execute("systemctl is-active telegraf", timeout=5)
             state = res.stdout.strip()

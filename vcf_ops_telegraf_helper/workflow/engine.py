@@ -34,6 +34,10 @@ from vcf_ops_telegraf_helper.renderer.renderer import TelegrafRenderer
 from vcf_ops_telegraf_helper.security.redaction import redact_secrets
 from vcf_ops_telegraf_helper.validation.validator import Validator
 from vcf_ops_telegraf_helper.workflow.progress import ProgressReporter, SilentProgressReporter
+from vcf_ops_telegraf_helper.workflow.windows import detect_windows_telegraf
+from vcf_ops_telegraf_helper.logger import get_logger
+
+logger = get_logger("workflow.engine")
 
 
 class ConfigureEndpointWorkflow:
@@ -200,17 +204,11 @@ class ConfigureEndpointWorkflow:
                 ver_res = self.executor.execute("(Get-CimInstance Win32_OperatingSystem).Caption", timeout=10)
                 os_version = ver_res.stdout.strip() if ver_res.success and ver_res.stdout.strip() else "Microsoft Windows"
 
-                chk_bin = self.executor.execute("Test-Path 'C:\\telegraf\\telegraf.exe'", timeout=10)
-                installed = chk_bin.success and "True" in chk_bin.stdout
-
-                version_str = None
-                if installed:
-                    ver_bin = self.executor.execute("& 'C:\\telegraf\\telegraf.exe' version", timeout=10)
-                    if ver_bin.success:
-                        version_str = ver_bin.stdout.strip()
-
-                svc_res = self.executor.execute("(Get-Service telegraf -ErrorAction SilentlyContinue).Status", timeout=10)
-                service_state = svc_res.stdout.strip() if svc_res.success and svc_res.stdout.strip() else "Stopped"
+                win_det = detect_windows_telegraf(self.executor)
+                installed = win_det.installed
+                version_str = win_det.version
+                service_state = win_det.service_state or ("Running" if win_det.running else "Stopped")
+                telegraf_bin = win_det.binary_path or "C:\\telegraf\\telegraf.exe"
 
                 uuid_res = self.executor.execute("(Get-CimInstance Win32_ComputerSystemProduct).UUID", timeout=10)
                 host_uuid = uuid_res.stdout.strip() if uuid_res.success else ""
@@ -246,7 +244,8 @@ class ConfigureEndpointWorkflow:
                     service_state=service_state,
                     config_dir="C:\\telegraf\\telegraf.d",
                     main_config_path="C:\\telegraf\\telegraf.conf",
-                    telegraf_bin_path="C:\\telegraf\\telegraf.exe",
+                    telegraf_bin_path=telegraf_bin,
+                    service_name=win_det.service_name,
                     host_uuid=host_uuid,
                     host_ip=host_ip,
                 )
@@ -896,8 +895,9 @@ class ConfigureEndpointWorkflow:
 
             # Create destination directory and backup existing fragments/certs
             if is_win:
+                safe_dir = config_dir.replace("'", "''")
                 self.executor.execute(
-                    f"if (-not (Test-Path '{config_dir}')) {{ New-Item -ItemType Directory -Path '{config_dir}' -Force | Out-Null }}"
+                    f"if (-not (Test-Path '{safe_dir}')) {{ New-Item -ItemType Directory -Path '{safe_dir}' -Force | Out-Null }}"
                 )
                 for f_name in (
                     "vcf-helper-system.conf", "cloudproxy-http.conf",
@@ -907,7 +907,8 @@ class ConfigureEndpointWorkflow:
                 ):
                     f_dest = f"{config_dir}\\{f_name}"
                     if self.executor.file_exists(f_dest):
-                        self.executor.execute(f"Copy-Item -Path '{f_dest}' -Destination '{f_dest}.bak' -Force")
+                        safe_dest = f_dest.replace("'", "''")
+                        self.executor.execute(f"Copy-Item -Path '{safe_dest}' -Destination '{safe_dest}.bak' -Force")
             else:
                 self.executor.execute(f"mkdir -p {shlex.quote(config_dir)}")
                 for f_name in (
@@ -941,7 +942,8 @@ class ConfigureEndpointWorkflow:
                 exists = self.executor.file_exists(main_cfg)
                 if exists:
                     if is_win:
-                        self.executor.execute(f"Copy-Item -Path '{main_cfg}' -Destination '{main_cfg}.bak' -Force")
+                        safe_cfg = main_cfg.replace("'", "''")
+                        self.executor.execute(f"Copy-Item -Path '{safe_cfg}' -Destination '{safe_cfg}.bak' -Force")
                     else:
                         self.executor.execute(f"cp {shlex.quote(main_cfg)} {shlex.quote(f'{main_cfg}.bak')}")
                 if exists and not self.executor.file_exists(f"{main_cfg}.orig"):
@@ -1034,13 +1036,15 @@ class ConfigureEndpointWorkflow:
             parts = []
             for f in files_to_restore:
                 fpath = f"{config_dir}\\{f}"
+                safe_fp = fpath.replace("'", "''")
                 parts.append(
-                    f"if (Test-Path '{fpath}.bak') {{ Move-Item -Path '{fpath}.bak' -Destination '{fpath}' -Force }} "
-                    f"else {{ Remove-Item -Path '{fpath}' -Force -ErrorAction SilentlyContinue }};"
+                    f"if (Test-Path '{safe_fp}.bak') {{ Move-Item -Path '{safe_fp}.bak' -Destination '{safe_fp}' -Force }} "
+                    f"else {{ Remove-Item -Path '{safe_fp}' -Force -ErrorAction SilentlyContinue }};"
                 )
+            safe_cfg = main_cfg.replace("'", "''")
             parts.append(
-                f"if (Test-Path '{main_cfg}.bak') {{ Move-Item -Path '{main_cfg}.bak' -Destination '{main_cfg}' -Force }} "
-                f"elseif (-not (Test-Path '{main_cfg}.orig')) {{ Remove-Item -Path '{main_cfg}' -Force -ErrorAction SilentlyContinue }};"
+                f"if (Test-Path '{safe_cfg}.bak') {{ Move-Item -Path '{safe_cfg}.bak' -Destination '{safe_cfg}' -Force }} "
+                f"elseif (-not (Test-Path '{safe_cfg}.orig')) {{ Remove-Item -Path '{safe_cfg}' -Force -ErrorAction SilentlyContinue }};"
             )
             rollback_script = " ".join(parts)
             self.executor.execute(rollback_script, timeout=15)
@@ -1065,7 +1069,13 @@ class ConfigureEndpointWorkflow:
         """Remove .bak backup files on successful verification."""
         try:
             if is_win:
-                cleanup_cmd = f"Remove-Item -Path '{config_dir}\\*.bak', 'C:\\telegraf\\telegraf.conf.bak' -Force -ErrorAction SilentlyContinue"
+                safe_dir = config_dir.replace("'", "''")
+                safe_cfg = (
+                    self.discovery.main_config_path.replace("'", "''")
+                    if self.discovery and self.discovery.main_config_path
+                    else "C:\\telegraf\\telegraf.conf"
+                )
+                cleanup_cmd = f"Remove-Item -Path '{safe_dir}\\*.bak', '{safe_cfg}.bak' -Force -ErrorAction SilentlyContinue"
             else:
                 sudo_pfx = "sudo -n " if getattr(self.executor, "use_sudo", False) else ""
                 cleanup_cmd = f"{sudo_pfx}rm -f {shlex.quote(config_dir)}/*.bak /etc/telegraf/telegraf.conf.bak 2>/dev/null || true"
@@ -1124,7 +1134,10 @@ class ConfigureEndpointWorkflow:
 
             # Pre-flight check on endpoint before service restart
             if is_win:
-                test_cmd = f"& '{telegraf_bin}' --test --config '{main_cfg}' --config-directory '{config_dir}'"
+                safe_bin = telegraf_bin.replace("'", "''")
+                safe_cfg = main_cfg.replace("'", "''")
+                safe_dir = config_dir.replace("'", "''")
+                test_cmd = f"& '{safe_bin}' --test --config '{safe_cfg}' --config-directory '{safe_dir}'"
             else:
                 test_cmd = f"{telegraf_bin} --test --config {main_cfg} --config-directory {config_dir}"
 
@@ -1145,8 +1158,41 @@ class ConfigureEndpointWorkflow:
 
             # Restart service
             if is_win:
-                restart_cmd = "Restart-Service telegraf -Force"
+                svc_name = (
+                    self.discovery.service_name
+                    if self.discovery and self.discovery.service_name
+                    else None
+                )
+                if not svc_name:
+                    # Register service if not yet installed in Windows SCM
+                    safe_bin = telegraf_bin.replace("'", "''")
+                    safe_cfg = main_cfg.replace("'", "''")
+                    safe_dir = config_dir.replace("'", "''")
+                    self.executor.execute("Stop-Process -Name telegraf -Force -ErrorAction SilentlyContinue", timeout=10)
+                    reg_cmd = f"& '{safe_bin}' --service install --config '{safe_cfg}' --config-directory '{safe_dir}'"
+                    reg_res = self.executor.execute(reg_cmd, timeout=15)
+                    logger.info("Registered Telegraf Windows service: exit_code=%s", reg_res.exit_code)
+                    svc_name = "telegraf"
+                    if self.discovery:
+                        self.discovery.service_name = "telegraf"
+
+                safe_svc = svc_name.replace("'", "''")
+                restart_cmd = (
+                    "Restart-Service telegraf -Force"
+                    if svc_name == "telegraf"
+                    else f"Restart-Service '{safe_svc}' -Force"
+                )
                 restart_res = self.executor.execute(restart_cmd, timeout=15)
+                if not restart_res.success:
+                    start_cmd = (
+                        "Start-Service telegraf"
+                        if svc_name == "telegraf"
+                        else f"Start-Service '{safe_svc}'"
+                    )
+                    start_res = self.executor.execute(start_cmd, timeout=15)
+                    if start_res.success:
+                        restart_res = start_res
+                        restart_cmd = start_cmd
             else:
                 restart_cmd = "systemctl restart telegraf"
                 restart_res = self.executor.execute(restart_cmd, timeout=15)
@@ -1164,7 +1210,7 @@ class ConfigureEndpointWorkflow:
                 self._rollback_configs(config_dir, is_win)
                 # Attempt to restart with restored backup
                 if is_win:
-                    self.executor.execute("Restart-Service telegraf -Force", timeout=15)
+                    self.executor.execute(restart_cmd, timeout=15)
                 else:
                     self.executor.execute("systemctl restart telegraf", timeout=15)
                 res = StageResult(
@@ -1210,7 +1256,14 @@ class ConfigureEndpointWorkflow:
 
             if not self.options.dry_run:
                 # 3. Service running check
-                svc_val = Validator.validate_service_state(self.executor, is_windows=is_win)
+                svc_name = (
+                    self.discovery.service_name
+                    if self.discovery and self.discovery.service_name
+                    else "telegraf"
+                )
+                svc_val = Validator.validate_service_state(
+                    self.executor, is_windows=is_win, service_name=svc_name
+                )
                 self.verifications["Service running"] = "PASS" if svc_val.is_valid else "FAIL"
 
                 # 4. Local metrics generated

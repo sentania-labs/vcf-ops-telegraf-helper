@@ -91,6 +91,10 @@ class VCFOpsIntegration(ABC):
         """Discover candidate virtual machines (no templates or deleted VMs) from VCF Operations inventory."""
         pass
 
+    def list_auth_sources(self) -> list[str]:
+        """Names of the non-local login sources the instance offers (empty when unknown)."""
+        return []
+
     def verify_credentials(self) -> None:
         """Confirm the configured credentials are accepted; raise RuntimeError if not.
 

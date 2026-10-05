@@ -30,7 +30,10 @@ class VCFEnvironment(BaseModel):
     url: str = Field(description="Base URL for VCF Operations, e.g. https://vcf-ops.corp.local")
     username: str = Field(description="Username for authentication")
     password: Optional[str] = Field(default=None, description="Session password, not saved in plain text")
-    auth_source: str = Field(default="local", description="Authentication source: local or Active Directory")
+    auth_source: str = Field(
+        default="local",
+        description="VCF Operations login source for username/password auth: 'local' or a configured source name",
+    )
     collector: CollectorInfo = Field(description="Cloud Proxy or Collector destination")
     verify_ssl: bool = Field(default=True, description="Verify TLS certificates")
     ca_cert_path: Optional[str] = Field(default=None, description="Custom CA certificate bundle path")

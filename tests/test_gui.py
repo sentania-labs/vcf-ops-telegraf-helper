@@ -947,3 +947,98 @@ def test_gui_ampersand_texts_escaped(qapp, tmp_path):
     assert window.sys_check.text() == "Enable System Load && Uptime"
     assert dlg.findChild(QDialogButtonBox).button(QDialogButtonBox.Ok).text() == "Connect && Discover"
 
+
+def test_main_window_execute_recovers_when_setup_fails(qapp, tmp_path, monkeypatch):
+    """If the run fails before the worker starts, Execute is usable again and the error is shown (#33)."""
+    from vcf_ops_telegraf_helper.gui import main_window as mw
+
+    window = MainWindow(state_store=StateStore(state_file=tmp_path / "state.json"))
+    monkeypatch.setattr(mw.QMessageBox, "critical", lambda *a, **k: None)
+    monkeypatch.setattr(window, "_create_executor", lambda target: (_ for _ in ()).throw(RuntimeError("no route to host")))
+    window._run_workflow()
+    assert window.execute_btn.isEnabled() is True
+    assert "no route to host" in window.stage_list_box.toPlainText()
+
+
+def test_main_window_pages_fit_at_minimum_size(qapp, tmp_path):
+    """At the smallest allowed window size no step, and no plugin card, needs a sideways scroll."""
+    from PySide6.QtWidgets import QScrollArea
+
+    window = MainWindow(state_store=StateStore(state_file=tmp_path / "state.json"))
+    window.show()
+    window.resize(window.minimumSize())
+    overflowing = []
+    for page in range(window.page_stack.count()):
+        window.page_stack.setCurrentIndex(page)
+        rows = range(window.plugin_catalog_list.count()) if page == window.STEP_MONITORING else [None]
+        for row in rows:
+            if row is not None:
+                window.plugin_catalog_list.setCurrentRow(row)
+            qapp.processEvents()
+            scroll = window.page_stack.currentWidget().findChild(QScrollArea)
+            if scroll.horizontalScrollBar().isVisible():
+                overflowing.append((page + 1, row))
+    assert window.plugin_catalog_list.horizontalScrollBar().isVisible() is False
+    assert overflowing == []
+
+
+def test_main_window_login_source(qapp, tmp_path, monkeypatch):
+    """The login source is offered from the instance, sent for username auth, and kept in the CLI command."""
+    from vcf_ops_telegraf_helper.adapters.mock import MockVCFOpsIntegration
+    from vcf_ops_telegraf_helper.gui import main_window as mw
+
+    class WithSources(MockVCFOpsIntegration):
+        def list_auth_sources(self):
+            return ["VCF SSO"]
+
+    monkeypatch.setattr(mw, "get_adapter", lambda env, session=None: WithSources(env=env, connected=True))
+    window = MainWindow(state_store=StateStore(state_file=tmp_path / "state.json"))
+    window.vcf_url_input.setText("https://ops.corp.local")
+    window._load_auth_sources(sync=True)
+    assert [window.vcf_auth_source_combo.itemText(i) for i in range(window.vcf_auth_source_combo.count())] == ["Local", "VCF SSO"]
+
+    window.vcf_auth_type_combo.setCurrentText("Username & Password")
+    assert window.vcf_auth_source_combo.isHidden() is False
+    assert window._get_vcf_env().auth_source == "local"
+    window.vcf_auth_source_combo.setCurrentText("VCF SSO")
+    assert window._get_vcf_env().auth_source == "VCF SSO"
+    assert "--vcf-auth-source 'VCF SSO'" in window._build_cli_command()
+
+    # Token auth has no login source
+    window.vcf_auth_type_combo.setCurrentText("API Token / Key")
+    assert window.vcf_auth_source_combo.isHidden() is True
+    assert window._get_vcf_env().auth_source == "local"
+
+
+def test_main_window_passwords_are_not_trimmed(qapp, tmp_path):
+    """Leading or trailing spaces can be part of a real password."""
+    window = MainWindow(state_store=StateStore(state_file=tmp_path / "state.json"))
+    window.vcf_auth_type_combo.setCurrentText("Username & Password")
+    window.vcf_pass_input.setText(" pw with spaces ")
+    window.ep_pass_input.setText(" pw2 ")
+    assert window._get_vcf_env().password == " pw with spaces "
+    assert window._get_endpoint_target().password == " pw2 "
+
+
+def test_main_window_login_source_async(qapp, tmp_path, monkeypatch):
+    """Auth sources load asynchronously off the GUI thread when editing completes or saved state loads."""
+    from vcf_ops_telegraf_helper.adapters.mock import MockVCFOpsIntegration
+    from vcf_ops_telegraf_helper.gui import main_window as mw
+
+    class WithSources(MockVCFOpsIntegration):
+        def list_auth_sources(self):
+            return ["Corp Active Directory"]
+
+    monkeypatch.setattr(mw, "get_adapter", lambda env, session=None: WithSources(env=env, connected=True))
+    window = MainWindow(state_store=StateStore(state_file=tmp_path / "state.json"))
+    window.vcf_url_input.setText("https://ops.corp.local")
+    window._load_auth_sources()  # runs async
+    assert window.auth_sources_thread is not None
+    window.auth_sources_thread.wait(5000)
+    qapp.processEvents()
+    assert [window.vcf_auth_source_combo.itemText(i) for i in range(window.vcf_auth_source_combo.count())] == [
+        "Local",
+        "Corp Active Directory",
+    ]
+
+

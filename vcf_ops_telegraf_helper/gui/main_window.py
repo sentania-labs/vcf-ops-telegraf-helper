@@ -95,6 +95,7 @@ from vcf_ops_telegraf_helper.renderer.renderer import TelegrafRenderer
 from vcf_ops_telegraf_helper.storage.state import StateStore
 from vcf_ops_telegraf_helper.workflow.engine import ConfigureEndpointWorkflow
 from vcf_ops_telegraf_helper.workflow.uninstall import UninstallEndpointWorkflow
+from vcf_ops_telegraf_helper.workflow.windows import detect_windows_telegraf
 from vcf_ops_telegraf_helper.gui.discovery_dialogs import (
     DatabaseConnectDialog,
     DatabaseDiscoveryDialog,
@@ -185,6 +186,24 @@ class UninstallWorker(QObject):
             self.failed.emit(str(exc))
 
 
+class AuthSourcesWorker(QObject):
+    """Background worker fetching VCF Operations login sources without blocking the UI."""
+
+    finished = Signal(str, object)  # (url, list[str])
+
+    def __init__(self, env: VCFEnvironment) -> None:
+        super().__init__()
+        self.env = env
+
+    def run(self) -> None:
+        try:
+            adapter = get_adapter(self.env)
+            sources = adapter.list_auth_sources()
+        except Exception:
+            sources = []
+        self.finished.emit(self.env.url, sources)
+
+
 class MainWindow(QMainWindow):
     """Main window for the native Lattice-styled administrator helper."""
 
@@ -196,6 +215,9 @@ class MainWindow(QMainWindow):
         self.worker_thread: Optional[QThread] = None
         self.uninstall_worker_thread: Optional[QThread] = None
         self.uninstall_worker: Optional[UninstallWorker] = None
+        self.auth_sources_thread: Optional[QThread] = None
+        self.auth_sources_worker: Optional[AuthSourcesWorker] = None
+        self._loading_auth_sources_url: Optional[str] = None
         self.logger = get_logger("gui")
         self._updating_catalog = False
         self._cached_vms: list[VirtualMachineResource] = []
@@ -213,7 +235,8 @@ class MainWindow(QMainWindow):
 
         self.setWindowTitle("VCF Operations Open Telegraf Helper")
         self.resize(1150, 840)
-        self.setMinimumSize(960, 680)
+        # Narrow enough for small laptop screens, wide enough that no step needs a sideways scroll
+        self.setMinimumSize(1120, 680)
 
         self._init_ui()
         self._apply_theme()
@@ -538,6 +561,16 @@ class MainWindow(QMainWindow):
         grid.addWidget(self.vcf_pass_label, 4, 0)
         grid.addWidget(self.vcf_pass_input, 4, 1)
 
+        self.vcf_auth_source_label = QLabel("Login Source:")
+        self.vcf_auth_source_combo = QComboBox()
+        self.vcf_auth_source_combo.setEditable(True)
+        self.vcf_auth_source_combo.addItem("Local")
+        self.vcf_auth_source_combo.setToolTip(
+            "Where the account lives: Local, or a directory or SSO source configured in VCF Operations"
+        )
+        grid.addWidget(self.vcf_auth_source_label, 5, 0)
+        grid.addWidget(self.vcf_auth_source_combo, 5, 1)
+
         c_layout.addLayout(grid)
         self._update_vcf_auth_visibility()
 
@@ -574,6 +607,9 @@ class MainWindow(QMainWindow):
 
         for w in (self.vcf_url_input, self.vcf_token_input, self.vcf_user_input, self.vcf_pass_input, self.vcf_ca_input):
             w.textChanged.connect(self._invalidate_vcf_connection)
+        self.vcf_auth_source_combo.currentTextChanged.connect(self._invalidate_vcf_connection)
+        # The instance lists its login sources without authentication, so offer them once the URL is entered
+        self.vcf_url_input.editingFinished.connect(self._load_auth_sources)
         self.vcf_auth_type_combo.currentTextChanged.connect(self._invalidate_vcf_connection)
         self.vcf_ssl_check.toggled.connect(self._invalidate_vcf_connection)
 
@@ -582,6 +618,61 @@ class MainWindow(QMainWindow):
 
         nav_frame, _ = self._build_nav(self.STEP_CONNECT, None, "Select VM")
         return self._wrap_page(content, nav_frame)
+
+    def _apply_auth_sources(self, url: str, sources: list[str]) -> None:
+        if not hasattr(self, "vcf_auth_source_combo"):
+            return
+        if self.vcf_url_input.text().strip() != url:
+            return
+        if sources:
+            self._auth_sources_url = url
+        current = self.vcf_auth_source_combo.currentText()
+        self.vcf_auth_source_combo.blockSignals(True)
+        self.vcf_auth_source_combo.clear()
+        self.vcf_auth_source_combo.addItem("Local")
+        for name in sources:
+            if name.lower() != "local":
+                self.vcf_auth_source_combo.addItem(name)
+        if current and current.lower() != "local" and current not in sources:
+            self.vcf_auth_source_combo.addItem(current)
+        self.vcf_auth_source_combo.setCurrentText(current or "Local")
+        self.vcf_auth_source_combo.blockSignals(False)
+
+    def _load_auth_sources(self, sync: bool = False) -> None:
+        url = self.vcf_url_input.text().strip()
+        if not url or url == getattr(self, "_auth_sources_url", None):
+            return
+        try:
+            env = self._get_vcf_env()
+        except Exception:
+            return
+
+        if sync:
+            try:
+                sources = get_adapter(env).list_auth_sources()
+            except Exception as exc:
+                self.logger.warning("Could not list VCF Operations login sources: %s", exc)
+                sources = []
+            self._apply_auth_sources(url, sources)
+            return
+
+        if getattr(self, "_loading_auth_sources_url", None) == url:
+            return
+        self._loading_auth_sources_url = url
+
+        self.auth_sources_thread = QThread()
+        self.auth_sources_worker = AuthSourcesWorker(env)
+        self.auth_sources_worker.moveToThread(self.auth_sources_thread)
+        self.auth_sources_thread.started.connect(self.auth_sources_worker.run)
+        self.auth_sources_worker.finished.connect(self._on_auth_sources_finished)
+        self.auth_sources_worker.finished.connect(self.auth_sources_thread.quit)
+        self.auth_sources_worker.finished.connect(self.auth_sources_worker.deleteLater)
+        self.auth_sources_thread.finished.connect(self.auth_sources_thread.deleteLater)
+        self.auth_sources_thread.start()
+
+    def _on_auth_sources_finished(self, url: str, sources: list[str]) -> None:
+        self._loading_auth_sources_url = None
+        self._apply_auth_sources(url, sources)
 
     def _on_vcf_ssl_toggled(self, checked: bool) -> None:
         # A CA bundle only matters when certificates are verified
@@ -1147,6 +1238,9 @@ class MainWindow(QMainWindow):
         self.vcf_user_input.setVisible(not use_key)
         self.vcf_pass_label.setVisible(not use_key)
         self.vcf_pass_input.setVisible(not use_key)
+        if hasattr(self, "vcf_auth_source_combo"):
+            self.vcf_auth_source_label.setVisible(not use_key)
+            self.vcf_auth_source_combo.setVisible(not use_key)
 
     def _on_vcf_auth_type_changed(self, text: str) -> None:
         self._update_vcf_auth_visibility()
@@ -1323,15 +1417,16 @@ class MainWindow(QMainWindow):
                 installed = False
                 version_str = "N/A"
                 running = False
+                binary_path = None
+                service_name = None
                 if target.connection_method in (ConnectionMethod.WINRM, ConnectionMethod.LOCAL):
                     if target.connection_method == ConnectionMethod.WINRM or sys.platform == "win32":
-                        installed = executor.file_exists("C:\\telegraf\\telegraf.exe")
-                        if installed:
-                            ver_res = executor.execute("C:\\telegraf\\telegraf.exe version", timeout=10)
-                            if ver_res.success:
-                                version_str = ver_res.stdout.strip()
-                        svc_res = executor.execute("sc.exe query telegraf", timeout=10)
-                        running = svc_res.success and "RUNNING" in svc_res.stdout
+                        win_det = detect_windows_telegraf(executor)
+                        installed = win_det.installed
+                        binary_path = win_det.binary_path
+                        service_name = win_det.service_name
+                        version_str = win_det.version or "N/A"
+                        running = win_det.running
                         caption_res = executor.execute("(Get-CimInstance Win32_OperatingSystem).Caption", timeout=10)
                         if caption_res.success and caption_res.stdout.strip():
                             os_version = caption_res.stdout.strip().splitlines()[0]
@@ -1363,9 +1458,15 @@ class MainWindow(QMainWindow):
                     f"Telegraf Installed: {inst_str}",
                     f"Telegraf Version: {version_str}",
                     f"Service Running: {'YES' if running else 'NO'}",
+                ]
+                if binary_path:
+                    details.append(f"Telegraf Binary: {binary_path}")
+                if service_name:
+                    details.append(f"Service Name: {service_name}")
+                details.extend([
                     "Config Directory: C:\\telegraf\\telegraf.d",
                     "Agent Distribution: InfluxData Official Open-Source",
-                ]
+                ])
                 self.ep_details_box.setPlainText("\n".join(details))
                 self.state_store.record_endpoint(target.hostname)
                 self.logger.info("Endpoint discovered successfully: %s (hostname: %s)", target.hostname, disc_name)
@@ -1841,6 +1942,13 @@ class MainWindow(QMainWindow):
             self.plugin_catalog_list.addItem(item)
             chk.toggled.connect(lambda checked, i=idx: self._sync_checkbox_to_catalog(i, checked))
 
+        # Long names shorten with an ellipsis (full name in the tooltip) instead of scrolling sideways
+        self.plugin_catalog_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.plugin_catalog_list.setTextElideMode(Qt.ElideRight)
+        for i in range(self.plugin_catalog_list.count()):
+            item = self.plugin_catalog_list.item(i)
+            item.setToolTip(item.text())
+
         self.plugin_catalog_list.itemChanged.connect(self._on_catalog_item_changed)
         self.plugin_catalog_list.currentRowChanged.connect(self._on_catalog_row_changed)
         self.plugin_catalog_list.setCurrentRow(0)
@@ -1893,6 +2001,7 @@ class MainWindow(QMainWindow):
 
         card_title = QLabel(title)
         card_title.setProperty("class", "lattice-title")
+        card_title.setWordWrap(True)
         header_row.addWidget(card_title)
         header_row.addStretch()
         layout.addLayout(header_row)
@@ -2580,6 +2689,8 @@ class MainWindow(QMainWindow):
             parts.append('--vcf-token "<token>"')
         elif env.username:
             parts.append(f"--vcf-user {shlex.quote(env.username)}")
+            if env.auth_source and env.auth_source.lower() != "local":
+                parts.append(f"--vcf-auth-source {shlex.quote(env.auth_source)}")
             if env.password:
                 parts.append('--vcf-pass "<password>"')
 
@@ -2690,6 +2801,14 @@ class MainWindow(QMainWindow):
         self.stage_list_box.clear()
         self.export_md_btn.setEnabled(False)
         self.export_json_btn.setEnabled(False)
+        try:
+            self._start_workflow_worker()
+        except Exception as exc:
+            # Setup failed before the worker existed, so no worker signal will re-enable the buttons
+            self.logger.exception("Failed to start workflow")
+            self._on_worker_failed(f"Could not start the workflow: {exc}")
+
+    def _start_workflow_worker(self) -> None:
         self._update_cli_command()
 
         target = self._get_endpoint_target()
@@ -2784,6 +2903,7 @@ class MainWindow(QMainWindow):
             "key" in self.vcf_auth_type_combo.currentText().lower()
             or "token" in self.vcf_auth_type_combo.currentText().lower()
         )
+        auth_source = "local"
         if use_key:
             token = self.vcf_token_input.text().strip() or None
             username = "admin"
@@ -2791,7 +2911,10 @@ class MainWindow(QMainWindow):
         else:
             token = None
             username = self.vcf_user_input.text().strip() or "admin"
-            password = self.vcf_pass_input.text().strip() or None
+            password = self.vcf_pass_input.text() or None
+            source_text = self.vcf_auth_source_combo.currentText().strip() if hasattr(self, "vcf_auth_source_combo") else ""
+            if source_text and source_text.lower() != "local":
+                auth_source = source_text
 
         ca_cert = (self.vcf_ca_input.text().strip() or None) if hasattr(self, "vcf_ca_input") else None
         return VCFEnvironment(
@@ -2799,6 +2922,7 @@ class MainWindow(QMainWindow):
             username=username,
             password=password,
             token=token,
+            auth_source=auth_source,
             collector=collector,
             verify_ssl=self.vcf_ssl_check.isChecked(),
             ca_cert_path=ca_cert,
@@ -2824,7 +2948,7 @@ class MainWindow(QMainWindow):
 
         if is_win:
             key_filename = None
-            password = self.ep_pass_input.text().strip() or None
+            password = self.ep_pass_input.text() or None
         else:
             use_key = hasattr(self, "ep_auth_radio_key") and self.ep_auth_radio_key.isChecked()
             if use_key:
@@ -2832,7 +2956,7 @@ class MainWindow(QMainWindow):
                 password = None
             else:
                 key_filename = None
-                password = self.ep_pass_input.text().strip() or None
+                password = self.ep_pass_input.text() or None
 
         reg_hname = getattr(self, "selected_vm_name", None) or getattr(self, "discovered_hostname", None)
 
@@ -2938,7 +3062,14 @@ class MainWindow(QMainWindow):
             latest = recent_envs[0]
             self.vcf_url_input.setText(latest.url)
             self.vcf_user_input.setText(latest.username or "")
+            if latest.auth_source and latest.auth_source.lower() != "local":
+                if hasattr(self, "vcf_auth_source_combo"):
+                    if self.vcf_auth_source_combo.findText(latest.auth_source) < 0:
+                        self.vcf_auth_source_combo.addItem(latest.auth_source)
+                    self.vcf_auth_source_combo.setCurrentText(latest.auth_source)
             self.vcf_ssl_check.setChecked(latest.verify_ssl)
+            if latest.url:
+                self._load_auth_sources()
 
         saved_vcf_mode = self.state_store.get_preference("vcf_auth_mode")
         if saved_vcf_mode and hasattr(self, "vcf_auth_type_combo"):

@@ -68,6 +68,20 @@ class VCF91OpenTelegrafIntegration(VCFOpsIntegration):
             except Exception:
                 return False
 
+    def list_auth_sources(self) -> List[str]:
+        """Names of the login sources VCF Operations offers; this endpoint needs no authentication."""
+        try:
+            resp = self.session.get(
+                f"{self.base_url}/suite-api/api/auth/sources", headers={"Accept": "application/json"}, timeout=10
+            )
+            if resp.status_code != 200:
+                logger.warning("Login source query returned HTTP %d", resp.status_code)
+                return []
+            return [s.get("name") for s in resp.json().get("sources", []) if s.get("name")]
+        except Exception as exc:
+            logger.warning("Login source query failed: %s", exc)
+            return []
+
     def verify_credentials(self) -> None:
         """Confirm the token, or the username and password, are accepted by the Suite API."""
         if not self.env.token:
@@ -103,6 +117,10 @@ class VCF91OpenTelegrafIntegration(VCFOpsIntegration):
             "username": username,
             "password": password,
         }
+        source = (self.env.auth_source or "").strip()
+        if source and source.lower() != "local":
+            # Directory and SSO accounts authenticate against their named login source
+            payload["authSource"] = source
         headers = {
             "Content-Type": "application/json",
             "Accept": "application/json",

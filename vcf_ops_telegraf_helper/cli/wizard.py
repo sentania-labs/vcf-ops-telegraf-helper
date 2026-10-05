@@ -59,6 +59,7 @@ def run_wizard(console: Optional[Console] = None) -> None:
 
     vcf_url = Prompt.ask("VCF Operations URL", default=default_url, console=con)
     vcf_user = Prompt.ask("VCF Operations Username", default="admin", console=con)
+    vcf_auth_source = Prompt.ask("VCF Operations Login Source", default="local", console=con)
     env_vcf_pass = os.environ.get("VCF_PASS")
     if env_vcf_pass:
         con.print("  [dim]Using VCF password from VCF_PASS environment variable[/dim]")
@@ -73,6 +74,7 @@ def run_wizard(console: Optional[Console] = None) -> None:
         url=vcf_url,
         username=vcf_user,
         password=vcf_pass,
+        auth_source=vcf_auth_source,
         collector=CollectorInfo(address=collector_ip),
         verify_ssl=verify_ssl,
     )
