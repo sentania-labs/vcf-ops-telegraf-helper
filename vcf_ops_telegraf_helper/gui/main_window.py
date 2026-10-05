@@ -186,6 +186,24 @@ class UninstallWorker(QObject):
             self.failed.emit(str(exc))
 
 
+class AuthSourcesWorker(QObject):
+    """Background worker fetching VCF Operations login sources without blocking the UI."""
+
+    finished = Signal(str, object)  # (url, list[str])
+
+    def __init__(self, env: VCFEnvironment) -> None:
+        super().__init__()
+        self.env = env
+
+    def run(self) -> None:
+        try:
+            adapter = get_adapter(self.env)
+            sources = adapter.list_auth_sources()
+        except Exception:
+            sources = []
+        self.finished.emit(self.env.url, sources)
+
+
 class MainWindow(QMainWindow):
     """Main window for the native Lattice-styled administrator helper."""
 
@@ -197,6 +215,9 @@ class MainWindow(QMainWindow):
         self.worker_thread: Optional[QThread] = None
         self.uninstall_worker_thread: Optional[QThread] = None
         self.uninstall_worker: Optional[UninstallWorker] = None
+        self.auth_sources_thread: Optional[QThread] = None
+        self.auth_sources_worker: Optional[AuthSourcesWorker] = None
+        self._loading_auth_sources_url: Optional[str] = None
         self.logger = get_logger("gui")
         self._updating_catalog = False
         self._cached_vms: list[VirtualMachineResource] = []
@@ -598,17 +619,13 @@ class MainWindow(QMainWindow):
         nav_frame, _ = self._build_nav(self.STEP_CONNECT, None, "Select VM")
         return self._wrap_page(content, nav_frame)
 
-    def _load_auth_sources(self) -> None:
-        url = self.vcf_url_input.text().strip()
-        if not url or url == getattr(self, "_auth_sources_url", None):
+    def _apply_auth_sources(self, url: str, sources: list[str]) -> None:
+        if not hasattr(self, "vcf_auth_source_combo"):
             return
-        try:
-            sources = get_adapter(self._get_vcf_env()).list_auth_sources()
-            if sources:
-                self._auth_sources_url = url
-        except Exception as exc:
-            self.logger.warning("Could not list VCF Operations login sources: %s", exc)
-            sources = []
+        if self.vcf_url_input.text().strip() != url:
+            return
+        if sources:
+            self._auth_sources_url = url
         current = self.vcf_auth_source_combo.currentText()
         self.vcf_auth_source_combo.blockSignals(True)
         self.vcf_auth_source_combo.clear()
@@ -620,6 +637,42 @@ class MainWindow(QMainWindow):
             self.vcf_auth_source_combo.addItem(current)
         self.vcf_auth_source_combo.setCurrentText(current or "Local")
         self.vcf_auth_source_combo.blockSignals(False)
+
+    def _load_auth_sources(self, sync: bool = False) -> None:
+        url = self.vcf_url_input.text().strip()
+        if not url or url == getattr(self, "_auth_sources_url", None):
+            return
+        try:
+            env = self._get_vcf_env()
+        except Exception:
+            return
+
+        if sync:
+            try:
+                sources = get_adapter(env).list_auth_sources()
+            except Exception as exc:
+                self.logger.warning("Could not list VCF Operations login sources: %s", exc)
+                sources = []
+            self._apply_auth_sources(url, sources)
+            return
+
+        if getattr(self, "_loading_auth_sources_url", None) == url:
+            return
+        self._loading_auth_sources_url = url
+
+        self.auth_sources_thread = QThread()
+        self.auth_sources_worker = AuthSourcesWorker(env)
+        self.auth_sources_worker.moveToThread(self.auth_sources_thread)
+        self.auth_sources_thread.started.connect(self.auth_sources_worker.run)
+        self.auth_sources_worker.finished.connect(self._on_auth_sources_finished)
+        self.auth_sources_worker.finished.connect(self.auth_sources_thread.quit)
+        self.auth_sources_worker.finished.connect(self.auth_sources_worker.deleteLater)
+        self.auth_sources_thread.finished.connect(self.auth_sources_thread.deleteLater)
+        self.auth_sources_thread.start()
+
+    def _on_auth_sources_finished(self, url: str, sources: list[str]) -> None:
+        self._loading_auth_sources_url = None
+        self._apply_auth_sources(url, sources)
 
     def _on_vcf_ssl_toggled(self, checked: bool) -> None:
         # A CA bundle only matters when certificates are verified

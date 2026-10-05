@@ -994,7 +994,7 @@ def test_main_window_login_source(qapp, tmp_path, monkeypatch):
     monkeypatch.setattr(mw, "get_adapter", lambda env, session=None: WithSources(env=env, connected=True))
     window = MainWindow(state_store=StateStore(state_file=tmp_path / "state.json"))
     window.vcf_url_input.setText("https://ops.corp.local")
-    window._load_auth_sources()
+    window._load_auth_sources(sync=True)
     assert [window.vcf_auth_source_combo.itemText(i) for i in range(window.vcf_auth_source_combo.count())] == ["Local", "VCF SSO"]
 
     window.vcf_auth_type_combo.setCurrentText("Username & Password")
@@ -1018,4 +1018,27 @@ def test_main_window_passwords_are_not_trimmed(qapp, tmp_path):
     window.ep_pass_input.setText(" pw2 ")
     assert window._get_vcf_env().password == " pw with spaces "
     assert window._get_endpoint_target().password == " pw2 "
+
+
+def test_main_window_login_source_async(qapp, tmp_path, monkeypatch):
+    """Auth sources load asynchronously off the GUI thread when editing completes or saved state loads."""
+    from vcf_ops_telegraf_helper.adapters.mock import MockVCFOpsIntegration
+    from vcf_ops_telegraf_helper.gui import main_window as mw
+
+    class WithSources(MockVCFOpsIntegration):
+        def list_auth_sources(self):
+            return ["Corp Active Directory"]
+
+    monkeypatch.setattr(mw, "get_adapter", lambda env, session=None: WithSources(env=env, connected=True))
+    window = MainWindow(state_store=StateStore(state_file=tmp_path / "state.json"))
+    window.vcf_url_input.setText("https://ops.corp.local")
+    window._load_auth_sources()  # runs async
+    assert window.auth_sources_thread is not None
+    window.auth_sources_thread.wait(5000)
+    qapp.processEvents()
+    assert [window.vcf_auth_source_combo.itemText(i) for i in range(window.vcf_auth_source_combo.count())] == [
+        "Local",
+        "Corp Active Directory",
+    ]
+
 

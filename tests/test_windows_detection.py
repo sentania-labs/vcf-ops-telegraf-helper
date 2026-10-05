@@ -8,6 +8,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from vcf_ops_telegraf_helper.executors.base import CommandResult
 from vcf_ops_telegraf_helper.models.endpoint import (
     ConnectionMethod,
+    EndpointDiscoveryResult,
     EndpointTarget,
     OSFamily,
 )
@@ -371,3 +372,64 @@ def test_workflow_restart_uses_discovered_custom_service():
     restart_res = wf.restart_if_needed()
     assert restart_res.status == StageStatus.PASS
     assert any("Restart-Service 'vcf-telegraf' -Force" in c for c in executed_commands)
+
+
+def test_windows_paths_with_apostrophe_escaped_in_workflow():
+    """Verify paths with apostrophes are escaped in restart and validation commands."""
+    from vcf_ops_telegraf_helper.validation.validator import Validator
+
+    mock_exec = MagicMock()
+    executed_commands = []
+
+    def _exec(cmd, **kw):
+        executed_commands.append(cmd)
+        return CommandResult(exit_code=0, stdout="All plugins initialized", command=cmd)
+
+    mock_exec.execute.side_effect = _exec
+
+    # 1. Validator test mode
+    val_res = Validator.validate_telegraf_config_on_endpoint(
+        executor=mock_exec,
+        telegraf_bin=r"C:\Scott's Tools\telegraf.exe",
+        config_path=r"C:\Scott's Tools\telegraf.conf",
+        config_dir=r"C:\Scott's Tools\telegraf.d",
+        is_windows=True,
+    )
+    assert val_res.is_valid is True
+    assert (
+        r"& 'C:\Scott''s Tools\telegraf.exe' --test --config 'C:\Scott''s Tools\telegraf.conf' --config-directory 'C:\Scott''s Tools\telegraf.d'"
+        in executed_commands[-1]
+    )
+
+    # 2. Workflow restart pre-flight check
+    env = VCFEnvironment(name="test", url="https://vcf.local", username="admin", collector=CollectorInfo(address="10.10.10.50"))
+    target = EndpointTarget(
+        hostname="win-app01.local",
+        os_family=OSFamily.WINDOWS,
+        connection_method=ConnectionMethod.WINRM,
+        install_telegraf=True,
+    )
+    wf = ConfigureEndpointWorkflow(
+        environment=env,
+        target=target,
+        monitoring=MonitoringConfig(),
+        executor=mock_exec,
+        adapter=MagicMock(),
+        options=WorkflowOptions(mode=DeploymentMode.PUSH, install_telegraf=True),
+    )
+    wf.discovery = EndpointDiscoveryResult(
+        hostname="win-app01",
+        telegraf_installed=True,
+        telegraf_bin_path=r"C:\Scott's Tools\telegraf.exe",
+        main_config_path=r"C:\Scott's Tools\telegraf.conf",
+        config_dir=r"C:\Scott's Tools\telegraf.d",
+        service_name="telegraf",
+    )
+    restart_res = wf.restart_if_needed()
+    assert restart_res.status == StageStatus.PASS
+    assert any(
+        r"& 'C:\Scott''s Tools\telegraf.exe' --test --config 'C:\Scott''s Tools\telegraf.conf' --config-directory 'C:\Scott''s Tools\telegraf.d'"
+        in c
+        for c in executed_commands
+    )
+

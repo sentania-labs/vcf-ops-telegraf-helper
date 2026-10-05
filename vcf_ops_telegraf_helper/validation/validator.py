@@ -175,7 +175,10 @@ class Validator:
     ) -> ValidationResult:
         """Run Telegraf test mode to validate all plugins and syntax on the endpoint."""
         if is_windows or type(executor).__name__ == "WinRMExecutor":
-            cmd = f"& '{telegraf_bin}' --test --config '{config_path}' --config-directory '{config_dir}'"
+            safe_bin = telegraf_bin.replace("'", "''")
+            safe_cfg = config_path.replace("'", "''")
+            safe_dir = config_dir.replace("'", "''")
+            cmd = f"& '{safe_bin}' --test --config '{safe_cfg}' --config-directory '{safe_dir}'"
         else:
             cmd = f"{telegraf_bin} --test --config {config_path} --config-directory {config_dir}"
         res = executor.execute(cmd, timeout=15)

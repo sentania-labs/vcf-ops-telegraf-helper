@@ -892,8 +892,9 @@ class ConfigureEndpointWorkflow:
 
             # Create destination directory and backup existing fragments/certs
             if is_win:
+                safe_dir = config_dir.replace("'", "''")
                 self.executor.execute(
-                    f"if (-not (Test-Path '{config_dir}')) {{ New-Item -ItemType Directory -Path '{config_dir}' -Force | Out-Null }}"
+                    f"if (-not (Test-Path '{safe_dir}')) {{ New-Item -ItemType Directory -Path '{safe_dir}' -Force | Out-Null }}"
                 )
                 for f_name in (
                     "vcf-helper-system.conf", "cloudproxy-http.conf",
@@ -903,7 +904,8 @@ class ConfigureEndpointWorkflow:
                 ):
                     f_dest = f"{config_dir}\\{f_name}"
                     if self.executor.file_exists(f_dest):
-                        self.executor.execute(f"Copy-Item -Path '{f_dest}' -Destination '{f_dest}.bak' -Force")
+                        safe_dest = f_dest.replace("'", "''")
+                        self.executor.execute(f"Copy-Item -Path '{safe_dest}' -Destination '{safe_dest}.bak' -Force")
             else:
                 self.executor.execute(f"mkdir -p {shlex.quote(config_dir)}")
                 for f_name in (
@@ -937,7 +939,8 @@ class ConfigureEndpointWorkflow:
                 exists = self.executor.file_exists(main_cfg)
                 if exists:
                     if is_win:
-                        self.executor.execute(f"Copy-Item -Path '{main_cfg}' -Destination '{main_cfg}.bak' -Force")
+                        safe_cfg = main_cfg.replace("'", "''")
+                        self.executor.execute(f"Copy-Item -Path '{safe_cfg}' -Destination '{safe_cfg}.bak' -Force")
                     else:
                         self.executor.execute(f"cp {shlex.quote(main_cfg)} {shlex.quote(f'{main_cfg}.bak')}")
                 if exists and not self.executor.file_exists(f"{main_cfg}.orig"):
@@ -1030,13 +1033,15 @@ class ConfigureEndpointWorkflow:
             parts = []
             for f in files_to_restore:
                 fpath = f"{config_dir}\\{f}"
+                safe_fp = fpath.replace("'", "''")
                 parts.append(
-                    f"if (Test-Path '{fpath}.bak') {{ Move-Item -Path '{fpath}.bak' -Destination '{fpath}' -Force }} "
-                    f"else {{ Remove-Item -Path '{fpath}' -Force -ErrorAction SilentlyContinue }};"
+                    f"if (Test-Path '{safe_fp}.bak') {{ Move-Item -Path '{safe_fp}.bak' -Destination '{safe_fp}' -Force }} "
+                    f"else {{ Remove-Item -Path '{safe_fp}' -Force -ErrorAction SilentlyContinue }};"
                 )
+            safe_cfg = main_cfg.replace("'", "''")
             parts.append(
-                f"if (Test-Path '{main_cfg}.bak') {{ Move-Item -Path '{main_cfg}.bak' -Destination '{main_cfg}' -Force }} "
-                f"elseif (-not (Test-Path '{main_cfg}.orig')) {{ Remove-Item -Path '{main_cfg}' -Force -ErrorAction SilentlyContinue }};"
+                f"if (Test-Path '{safe_cfg}.bak') {{ Move-Item -Path '{safe_cfg}.bak' -Destination '{safe_cfg}' -Force }} "
+                f"elseif (-not (Test-Path '{safe_cfg}.orig')) {{ Remove-Item -Path '{safe_cfg}' -Force -ErrorAction SilentlyContinue }};"
             )
             rollback_script = " ".join(parts)
             self.executor.execute(rollback_script, timeout=15)
@@ -1061,7 +1066,13 @@ class ConfigureEndpointWorkflow:
         """Remove .bak backup files on successful verification."""
         try:
             if is_win:
-                cleanup_cmd = f"Remove-Item -Path '{config_dir}\\*.bak', 'C:\\telegraf\\telegraf.conf.bak' -Force -ErrorAction SilentlyContinue"
+                safe_dir = config_dir.replace("'", "''")
+                safe_cfg = (
+                    self.discovery.main_config_path.replace("'", "''")
+                    if self.discovery and self.discovery.main_config_path
+                    else "C:\\telegraf\\telegraf.conf"
+                )
+                cleanup_cmd = f"Remove-Item -Path '{safe_dir}\\*.bak', '{safe_cfg}.bak' -Force -ErrorAction SilentlyContinue"
             else:
                 sudo_pfx = "sudo -n " if getattr(self.executor, "use_sudo", False) else ""
                 cleanup_cmd = f"{sudo_pfx}rm -f {shlex.quote(config_dir)}/*.bak /etc/telegraf/telegraf.conf.bak 2>/dev/null || true"
@@ -1120,7 +1131,10 @@ class ConfigureEndpointWorkflow:
 
             # Pre-flight check on endpoint before service restart
             if is_win:
-                test_cmd = f"& '{telegraf_bin}' --test --config '{main_cfg}' --config-directory '{config_dir}'"
+                safe_bin = telegraf_bin.replace("'", "''")
+                safe_cfg = main_cfg.replace("'", "''")
+                safe_dir = config_dir.replace("'", "''")
+                test_cmd = f"& '{safe_bin}' --test --config '{safe_cfg}' --config-directory '{safe_dir}'"
             else:
                 test_cmd = f"{telegraf_bin} --test --config {main_cfg} --config-directory {config_dir}"
 
