@@ -95,6 +95,7 @@ from vcf_ops_telegraf_helper.renderer.renderer import TelegrafRenderer
 from vcf_ops_telegraf_helper.storage.state import StateStore
 from vcf_ops_telegraf_helper.workflow.engine import ConfigureEndpointWorkflow
 from vcf_ops_telegraf_helper.workflow.uninstall import UninstallEndpointWorkflow
+from vcf_ops_telegraf_helper.workflow.windows import detect_windows_telegraf
 from vcf_ops_telegraf_helper.gui.discovery_dialogs import (
     DatabaseConnectDialog,
     DatabaseDiscoveryDialog,
@@ -1360,15 +1361,16 @@ class MainWindow(QMainWindow):
                 installed = False
                 version_str = "N/A"
                 running = False
+                binary_path = None
+                service_name = None
                 if target.connection_method in (ConnectionMethod.WINRM, ConnectionMethod.LOCAL):
                     if target.connection_method == ConnectionMethod.WINRM or sys.platform == "win32":
-                        installed = executor.file_exists("C:\\telegraf\\telegraf.exe")
-                        if installed:
-                            ver_res = executor.execute("C:\\telegraf\\telegraf.exe version", timeout=10)
-                            if ver_res.success:
-                                version_str = ver_res.stdout.strip()
-                        svc_res = executor.execute("sc.exe query telegraf", timeout=10)
-                        running = svc_res.success and "RUNNING" in svc_res.stdout
+                        win_det = detect_windows_telegraf(executor)
+                        installed = win_det.installed
+                        binary_path = win_det.binary_path
+                        service_name = win_det.service_name
+                        version_str = win_det.version or "N/A"
+                        running = win_det.running
                         caption_res = executor.execute("(Get-CimInstance Win32_OperatingSystem).Caption", timeout=10)
                         if caption_res.success and caption_res.stdout.strip():
                             os_version = caption_res.stdout.strip().splitlines()[0]
@@ -1400,9 +1402,15 @@ class MainWindow(QMainWindow):
                     f"Telegraf Installed: {inst_str}",
                     f"Telegraf Version: {version_str}",
                     f"Service Running: {'YES' if running else 'NO'}",
+                ]
+                if binary_path:
+                    details.append(f"Telegraf Binary: {binary_path}")
+                if service_name:
+                    details.append(f"Service Name: {service_name}")
+                details.extend([
                     "Config Directory: C:\\telegraf\\telegraf.d",
                     "Agent Distribution: InfluxData Official Open-Source",
-                ]
+                ])
                 self.ep_details_box.setPlainText("\n".join(details))
                 self.state_store.record_endpoint(target.hostname)
                 self.logger.info("Endpoint discovered successfully: %s (hostname: %s)", target.hostname, disc_name)

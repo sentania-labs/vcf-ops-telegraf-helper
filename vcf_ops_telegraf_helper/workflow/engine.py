@@ -34,6 +34,7 @@ from vcf_ops_telegraf_helper.renderer.renderer import TelegrafRenderer
 from vcf_ops_telegraf_helper.security.redaction import redact_secrets
 from vcf_ops_telegraf_helper.validation.validator import Validator
 from vcf_ops_telegraf_helper.workflow.progress import ProgressReporter, SilentProgressReporter
+from vcf_ops_telegraf_helper.workflow.windows import detect_windows_telegraf
 
 
 class ConfigureEndpointWorkflow:
@@ -200,17 +201,11 @@ class ConfigureEndpointWorkflow:
                 ver_res = self.executor.execute("(Get-CimInstance Win32_OperatingSystem).Caption", timeout=10)
                 os_version = ver_res.stdout.strip() if ver_res.success and ver_res.stdout.strip() else "Microsoft Windows"
 
-                chk_bin = self.executor.execute("Test-Path 'C:\\telegraf\\telegraf.exe'", timeout=10)
-                installed = chk_bin.success and "True" in chk_bin.stdout
-
-                version_str = None
-                if installed:
-                    ver_bin = self.executor.execute("& 'C:\\telegraf\\telegraf.exe' version", timeout=10)
-                    if ver_bin.success:
-                        version_str = ver_bin.stdout.strip()
-
-                svc_res = self.executor.execute("(Get-Service telegraf -ErrorAction SilentlyContinue).Status", timeout=10)
-                service_state = svc_res.stdout.strip() if svc_res.success and svc_res.stdout.strip() else "Stopped"
+                win_det = detect_windows_telegraf(self.executor)
+                installed = win_det.installed
+                version_str = win_det.version
+                service_state = win_det.service_state or ("Running" if win_det.running else "Stopped")
+                telegraf_bin = win_det.binary_path or "C:\\telegraf\\telegraf.exe"
 
                 uuid_res = self.executor.execute("(Get-CimInstance Win32_ComputerSystemProduct).UUID", timeout=10)
                 host_uuid = uuid_res.stdout.strip() if uuid_res.success else ""
@@ -246,7 +241,7 @@ class ConfigureEndpointWorkflow:
                     service_state=service_state,
                     config_dir="C:\\telegraf\\telegraf.d",
                     main_config_path="C:\\telegraf\\telegraf.conf",
-                    telegraf_bin_path="C:\\telegraf\\telegraf.exe",
+                    telegraf_bin_path=telegraf_bin,
                     host_uuid=host_uuid,
                     host_ip=host_ip,
                 )
