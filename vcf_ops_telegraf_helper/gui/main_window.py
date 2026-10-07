@@ -363,18 +363,6 @@ class MainWindow(QMainWindow):
 
         side_layout.addStretch()
 
-        status_box = QFrame()
-        status_box.setProperty("class", "lattice-card")
-        sb_layout = QVBoxLayout(status_box)
-        sb_layout.setContentsMargins(8, 8, 8, 8)
-        sb_label = QLabel("SYSTEM CONTEXT")
-        sb_label.setProperty("class", "lattice-section-label")
-        sb_layout.addWidget(sb_label)
-        self.sb_text = QLabel("Mode: Local Push\nVCF: 9.1 Compatibility\nState: Local JSON")
-        self.sb_text.setProperty("class", "lattice-caption")
-        sb_layout.addWidget(self.sb_text)
-        side_layout.addWidget(status_box)
-
         body_layout.addWidget(sidebar)
 
         # Right Stacked Pages
