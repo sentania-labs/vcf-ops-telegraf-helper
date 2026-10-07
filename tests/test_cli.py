@@ -269,6 +269,7 @@ def test_wizard_windows_monitoring_flow():
     """Verify interactive wizard with Windows target selects WinPerf baseline and Windows commands."""
     from vcf_ops_telegraf_helper.cli.wizard import run_wizard
     from unittest.mock import MagicMock
+    from vcf_ops_telegraf_helper.adapters.mock import MockVCFOpsIntegration
 
     prompt_answers = [
         "https://vcf-ops.local",  # vcf_url
@@ -287,8 +288,7 @@ def test_wizard_windows_monitoring_flow():
         False,  # verify_ssl
         False,  # winrm_ssl
         True,   # auto_install
-        True,   # enable_win_perf
-        True,   # enable_win_svc
+        True,   # recommended Windows baseline
         False,  # proceed (abort before execution)
     ]
 
@@ -296,13 +296,8 @@ def test_wizard_windows_monitoring_flow():
     with patch("rich.prompt.Prompt.ask", side_effect=prompt_answers), \
          patch("rich.prompt.Confirm.ask", side_effect=confirm_answers), \
          patch("vcf_ops_telegraf_helper.cli.wizard.display_preview") as mock_preview, \
-         patch("vcf_ops_telegraf_helper.adapters.mock.MockVCFOpsIntegration.validate_connection", return_value=True), \
-         patch("vcf_ops_telegraf_helper.cli.wizard.get_adapter") as mock_get_adapter:
-
-        mock_adapter = MagicMock()
-        mock_adapter.validate_connection.return_value = True
-        mock_adapter.detect_version.return_value = "9.1.0"
-        mock_get_adapter.return_value = mock_adapter
+         patch("vcf_ops_telegraf_helper.cli.wizard.WinRMExecutor", return_value=MockExecutor()), \
+         patch("vcf_ops_telegraf_helper.cli.wizard.get_adapter", side_effect=MockVCFOpsIntegration):
 
         run_wizard(console=mock_console)
 
@@ -311,7 +306,7 @@ def test_wizard_windows_monitoring_flow():
         assert "[[inputs.win_perf_counters]]" in sys_toml
         assert "[[inputs.win_services]]" in sys_toml
         assert "[[inputs.cpu]]" not in sys_toml
-        assert "Restart-Service telegraf -Force" in planned
+        assert "Service: telegraf" in planned
 
 
 def test_cli_render_all_linux_baseline_cleared():
