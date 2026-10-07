@@ -87,6 +87,13 @@ Desktop API trust uses the operating system certificate store, including Windows
 
 Reruns preserve deployed helper inputs unless `--replace-inputs` is selected. Other configuration fragments are retained. Unmanaged inputs in the main configuration require review before onboarding. Use `--dry-run` to inspect the prepared configuration and input diff without changing endpoint files; preparation may request a certificate from Ops. In the GUI, Step 5 is an offline template and Step 6 dry-run populates the exact prepared configuration. Live ingestion remains pending until Ops returns a sample newer than the run.
 
+The VM picker starts with all agent states and lets you drag column boundaries to resize them.
+Target detection selects the latest recommended agent when none is installed and keeps an
+existing agent by default. An explicit installation/version choice is retained. Perfmon
+selections appear directly in the counter panel; the Baseline preset resets additions.
+Connection and discovery queries show an animated waiting dialog. After a successful apply,
+you can exit or go back to revise settings and run again; Execute remains disabled until then.
+
 ## Quick Start
 
 ### 1. Native Desktop GUI (Lattice Design)

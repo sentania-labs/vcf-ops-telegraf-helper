@@ -72,11 +72,21 @@ class ProcessesInputConfig(BaseModel):
     enabled: bool = False
 
 
+class PerfmonObject(BaseModel):
+    """Additional counter selections, merged into the standard Windows input."""
+
+    object_name: str
+    counters: List[str] = Field(default_factory=lambda: ["*"])
+    instances: List[str] = Field(default_factory=lambda: ["*"])
+    measurement: str
+
+
 class WinPerfCountersInputConfig(BaseModel):
     """Configuration for Windows Performance Counters plugin."""
 
     enabled: bool = False
     print_valid: bool = True
+    additional_objects: List[PerfmonObject] = Field(default_factory=list)
     process_instances: List[str] = Field(default_factory=lambda: ["_Total", "telegraf"])
 
 

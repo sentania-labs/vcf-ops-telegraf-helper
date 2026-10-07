@@ -47,6 +47,7 @@ from vcf_ops_telegraf_helper.models.monitoring import (
     SwapInputConfig,
     SystemInputConfig,
     WinPerfCountersInputConfig,
+    PerfmonObject,
     WinServicesInputConfig,
 )
 from vcf_ops_telegraf_helper.models.vcf import CollectorInfo, VCFEnvironment
@@ -127,7 +128,7 @@ def gui_smoke_cmd() -> None:
         window.show()
         app.processEvents()
         image = window.grab()
-        if image.isNull() or window.width() > 1024 or window.height() > 740:
+        if image.isNull() or window.windowIcon().isNull() or window.width() > 1024 or window.height() > 740:
             raise click.ClickException("GUI did not render within a VM console")
         window.close()
     click.echo("GUI smoke passed")
@@ -169,6 +170,7 @@ def resolve_monitoring_config(
     diskio: Optional[bool] = None,
     processes: Optional[bool] = None,
     win_perf: Optional[bool] = None,
+    win_perf_object: tuple[str, ...] = (),
     win_services: Optional[str] = None,
     no_win_services: bool = False,
     nginx: Optional[str] = None,
@@ -226,6 +228,17 @@ def resolve_monitoring_config(
     if no_win_services:
         effective_win_svc = False
 
+    additional_objects = []
+    if win_perf_object:
+        if not is_win or win_perf is False:
+            raise click.BadParameter("Additional Perfmon objects require Windows performance counters", param_hint="--win-perf-object")
+        for value in win_perf_object:
+            try:
+                additional_objects.append(PerfmonObject.model_validate_json(value))
+            except ValueError as exc:
+                raise click.BadParameter("Expected a Perfmon object JSON with object_name, counters, instances, and measurement", param_hint="--win-perf-object") from exc
+        effective_win_perf = True
+
     svc_list = [s.strip() for s in win_services.split(",") if s.strip()] if win_services else ["telegraf"]
 
     return MonitoringConfig(
@@ -237,7 +250,7 @@ def resolve_monitoring_config(
         swap=SwapInputConfig(enabled=effective_swap),
         diskio=DiskIoInputConfig(enabled=effective_diskio),
         processes=ProcessesInputConfig(enabled=effective_proc),
-        win_perf_counters=WinPerfCountersInputConfig(enabled=effective_win_perf),
+        win_perf_counters=WinPerfCountersInputConfig(enabled=effective_win_perf, additional_objects=additional_objects),
         win_services=WinServicesInputConfig(enabled=effective_win_svc, service_names=svc_list),
         nginx=NginxInputConfig(enabled=bool(nginx), urls=[nginx] if nginx else ["http://localhost/status"]),
         apache=ApacheInputConfig(enabled=bool(apache), urls=[apache] if apache else ["http://localhost/server-status?auto"]),
@@ -291,6 +304,7 @@ def resolve_monitoring_config(
 @click.option("--diskio/--no-diskio", default=None, help="Enable or disable disk I/O monitoring")
 @click.option("--processes/--no-processes", default=None, help="Enable or disable process count monitoring")
 @click.option("--win-perf/--no-win-perf", default=None, help="Enable or disable Windows performance counters")
+@click.option("--win-perf-object", multiple=True, help="Additional Perfmon object as JSON (repeatable)")
 @click.option("--win-services", default=None, help="Comma-separated Windows services to monitor")
 @click.option("--no-win-services", is_flag=True, default=False, help="Disable Windows services monitoring")
 @click.option("--nginx", default=None, help="NGINX status URL (e.g. http://localhost/status)")
@@ -347,6 +361,7 @@ def run_cmd(
     diskio: Optional[bool],
     processes: Optional[bool],
     win_perf: Optional[bool],
+    win_perf_object: tuple[str, ...],
     win_services: Optional[str],
     no_win_services: bool,
     nginx: Optional[str],
@@ -438,6 +453,7 @@ def run_cmd(
         diskio=diskio,
         processes=processes,
         win_perf=win_perf,
+        win_perf_object=win_perf_object,
         win_services=win_services,
         no_win_services=no_win_services,
         nginx=nginx,
@@ -671,6 +687,7 @@ def vms_cmd(
 @click.option("--diskio/--no-diskio", default=None, help="Enable or disable disk I/O monitoring")
 @click.option("--processes/--no-processes", default=None, help="Enable or disable process count monitoring")
 @click.option("--win-perf/--no-win-perf", default=None, help="Enable or disable Windows performance counters")
+@click.option("--win-perf-object", multiple=True, help="Additional Perfmon object as JSON (repeatable)")
 @click.option("--win-services", default=None, help="Comma-separated Windows services to monitor")
 @click.option("--no-win-services", is_flag=True, default=False, help="Disable Windows services monitoring")
 @click.option("--nginx", default=None, help="NGINX status URL (e.g. http://localhost/status)")
@@ -696,6 +713,7 @@ def render_cmd(
     diskio: Optional[bool],
     processes: Optional[bool],
     win_perf: Optional[bool],
+    win_perf_object: tuple[str, ...],
     win_services: Optional[str],
     no_win_services: bool,
     nginx: Optional[str],
@@ -714,7 +732,7 @@ def render_cmd(
     if target_os:
         is_win = target_os.lower() == "windows"
     else:
-        is_win = bool(win_perf or win_services or no_win_services or (win_perf is False))
+        is_win = bool(win_perf_object or win_perf or win_services or no_win_services or (win_perf is False))
 
     cfg = resolve_monitoring_config(
         is_win=is_win,
@@ -728,6 +746,7 @@ def render_cmd(
         diskio=diskio,
         processes=processes,
         win_perf=win_perf,
+        win_perf_object=win_perf_object,
         win_services=win_services,
         no_win_services=no_win_services,
         nginx=nginx,

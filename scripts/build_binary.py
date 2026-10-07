@@ -4,6 +4,7 @@ from importlib.metadata import version
 from pathlib import Path
 import plistlib
 import re
+import struct
 import subprocess
 import sys
 import tempfile
@@ -35,6 +36,38 @@ def mac_icon() -> Path:
     return icon
 
 
+def windows_icon() -> Path:
+    """Encode all Windows icon sizes as PNG entries in one ICO container."""
+    from PySide6.QtCore import Qt, QBuffer, QByteArray, QIODevice
+    from PySide6.QtGui import QImage, QPainter
+    from PySide6.QtSvg import QSvgRenderer
+
+    renderer = QSvgRenderer('vcf_ops_telegraf_helper/gui/assets/app.svg')
+    sizes = (16, 32, 48, 64, 128, 256)
+    images = []
+    for size in sizes:
+        image = QImage(size, size, QImage.Format_ARGB32)
+        image.fill(Qt.transparent)
+        painter = QPainter(image)
+        renderer.render(painter)
+        painter.end()
+        data = QByteArray()
+        buffer = QBuffer(data)
+        buffer.open(QIODevice.WriteOnly)
+        if not image.save(buffer, 'PNG'):
+            raise RuntimeError('Could not render Windows icon')
+        images.append(bytes(data))
+    offset = 6 + 16 * len(sizes)
+    entries = []
+    for size, data in zip(sizes, images):
+        entries.append(struct.pack('<BBBBHHII', size % 256, size % 256, 0, 0, 1, 32, len(data), offset))
+        offset += len(data)
+    icon = Path('build/vcf-telegraf-helper.ico').resolve()
+    icon.parent.mkdir(exist_ok=True)
+    icon.write_bytes(struct.pack('<HHH', 0, 1, len(sizes)) + b''.join(entries) + b''.join(images))
+    return icon
+
+
 def build(platform: str) -> None:
     mac = platform.startswith('macos-')
     name = 'vcf-telegraf-helper' if mac else f'vcf-telegraf-helper-{platform}'
@@ -42,6 +75,8 @@ def build(platform: str) -> None:
                'net.sentania.vcf-telegraf-helper'] if mac else ['--onefile']
     if mac:
         options += ['--icon', str(mac_icon())]
+    elif platform == 'windows':
+        options += ['--icon', str(windows_icon())]
     subprocess.run([
         sys.executable, '-m', 'PyInstaller', *options, '--clean', '--noconfirm',
         '--name', name,
@@ -49,7 +84,7 @@ def build(platform: str) -> None:
         '--collect-all', 'vcf_ops_telegraf_helper', '--collect-all', 'tzdata',
         '--collect-all', 'winrm', '--collect-all', 'truststore',
         '--hidden-import', 'PySide6.QtCore', '--hidden-import', 'PySide6.QtGui',
-        '--hidden-import', 'PySide6.QtWidgets', 'vcf_ops_telegraf_helper/cli/main.py',
+        '--hidden-import', 'PySide6.QtSvg', '--hidden-import', 'PySide6.QtWidgets', 'vcf_ops_telegraf_helper/cli/main.py',
     ], check=True)
     if mac:
         app = Path('dist/VCF Telegraf Helper.app')

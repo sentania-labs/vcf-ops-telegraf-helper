@@ -898,3 +898,30 @@ def test_macos_source_no_args_keeps_help(monkeypatch):
     assert result.exit_code == 0
     assert "Usage:" in result.output
     gui.assert_not_called()
+
+
+@pytest.mark.parametrize('command', ['render', 'run'])
+def test_cli_additional_perfmon_roundtrip(command, monkeypatch):
+    from vcf_ops_telegraf_helper.cli import main
+    from vcf_ops_telegraf_helper.models.monitoring import PerfmonObject
+    obj = PerfmonObject(object_name='Process', measurement='win_process', counters=['Extra "counter"'], instances=['*'])
+    captured = []
+    original = main.resolve_monitoring_config
+    def capture(**kwargs):
+        config = original(**kwargs)
+        captured.append(config)
+        return config
+    monkeypatch.setattr(main, 'resolve_monitoring_config', capture)
+    args = [command, '--os', 'windows', '--win-perf-object', obj.model_dump_json()]
+    if command == 'run':
+        args += ['--vcf-url', 'https://vcf.local', '--collector', 'collector.local', '--target-host', 'win.local', '--connection', 'mock', '--mock-vcf', '--dry-run']
+    result = CliRunner().invoke(cli, args)
+    assert result.exit_code == 0, result.output
+    assert captured[0].win_perf_counters.additional_objects == [obj]
+
+
+@pytest.mark.parametrize('value', ['invalid', '{}', '{"counters": ["x"]}'])
+def test_cli_rejects_invalid_perfmon_object(value):
+    result = CliRunner().invoke(cli, ['render', '--os', 'windows', '--win-perf-object', value])
+    assert result.exit_code == 2
+    assert '--win-perf-object' in result.output
