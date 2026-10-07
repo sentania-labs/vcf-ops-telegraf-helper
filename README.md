@@ -44,9 +44,13 @@ Windows releases are Authenticode signed. Mac apps are Developer ID signed, nota
 5. **Review & Preview:** inspect the offline configuration template.
 6. **Execute & Verify:** use dry-run to inspect the exact prepared configuration, then apply it. After a successful apply, exit or go back to revise options and run again.
 
+On Windows, desktop launch hides the executable's console window. Commands launched in an existing terminal retain their output.
+
+A small **New version available** link beneath the app name opens the newer release page. The app checks GitHub in the background at most once a day, with no login or Ops credentials. Offline or failed checks stay silent.
+
 The app shows progress while connecting and querying. Dry-run leaves endpoint files unchanged, but preparation may request a client certificate from Ops. Fresh agent data can take a collection cycle to appear; a running service alone does not establish ingestion.
 
-**Already running an Ops-managed agent?** Takeover is not supported in v0.7.5. Manage that installation through Ops; detecting a Windows `ucp-telegraf` service stops onboarding.
+**Already running an Ops-managed agent?** Takeover is not supported yet. Manage that installation through Ops; detecting a Windows `ucp-telegraf` service stops onboarding.
 
 ## Verify downloads (optional)
 

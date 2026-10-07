@@ -1238,3 +1238,42 @@ def test_repeat_command_preserves_discovered_perfmon(qapp, tmp_path):
     assert result.exit_code == 0
     expected = TelegrafRenderer.render_system_inputs(window._get_monitoring_config())
     assert expected in result.output
+
+
+def test_update_notice_matches_mock_and_theme(qapp, tmp_path):
+    from vcf_ops_telegraf_helper.updates import ReleaseNotice, RELEASES
+    window = MainWindow(StateStore(state_file=tmp_path / 'state.json'))
+    window.show()
+    assert window.update_notice.isHidden()
+    notice = ReleaseNotice('v0.7.6', f'{RELEASES}/tag/v0.7.6')
+    window._show_release_notice(notice)
+    assert not window.update_notice.isHidden()
+    assert 'New version available: v0.7.6' in window.update_notice.text()
+    assert notice.url in window.update_notice.text()
+    assert window.update_notice.openExternalLinks()
+    assert '#8fbcf5' in window.update_notice.text()
+    window._toggle_theme()
+    assert '#12376f' in window.update_notice.text()
+    window.close()
+
+
+def test_update_check_returns_through_gui_timer(qapp, monkeypatch, tmp_path):
+    from unittest.mock import Mock
+    from vcf_ops_telegraf_helper.updates import ReleaseNotice, RELEASES
+    notice = ReleaseNotice('v0.7.6', f'{RELEASES}/tag/v0.7.6')
+    check = Mock(return_value=notice)
+    monkeypatch.setattr('vcf_ops_telegraf_helper.updates.check_release', check)
+    class ImmediateThread:
+        def __init__(self, target, **kwargs):
+            self.target = target
+        def start(self):
+            self.target()
+    monkeypatch.setattr('threading.Thread', ImmediateThread)
+    window = MainWindow(StateStore(state_file=tmp_path / 'state.json'))
+    window.start_update_check()
+    window._update_timer.timeout.emit()
+    assert window._release_notice == notice
+    assert not window._update_timer.isActive()
+    window.start_update_check()
+    check.assert_called_once()
+    window.close()

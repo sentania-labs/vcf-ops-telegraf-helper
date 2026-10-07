@@ -106,6 +106,7 @@ def run_gui(theme: str = "dark") -> int:
             window.current_theme = theme
             window._apply_theme()
         window.show()
+        window.start_update_check()
         if smoke_report:
             from PySide6.QtCore import QTimer
 
