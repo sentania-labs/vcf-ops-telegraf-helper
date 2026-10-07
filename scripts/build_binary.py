@@ -76,7 +76,7 @@ def build(platform: str) -> None:
     if mac:
         options += ['--icon', str(mac_icon())]
     elif platform == 'windows':
-        options += ['--icon', str(windows_icon())]
+        options += ['--icon', str(windows_icon()), '--hide-console', 'hide-early']
     subprocess.run([
         sys.executable, '-m', 'PyInstaller', *options, '--clean', '--noconfirm',
         '--name', name,
