@@ -40,6 +40,7 @@ CMD ["/usr/sbin/sshd", "-D", "-e"]
         assert result.status == StageStatus.PASS, result.message
         assert executor.execute(workflow._package_check()).stdout.strip() == 'ABSENT'
         assert not executor.execute('id telegraf').success
+        assert workflow.remove_package().status == StageStatus.PASS, "Repeat purge must also handle an absent package"
         executor.close()
         wrong.close()
         print('PASS: real SSH password auth, protected sudo read, apt purge and account removal')

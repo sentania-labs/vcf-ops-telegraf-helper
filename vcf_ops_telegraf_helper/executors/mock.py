@@ -118,7 +118,7 @@ class MockExecutor(EndpointExecutor):
             self.service_active = False
             return CommandResult(exit_code=0, stdout="", command=command)
 
-        if "dpkg-query -W" in command:
+        if "packages=$(dpkg-query -W" in command:
             return CommandResult(exit_code=0, stdout="PRESENT" if self.telegraf_installed else "ABSENT", command=command)
 
         if (

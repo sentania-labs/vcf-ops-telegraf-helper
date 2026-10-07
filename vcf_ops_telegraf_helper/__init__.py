@@ -6,5 +6,8 @@ A local administrator utility for configuring open-source Telegraf for VCF Opera
 try:
     from vcf_ops_telegraf_helper._version import __version__
 except ImportError:
-    from importlib.metadata import version
-    __version__ = version("vcf-ops-telegraf-helper")
+    from importlib.metadata import PackageNotFoundError, version
+    try:
+        __version__ = version("vcf-ops-telegraf-helper")
+    except PackageNotFoundError:
+        __version__ = "0.0.0+source"

@@ -197,11 +197,13 @@ class UninstallEndpointWorkflow:
                     # Run the whole script under sudo, including env assignments and fallbacks.
                     script = """set -e
 if command -v apt-get >/dev/null; then
-    env DEBIAN_FRONTEND=noninteractive apt-get purge -y -qq telegraf
+    if dpkg-query -W telegraf >/dev/null 2>&1; then
+        env DEBIAN_FRONTEND=noninteractive apt-get purge -y -qq telegraf
+    fi
 elif command -v dnf >/dev/null; then
-    dnf remove -y -q telegraf
+    if rpm -q telegraf >/dev/null 2>&1; then dnf remove -y -q telegraf; fi
 elif command -v yum >/dev/null; then
-    yum remove -y -q telegraf
+    if rpm -q telegraf >/dev/null 2>&1; then yum remove -y -q telegraf; fi
 fi
 rm -f /usr/bin/telegraf /usr/local/bin/telegraf /lib/systemd/system/telegraf.service /etc/systemd/system/telegraf.service
 rm -rf /etc/default/telegraf /usr/lib/telegraf

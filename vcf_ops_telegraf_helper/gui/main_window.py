@@ -11,7 +11,6 @@ Provides the complete 5-step guided onboarding workflow:
 from __future__ import annotations
 
 from pathlib import Path
-import ntpath
 import shlex
 import sys
 from typing import Any, Optional
@@ -1460,7 +1459,7 @@ class MainWindow(QMainWindow):
                         win_det = detect_windows_telegraf(executor)
                         if (win_det.service_name or "").lower() == "ucp-telegraf" or "ucp-telegraf" in (win_det.binary_path or "").lower():
                             raise RuntimeError("VCF Operations owns this ucp-telegraf agent. Manage it through Ops.")
-                        self.detected_config_dir = ntpath.join(ntpath.dirname(win_det.binary_path or r"C:\telegraf\telegraf.exe"), "telegraf.d")
+                        self.detected_config_dir = win_det.config_dir
                         installed = win_det.installed
                         binary_path = win_det.binary_path
                         service_name = win_det.service_name
@@ -2520,7 +2519,7 @@ class MainWindow(QMainWindow):
         mon = self._get_monitoring_config()
 
         is_win = target.os_family == OSFamily.WINDOWS
-        conf_dir = "C:\\telegraf\\telegraf.d" if is_win else "/etc/telegraf/telegraf.d"
+        conf_dir = getattr(self, "detected_config_dir", None) or ("C:\\telegraf\\telegraf.d" if is_win else "/etc/telegraf/telegraf.d")
         default_ca = f"{conf_dir}\\ca.pem" if is_win else f"{conf_dir}/ca.pem"
         default_cert = f"{conf_dir}\\cert.pem" if is_win else f"{conf_dir}/cert.pem"
         default_key = f"{conf_dir}\\key.pem" if is_win else f"{conf_dir}/key.pem"
@@ -2529,7 +2528,10 @@ class MainWindow(QMainWindow):
         sys_toml = renderer.render_system_inputs(mon)
         out_toml = renderer.render_vcf_output(
             collector_address=env.collector.address,
-            hostname=target.hostname,
+            hostname=target.registered_hostname or target.hostname,
+            is_windows=is_win,
+            vm_mor=target.vm_mor,
+            vc_id=target.vc_id,
             verify_ssl=env.agent_verify_ssl,
             ca_cert_path=default_ca,
             cert_path=default_cert,
@@ -2941,7 +2943,7 @@ class MainWindow(QMainWindow):
         v_lines = [
             "",
             "============================================================",
-            f"OPERATIONAL VERIFICATION: {'PASS' if summary.success else 'FAIL'}",
+            f"WORKFLOW RESULT: {outcome}",
             "============================================================",
         ]
         if summary.verifications:
@@ -3034,7 +3036,7 @@ class MainWindow(QMainWindow):
 
         if is_win:
             key_filename = None
-            password = self.ep_pass_input.text() or None
+            password = self.ep_pass_input.text()
         else:
             use_key = hasattr(self, "ep_auth_radio_key") and self.ep_auth_radio_key.isChecked()
             if use_key:
@@ -3042,7 +3044,7 @@ class MainWindow(QMainWindow):
                 password = None
             else:
                 key_filename = None
-                password = self.ep_pass_input.text() or None
+                password = self.ep_pass_input.text()
 
         reg_hname = getattr(self, "selected_vm_name", None) or getattr(self, "discovered_hostname", None)
 

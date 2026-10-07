@@ -579,7 +579,7 @@ def test_main_window_worker_finished_summary_handling(qapp, tmp_path):
     assert window.export_md_btn.isEnabled()
     assert window.export_json_btn.isEnabled()
     log_text = window.stage_list_box.toPlainText()
-    assert "OPERATIONAL VERIFICATION: PASS" in log_text
+    assert "WORKFLOW RESULT: SUCCESS" in log_text
     assert "Telegraf installed" in log_text
     assert "Collector reachable" in log_text
 
@@ -1096,3 +1096,9 @@ def test_powershell_repeat_command_quotes_paths(qapp, tmp_path, monkeypatch):
     assert "O''Brien" in command
     assert '\n' not in command
     assert '--install-telegraf' not in command
+
+
+def test_blank_password_mode_does_not_enable_ambient_ssh_keys(qapp, tmp_path):
+    window = MainWindow(state_store=StateStore(state_file=tmp_path / 'state.json'))
+    window.ep_auth_radio_pass.setChecked(True)
+    assert window._get_endpoint_target().password == ''

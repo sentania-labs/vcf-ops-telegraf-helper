@@ -160,3 +160,17 @@ def test_deployed_database_password_not_in_report_diff():
     assert 'SYNTHETIC_PASSWORD' not in summary.to_json()
     assert 'SYNTHETIC_PASSWORD' not in summary.to_markdown()
     assert '[REDACTED]' in summary.to_markdown()
+
+
+def test_source_import_without_installed_metadata(tmp_path):
+    import subprocess
+    import sys
+    from pathlib import Path
+    source = Path(__file__).parents[1] / 'vcf_ops_telegraf_helper' / '__init__.py'
+    package = tmp_path / 'vcf_ops_telegraf_helper'
+    package.mkdir()
+    (package / '__init__.py').write_text(source.read_text())
+    result = subprocess.run([sys.executable, '-S', '-c',
+                             'import vcf_ops_telegraf_helper as app; print(app.__version__)'],
+                            cwd=tmp_path, capture_output=True, text=True, check=True)
+    assert result.stdout.strip() == '0.0.0+source'

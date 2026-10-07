@@ -483,3 +483,14 @@ def test_standalone_process_registers_service_on_restart():
     assert any("Restart-Service telegraf -Force" in c for c in executed_commands)
 
 
+
+
+def test_service_configuration_arguments_are_retained():
+    from vcf_ops_telegraf_helper.workflow.windows import WindowsTelegrafDetection
+    detected = WindowsTelegrafDetection(
+        installed=True, binary_path=r'C:\Program Files\Telegraf\telegraf.exe',
+        service_name='telegraf',
+        command_line=r'"C:\Program Files\Telegraf\telegraf.exe" --service run --config "D:\Agent Config\main.conf" --config-directory="D:\Agent Config\inputs"',
+    )
+    assert detected.main_config_path == r'D:\Agent Config\main.conf'
+    assert detected.config_dir == r'D:\Agent Config\inputs'
