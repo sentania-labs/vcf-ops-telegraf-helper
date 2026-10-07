@@ -108,6 +108,8 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      id-token: write
+      attestations: write
     steps:
       - name: Check out
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -141,6 +143,18 @@ jobs:
           Path("SHA256SUMS").write_text("".join(f"{hashlib.file_digest(p.open('rb'), 'sha256').hexdigest()}  {p.name}\n" for p in paths))
           PYCODE
 
+      - name: Attest the final release downloads
+        uses: sentania-labs/.github/.github/actions/attest-provenance@a37e4e029c8ebb8f1810c3dd50aa035acecbe1fc # sentania-labs/.github latest merged 2026-10-07
+        with:
+          subject-path: |
+            SHA256SUMS
+            dist/*.whl
+            dist/*.tar.gz
+            binaries/vcf-telegraf-helper-linux
+            binaries/vcf-telegraf-helper-macos-arm64.zip
+            binaries/vcf-telegraf-helper-macos-x86_64.zip
+            binaries/vcf-telegraf-helper-windows.exe
+
       - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -156,5 +170,5 @@ jobs:
               --repo "$GITHUB_REPOSITORY" \
               --title "vcf-ops-telegraf-helper $TAG" \
               --generate-notes \
-              --notes "Standalone binaries are the primary downloads. Windows is Authenticode signed; macOS downloads are zipped apps for Apple Silicon (arm64) or Intel (x86_64), Developer ID signed, notarized and stapled. Extract the matching ZIP, move VCF Telegraf Helper.app to Applications, and double-click it. See the README for bundled CLI access. Verify downloads against SHA256SUMS. SmartScreen may still show an unrecognized-app prompt while the publisher builds reputation. Python packages are secondary; on managed Windows use python -m vcf_ops_telegraf_helper to avoid the unsigned pip launcher."
+              --notes "Standalone binaries are the primary downloads. Windows is Authenticode signed; macOS downloads are zipped apps for Apple Silicon (arm64) or Intel (x86_64), Developer ID signed, notarized and stapled. Extract the matching ZIP, move VCF Telegraf Helper.app to Applications, and double-click it. See the README for bundled CLI access. Verify downloads against SHA256SUMS. Verify build provenance with gh attestation verify FILE --repo sentania-labs/vcf-ops-telegraf-helper. SmartScreen may still show an unrecognized-app prompt while the publisher builds reputation. Python packages are secondary; on managed Windows use python -m vcf_ops_telegraf_helper to avoid the unsigned pip launcher."
           fi
