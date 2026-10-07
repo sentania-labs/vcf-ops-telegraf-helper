@@ -219,7 +219,9 @@ class TelegrafRenderer:
                 for extra in config.win_perf_counters.additional_objects:
                     existing = next((item for item in objects if item['ObjectName'] == extra.object_name), None)
                     if existing:
-                        existing['Counters'] = list(dict.fromkeys(existing['Counters'] + extra.counters))
+                        for key, additions in [('Counters', extra.counters), ('Instances', extra.instances)]:
+                            combined = list(dict.fromkeys(existing[key] + additions))
+                            existing[key] = ['*'] if '*' in combined else combined
                     else:
                         objects.append(dict(ObjectName=extra.object_name, Counters=extra.counters,
                                             Instances=extra.instances, Measurement=extra.measurement))

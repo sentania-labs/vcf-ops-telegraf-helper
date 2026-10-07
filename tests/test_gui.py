@@ -1221,3 +1221,20 @@ def test_completion_uses_captured_run_options(qapp, tmp_path, started_dry_run):
     window._on_worker_finished(RunSummary(target_hostname='vm',vcf_environment='ops',collector_address='proxy',success=True))
     assert window.execute_btn.isEnabled() == started_dry_run
     assert ('DRY-RUN' in window.result_banner.text()) == started_dry_run
+
+
+def test_repeat_command_preserves_discovered_perfmon(qapp, tmp_path):
+    import shlex
+    from click.testing import CliRunner
+    from vcf_ops_telegraf_helper.cli.main import cli
+    from vcf_ops_telegraf_helper.models.monitoring import PerfmonObject
+    from vcf_ops_telegraf_helper.renderer.renderer import TelegrafRenderer
+    window = MainWindow(StateStore(state_file=tmp_path / 'state.json'))
+    window.ep_os_combo.setCurrentText('Windows')
+    window._additional_perfmon = [PerfmonObject(object_name='Process', measurement='win_process', counters=['Extra "counter"'], instances=['*'])]
+    parts = shlex.split(window._build_cli_command())
+    value = parts[parts.index('--win-perf-object') + 1]
+    result = CliRunner().invoke(cli, ['render', '--os', 'windows', '--win-perf-object', value])
+    assert result.exit_code == 0
+    expected = TelegrafRenderer.render_system_inputs(window._get_monitoring_config())
+    assert expected in result.output

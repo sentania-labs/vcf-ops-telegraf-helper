@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+import pytest
 
 if sys.version_info >= (3, 11):
     import tomllib
@@ -330,3 +331,17 @@ def test_additional_perfmon_merges_baseline_and_escapes_counter_names():
     assert processor[0]['Counters'].count('% Processor Time') == 1
     assert 'Extra "counter"' in processor[0]['Counters']
     assert any(item['ObjectName'] == 'Custom\\Object' for item in objects)
+
+
+@pytest.mark.parametrize('instances', [['*'], ['worker']])
+def test_additional_process_perfmon_preserves_requested_instances(instances):
+    from vcf_ops_telegraf_helper.models.monitoring import WinPerfCountersInputConfig, PerfmonObject
+    config = MonitoringConfig(win_perf_counters=WinPerfCountersInputConfig(
+        enabled=True, additional_objects=[PerfmonObject(object_name='Process', measurement='win_process', counters=['Extra'], instances=instances)]))
+    objects = tomllib.loads(TelegrafRenderer.render_system_inputs(config))['inputs']['win_perf_counters'][0]['object']
+    process = next(item for item in objects if item['ObjectName'] == 'Process')
+    assert 'Extra' in process['Counters']
+    if instances == ['*']:
+        assert process['Instances'] == ['*']
+    else:
+        assert set(process['Instances']) == {'_Total', 'telegraf', 'worker'}

@@ -2733,6 +2733,9 @@ class MainWindow(QMainWindow):
                 elif mon.win_services.service_names != ["telegraf"]:
                     svcs = ",".join(mon.win_services.service_names)
                     parts.append(f"--win-services {quote(svcs)}")
+            if mon.win_perf_counters.enabled:
+                for obj in mon.win_perf_counters.additional_objects:
+                    parts.append(f"--win-perf-object {quote(obj.model_dump_json())}")
         else:
             core_plugins = [
                 ("cpu", mon.cpu.enabled),
