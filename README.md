@@ -28,8 +28,10 @@ This helper compresses those manual steps into a fast, guided, transparent, and 
 
 Download the standalone binary for your desktop from [Releases](https://github.com/sentania-labs/vcf-ops-telegraf-helper/releases). These are the primary artifacts: Windows Authenticode signed, macOS Apple Silicon and Intel apps that are Developer ID signed, notarized and stapled, plus a Linux executable. No Python installation is required. Each release includes `SHA256SUMS` for the final downloads.
 
-Release downloads also carry GitHub build provenance attestations. For releases from
-v0.7.5 onward, verify a downloaded file came from this repository's build:
+Uploaded release assets carry GitHub build provenance attestations from v0.7.5 onward.
+This covers the binaries, Python packages, and `SHA256SUMS`; GitHub's automatically
+generated “Source code” archives are not covered. Verify an uploaded asset came from
+this repository's build:
 
 ```bash
 gh attestation verify <file> --repo sentania-labs/vcf-ops-telegraf-helper
