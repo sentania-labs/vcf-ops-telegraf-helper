@@ -90,6 +90,6 @@ Object/history continuity can remain unverified while discovery and migration me
 
 ## Quiet release notice
 
-A separate proposed UI improvement is a small **New version available** link under the app name or beneath View Log and Theme. It opens the newer release's page. No tray popup, modal dialog, or blocked startup.
+The approved separate UI improvement is a small **New version available** link under the app name. It opens the newer release's page. No tray popup, modal dialog, or blocked startup.
 
-Check this repository's latest stable release in a background worker with a short timeout and a locally cached result, at most daily. Compare parsed versions; ignore drafts and prereleases. Use only the repository's HTTPS release URL. Network failures, rate limits, malformed responses, and offline launches stay silent. Test newer, equal, older, development, and unavailable versions, plus both themes and narrow windows. This notice is planned, not implemented.
+Check this repository's latest stable release in a background worker with a short timeout and a locally cached result, at most daily. Compare parsed versions; ignore drafts and prereleases. Use only the repository's HTTPS release URL. Network failures, rate limits, malformed responses, and offline launches stay silent. Test newer, equal, older, development, and unavailable versions, plus both themes and narrow windows. This notice is implemented separately from the takeover work.

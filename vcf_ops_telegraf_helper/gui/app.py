@@ -7,15 +7,28 @@ import sys
 
 
 def hide_console_window() -> None:
-    """Hide and detach background Windows console window."""
+    """Hide an owned Windows console, preserving an existing terminal."""
     if sys.platform == "win32":
         try:
             import ctypes
 
-            hwnd = ctypes.windll.kernel32.GetConsoleWindow()
-            if hwnd:
-                ctypes.windll.user32.ShowWindow(hwnd, 0)  # SW_HIDE
-            ctypes.windll.kernel32.FreeConsole()
+            kernel = ctypes.windll.kernel32
+            user = ctypes.windll.user32
+            kernel.GetConsoleWindow.restype = ctypes.c_void_p
+            user.ShowWindow.argtypes = [ctypes.c_void_p, ctypes.c_int]
+            user.IsWindowVisible.argtypes = [ctypes.c_void_p]
+            # A one-file launch has a bootloader parent and application child.
+            processes = (ctypes.c_uint * 4)()
+            count = kernel.GetConsoleProcessList(processes, 4)
+            owned_count = 2 if getattr(sys, "frozen", False) else 1
+            if not 0 < count <= owned_count:
+                return
+            hwnd = kernel.GetConsoleWindow()
+            # Windows Terminal exposes an invisible message-only console handle.
+            # Leave that host alone, including unrelated tabs in its window.
+            if hwnd and user.IsWindowVisible(hwnd):
+                user.ShowWindow(hwnd, 0)  # SW_HIDE
+            # Keep the console attached so startup diagnostics retain valid handles.
         except Exception:
             pass
 
@@ -96,12 +109,27 @@ def run_gui(theme: str = "dark") -> int:
             window.current_theme = theme
             window._apply_theme()
         window.show()
+        window.start_update_check()
         if smoke_report:
             from PySide6.QtCore import QTimer
 
             def record_render() -> None:
                 image = window.grab()
                 ok = not image.isNull() and image.save(smoke_report)
+                if sys.platform == "win32":
+                    import ctypes
+                    import json
+                    from pathlib import Path
+                    kernel = ctypes.windll.kernel32
+                    user = ctypes.windll.user32
+                    kernel.GetConsoleWindow.restype = ctypes.c_void_p
+                    user.IsWindowVisible.argtypes = [ctypes.c_void_p]
+                    hwnd = kernel.GetConsoleWindow()
+                    Path(smoke_report).with_suffix(".console.json").write_text(json.dumps({
+                        "attached": bool(hwnd),
+                        "visible": bool(hwnd and user.IsWindowVisible(hwnd)),
+                        "gui_visible": window.isVisible(),
+                    }))
                 app.exit(0 if ok else 1)
 
             QTimer.singleShot(500, record_render)

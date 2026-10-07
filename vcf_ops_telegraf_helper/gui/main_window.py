@@ -57,7 +57,7 @@ from vcf_ops_telegraf_helper.executors.base import EndpointExecutor
 from vcf_ops_telegraf_helper.executors.local import LocalExecutor
 from vcf_ops_telegraf_helper.executors.ssh import SSHExecutor
 from vcf_ops_telegraf_helper.executors.winrm import WinRMExecutor
-from vcf_ops_telegraf_helper.gui.theme import build_stylesheet
+from vcf_ops_telegraf_helper.gui.theme import build_stylesheet, DARK_TOKENS, LIGHT_TOKENS
 from vcf_ops_telegraf_helper.logger import get_log_file_path, get_logger
 from vcf_ops_telegraf_helper.models.endpoint import (
     ConnectionMethod,
@@ -255,12 +255,59 @@ class MainWindow(QMainWindow):
         self._init_ui()
         self._apply_theme()
         self._load_saved_state()
+        self._release_notice = None
+        self._update_check_started = False
         self.logger.info("MainWindow initialized")
 
     def _apply_theme(self) -> None:
         self.setStyleSheet(build_stylesheet(self.current_theme))
         if hasattr(self, "theme_btn"):
             self.theme_btn.setText("Theme: Light" if self.current_theme == "dark" else "Theme: Dark")
+        if getattr(self, "_release_notice", None):
+            self._show_release_notice(self._release_notice)
+
+    def _show_release_notice(self, notice) -> None:
+        self._release_notice = notice
+        tokens = DARK_TOKENS if self.current_theme == "dark" else LIGHT_TOKENS
+        self.update_notice.setText(
+            f'<a href="{notice.url}" style="color: {tokens["accent-ink"]}; text-decoration: none;">'
+            f'New version available: {notice.version}</a>'
+        )
+        self.update_notice.setStyleSheet("background: transparent; font-size: 11px; font-weight: normal;")
+        self.update_notice.show()
+
+    def start_update_check(self) -> None:
+        """Check after launch, without holding up startup or application shutdown."""
+        if self._update_check_started:
+            return
+        self._update_check_started = True
+        from queue import Queue, Empty
+        from threading import Thread
+        from vcf_ops_telegraf_helper.updates import check_release
+        results = Queue()
+        cache_path = self.state_store.state_file.parent / "release-check.json"
+
+        def fetch() -> None:
+            try:
+                notice = check_release(__version__, cache_path)
+            except Exception:
+                notice = None
+            results.put(notice)
+
+        self._update_timer = QTimer(self)
+
+        def poll() -> None:
+            try:
+                notice = results.get_nowait()
+            except Empty:
+                return
+            self._update_timer.stop()
+            if notice:
+                self._show_release_notice(notice)
+
+        self._update_timer.timeout.connect(poll)
+        self._update_timer.start(200)
+        Thread(target=fetch, name="release-check", daemon=True).start()
 
     def _toggle_theme(self) -> None:
         self.current_theme = "light" if self.current_theme == "dark" else "dark"
@@ -313,7 +360,18 @@ class MainWindow(QMainWindow):
         icon_label = QLabel()
         icon_label.setPixmap(self.windowIcon().pixmap(36, 36))
         header_layout.addWidget(icon_label)
-        header_layout.addWidget(title_label)
+        title_stack = QWidget()
+        title_stack.setStyleSheet("background: transparent;")
+        title_column = QVBoxLayout(title_stack)
+        title_column.setContentsMargins(0, 0, 0, 0)
+        title_column.setSpacing(5)
+        title_label.setStyleSheet("background: transparent;")
+        title_column.addWidget(title_label)
+        self.update_notice = QLabel()
+        self.update_notice.setOpenExternalLinks(True)
+        self.update_notice.hide()
+        title_column.addWidget(self.update_notice)
+        header_layout.addWidget(title_stack, 1)
         header_layout.addStretch()
 
         self.log_btn = QPushButton("View Log")

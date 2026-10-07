@@ -70,7 +70,8 @@ def _is_windows_double_click() -> bool:
 
         process_list = (ctypes.c_uint * 4)()
         count = ctypes.windll.kernel32.GetConsoleProcessList(process_list, 4)
-        return count <= 2
+        owned_count = 2 if getattr(sys, "frozen", False) else 1
+        return 0 < count <= owned_count
     except Exception:
         return False
 
@@ -88,16 +89,6 @@ def cli(ctx: click.Context) -> None:
             sys.exit(run_gui())
         # If double-clicked in Windows Explorer, launch native GUI by default.
         if _is_windows_double_click() and not os.environ.get("VCF_HELPER_NO_GUI"):
-            if sys.platform == "win32":
-                try:
-                    import ctypes
-
-                    hwnd = ctypes.windll.kernel32.GetConsoleWindow()
-                    if hwnd:
-                        ctypes.windll.user32.ShowWindow(hwnd, 0)
-                    ctypes.windll.kernel32.FreeConsole()
-                except Exception:
-                    pass
             try:
                 from vcf_ops_telegraf_helper.gui.app import run_gui
 
@@ -144,16 +135,6 @@ def wizard_cmd() -> None:
 @click.option("--theme", type=click.Choice(["dark", "light"]), default="dark", help="Initial Lattice theme")
 def gui_cmd(theme: str) -> None:
     """Launch the native desktop GUI styled with Lattice."""
-    if sys.platform == "win32":
-        try:
-            import ctypes
-
-            hwnd = ctypes.windll.kernel32.GetConsoleWindow()
-            if hwnd:
-                ctypes.windll.user32.ShowWindow(hwnd, 0)
-            ctypes.windll.kernel32.FreeConsole()
-        except Exception:
-            pass
     from vcf_ops_telegraf_helper.gui.app import run_gui
     sys.exit(run_gui(theme=theme))
 
