@@ -59,7 +59,7 @@ jobs:
 
       - name: Sign the binary (macOS)
         if: inputs.sign && runner.os == 'macOS'
-        uses: sentania-labs/.github/.github/actions/macos-sign@94a3e42ef750efd49b2d4288a8b384433b63b38b # sentania-labs/.github bundle mode
+        uses: sentania-labs/.github/.github/actions/macos-sign@a37e4e029c8ebb8f1810c3dd50aa035acecbe1fc # sentania-labs/.github latest merged 2026-10-07
         with:
           bundle: dist/VCF Telegraf Helper.app
           macos-cert-p12: ${{ secrets.MACOS_CERT_P12 }}
@@ -68,7 +68,7 @@ jobs:
 
       - name: Sign the binary (Windows)
         if: inputs.sign && runner.os == 'Windows'
-        uses: sentania-labs/.github/.github/actions/windows-sign@899421db1380620b2d4e2d8ac8b6acf16fe15b99 # sentania-labs/.github main 2026-10-07
+        uses: sentania-labs/.github/.github/actions/windows-sign@a37e4e029c8ebb8f1810c3dd50aa035acecbe1fc # sentania-labs/.github latest merged 2026-10-07
         with:
           files: ${{ github.workspace }}\dist\vcf-telegraf-helper-${{ matrix.name }}${{ matrix.ext }}
           endpoint: ${{ secrets.ARTIFACT_SIGNING_ENDPOINT }}
@@ -105,7 +105,7 @@ jobs:
 
       - name: Notarize (macOS)
         if: inputs.sign && runner.os == 'macOS'
-        uses: sentania-labs/.github/.github/actions/macos-notarize@94a3e42ef750efd49b2d4288a8b384433b63b38b # sentania-labs/.github bundle mode
+        uses: sentania-labs/.github/.github/actions/macos-notarize@a37e4e029c8ebb8f1810c3dd50aa035acecbe1fc # sentania-labs/.github latest merged 2026-10-07
         with:
           bundle: dist/VCF Telegraf Helper.app
           output-zip: dist/vcf-telegraf-helper-${{ matrix.name }}.zip
