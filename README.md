@@ -26,9 +26,52 @@ This helper compresses those manual steps into a fast, guided, transparent, and 
 
 ## Installation
 
-Download the standalone binary for your desktop from [Releases](https://github.com/sentania-labs/vcf-ops-telegraf-helper/releases). These are the primary artifacts: Windows Authenticode signed, macOS Apple Silicon and Intel Developer ID signed and notarized, plus Linux. No Python installation is required. Each release includes `SHA256SUMS` for the final downloads.
+Download the standalone binary for your desktop from [Releases](https://github.com/sentania-labs/vcf-ops-telegraf-helper/releases). These are the primary artifacts: Windows Authenticode signed, macOS Apple Silicon and Intel apps that are Developer ID signed, notarized and stapled, plus a Linux executable. No Python installation is required. Each release includes `SHA256SUMS` for the final downloads.
 
 Windows SmartScreen may show an unrecognized-app prompt on early signed releases while reputation builds. Organizational application-control policies still apply.
+
+### macOS
+
+Choose `vcf-telegraf-helper-macos-arm64.zip` for **Apple Silicon** or
+`vcf-telegraf-helper-macos-x86_64.zip` for **Intel** (Apple menu > About This Mac).
+Download `SHA256SUMS` from the same release. In Terminal, from the download directory,
+verify the selected archive before extracting it:
+
+```bash
+shasum -a 256 -c SHA256SUMS --ignore-missing
+```
+
+Confirm that your selected ZIP reports `OK`. Double-click the ZIP, move
+**VCF Telegraf Helper.app** to **Applications**, then double-click the app to open
+the wizard. No Python install or Terminal window is needed. The app has a Dock icon;
+Quit or close the wizard when finished. Keep the entire app together when moving it.
+
+Release apps are signed and include a stapled Apple notarization ticket. macOS may
+still ask you to confirm opening an application downloaded from the internet, and
+organizational application-control policies still apply. PR build artifacts are
+unsigned development builds and do not have the release's notarization ticket.
+These ZIP/app instructions apply to releases containing `.zip` Mac assets; v0.7.4
+and earlier provide bare executables instead.
+
+For command-line use, the same app contains the full CLI:
+
+```bash
+"/Applications/VCF Telegraf Helper.app/Contents/MacOS/vcf-telegraf-helper" --help
+"/Applications/VCF Telegraf Helper.app/Contents/MacOS/vcf-telegraf-helper" render --cpu --mem
+```
+
+Optional one-line symlink (no administrator access needed):
+
+```bash
+mkdir -p "$HOME/.local/bin" && ln -s "/Applications/VCF Telegraf Helper.app/Contents/MacOS/vcf-telegraf-helper" "$HOME/.local/bin/vcf-telegraf-helper"
+```
+
+Add `$HOME/.local/bin` to your shell's `PATH` if it is not already there. The command
+refuses to replace an existing link or program. Explicit commands such as `wizard`,
+`render`, and `run` retain their usual behavior; invoking the bundled executable
+without a command opens the GUI. Moving the app later requires updating the symlink.
+
+### Python and development
 
 Python wheels and source distributions are secondary artifacts. On managed Windows, invoke `python -m vcf_ops_telegraf_helper gui`; the launcher created by pip is unsigned and may be blocked by Defender ASR.
 

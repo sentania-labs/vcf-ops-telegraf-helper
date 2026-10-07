@@ -37,7 +37,7 @@ def run_gui(theme: str = "dark") -> int:
         return 1
 
     # Check for display server on POSIX systems
-    if sys.platform != "win32" and not os.environ.get("DISPLAY") and not os.environ.get("WAYLAND_DISPLAY"):
+    if sys.platform.startswith("linux") and not os.environ.get("DISPLAY") and not os.environ.get("WAYLAND_DISPLAY"):
         if not os.environ.get("QT_QPA_PLATFORM"):
             print(
                 "Error: No display server detected ($DISPLAY or $WAYLAND_DISPLAY is not set).\n"
@@ -84,11 +84,27 @@ def run_gui(theme: str = "dark") -> int:
 
 
     try:
-        window = MainWindow()
+        # The packaged launch smoke uses isolated state and exits after rendering.
+        smoke_report = os.environ.get("VCF_HELPER_GUI_SMOKE_REPORT")
+        if smoke_report:
+            from pathlib import Path
+            from vcf_ops_telegraf_helper.storage.state import StateStore
+            window = MainWindow(StateStore(state_file=Path(smoke_report).with_suffix(".state.json")))
+        else:
+            window = MainWindow()
         if theme in ("light", "dark"):
             window.current_theme = theme
             window._apply_theme()
         window.show()
+        if smoke_report:
+            from PySide6.QtCore import QTimer
+
+            def record_render() -> None:
+                image = window.grab()
+                ok = not image.isNull() and image.save(smoke_report)
+                app.exit(0 if ok else 1)
+
+            QTimer.singleShot(500, record_render)
         return app.exec()
     except Exception as exc:
         print(

@@ -80,6 +80,11 @@ def _is_windows_double_click() -> bool:
 def cli(ctx: click.Context) -> None:
     """VCF Operations Open Telegraf Helper: Local onboarding utility."""
     if ctx.invoked_subcommand is None:
+        # Finder launches the bundled executable without arguments.
+        if (sys.platform == "darwin" and getattr(sys, "frozen", False)
+                and not os.environ.get("VCF_HELPER_NO_GUI")):
+            from vcf_ops_telegraf_helper.gui.app import run_gui
+            sys.exit(run_gui())
         # If double-clicked in Windows Explorer, launch native GUI by default.
         if _is_windows_double_click() and not os.environ.get("VCF_HELPER_NO_GUI"):
             if sys.platform == "win32":
