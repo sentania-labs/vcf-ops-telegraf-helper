@@ -107,12 +107,14 @@ def test_main_window_endpoint_detection_windows(qapp, tmp_path):
     target = window._get_endpoint_target()
     assert target.connection_method == ConnectionMethod.WINRM
     assert window.ep_port_input.text() == "5985"
-    assert "Do Not Install" in window.ep_version_combo.currentText()
+    assert "Latest Stable" in window.ep_version_combo.currentText()
 
     from unittest.mock import MagicMock
     mock_exec = MagicMock()
     mock_exec.test_connection.return_value = True
     mock_exec.file_exists.return_value = False
+    from vcf_ops_telegraf_helper.executors.base import CommandResult
+    mock_exec.execute.return_value = CommandResult(exit_code=1, stdout="", command="probe")
     window._create_executor = lambda target: mock_exec
 
     window.ep_user_input.setText("operator")
@@ -575,7 +577,8 @@ def test_main_window_worker_finished_summary_handling(qapp, tmp_path):
 
     # Should not raise AttributeError: 'dict' object has no attribute 'collector_reachable'
     window._on_worker_finished(summary)
-    assert window.execute_btn.isEnabled()
+    assert not window.execute_btn.isEnabled()
+    assert "You may exit" in window.result_banner.text()
     assert window.export_md_btn.isEnabled()
     assert window.export_json_btn.isEnabled()
     log_text = window.stage_list_box.toPlainText()
@@ -1095,7 +1098,7 @@ def test_powershell_repeat_command_quotes_paths(qapp, tmp_path, monkeypatch):
     command = window._build_cli_command()
     assert "O''Brien" in command
     assert '\n' not in command
-    assert '--install-telegraf' not in command
+    assert '--install-telegraf' in command
 
 
 def test_blank_password_mode_does_not_enable_ambient_ssh_keys(qapp, tmp_path):
@@ -1119,3 +1122,102 @@ def test_macos_gui_does_not_require_linux_display_variables(qapp, monkeypatch, t
         assert run_gui() == 0
         assert window.return_value.isVisible()
         window.return_value.close()
+
+
+def test_network_wait_keeps_gui_events_running_and_propagates_errors(qapp):
+    import time
+    from PySide6.QtCore import QThread, QTimer
+    from vcf_ops_telegraf_helper.gui.busy import run_busy
+
+    ticks = []
+    timer = QTimer()
+    timer.setInterval(5)
+    timer.timeout.connect(lambda: ticks.append(True))
+    timer.start()
+
+    def query():
+        assert QThread.currentThread() != qapp.thread()
+        time.sleep(0.08)
+        return ['vm-one']
+
+    assert run_busy(None, 'Loading inventory...', query) == ['vm-one']
+    timer.stop()
+    assert len(ticks) >= 3
+    with pytest.raises(RuntimeError, match='TLS failed'):
+        run_busy(None, 'Connecting...', lambda: (_ for _ in ()).throw(RuntimeError('TLS failed')))
+    assert run_busy(None, 'Retrying...', lambda: 'recovered') == 'recovered'
+
+
+def test_agent_defaults_follow_detection_but_keep_explicit_choice(qapp, tmp_path):
+    window = MainWindow(StateStore(state_file=tmp_path / 'state.json'))
+    assert window._get_endpoint_target().install_telegraf
+    window._default_installation(True)
+    assert not window._get_endpoint_target().install_telegraf
+    window._default_installation(False)
+    assert window._get_endpoint_target().install_telegraf
+    window.ep_version_combo.setCurrentText('Do Not Install (Use Existing Host Agent)')
+    window._default_installation(False)
+    assert not window._get_endpoint_target().install_telegraf
+
+
+def test_perfmon_discovery_updates_visible_metrics_without_custom_fragment(qapp, tmp_path, monkeypatch):
+    from vcf_ops_telegraf_helper.gui import main_window as mw
+    from vcf_ops_telegraf_helper.models.discovery import DiscoveredPerfmonSet
+    from unittest.mock import MagicMock
+    window = MainWindow(StateStore(state_file=tmp_path / 'state.json'))
+    window.ep_os_combo.setCurrentText('Windows')
+    window.ep_host_input.setText('win-host')
+    counters = [f'Counter {i}' for i in range(12)]
+    chosen = [DiscoveredPerfmonSet(name='SQLServer:General Statistics', counters=counters)]
+    executor = MagicMock()
+    executor.discover_perfmon_sets.return_value = chosen
+    monkeypatch.setattr(window, '_create_discovery_executor', lambda target: executor)
+    dialog = MagicMock()
+    dialog.exec.return_value = mw.QDialog.Accepted
+    dialog.selected_sets = chosen
+    monkeypatch.setattr(mw, 'PerfmonDiscoveryDialog', lambda *args: dialog)
+    window._on_browse_perfmon_clicked()
+    assert 'SQLServer:General Statistics' in window.perfmon_metrics_box.toPlainText()
+    assert 'Counter 11' in window.perfmon_metrics_box.toPlainText()
+    assert not window.custom_toml_check.isChecked()
+    assert not window.custom_toml_input.toPlainText()
+    first = window._get_monitoring_config().model_dump_json()
+    window._on_browse_perfmon_clicked()
+    assert window._get_monitoring_config().model_dump_json() == first
+    window._apply_baseline_preset()
+    assert 'SQLServer:General Statistics' not in window.perfmon_metrics_box.toPlainText()
+
+
+@pytest.mark.parametrize('installed', [False, True])
+def test_choosing_displayed_version_still_counts_as_explicit(qapp, tmp_path, installed):
+    window = MainWindow(StateStore(state_file=tmp_path / 'state.json'))
+    window._default_installation(installed)
+    selected = window.ep_version_combo.currentText()
+    window.ep_version_combo.activated.emit(window.ep_version_combo.currentIndex())
+    window._default_installation(not installed)
+    assert window.ep_version_combo.currentText() == selected
+
+
+
+def test_active_workflow_cannot_be_started_again_or_reenabled_by_navigation(qapp, tmp_path, monkeypatch):
+    from unittest.mock import MagicMock
+    window = MainWindow(StateStore(state_file=tmp_path / 'state.json'))
+    start = MagicMock()
+    monkeypatch.setattr(window, '_start_workflow_worker', start)
+    window._run_workflow()
+    window._on_step_changed(window.STEP_CONNECT)
+    assert not window.execute_btn.isEnabled()
+    window._run_workflow()
+    start.assert_called_once()
+    window._finish_running_ui()
+
+
+@pytest.mark.parametrize('started_dry_run', [False, True])
+def test_completion_uses_captured_run_options(qapp, tmp_path, started_dry_run):
+    from vcf_ops_telegraf_helper.models.workflow import RunSummary
+    window = MainWindow(StateStore(state_file=tmp_path / 'state.json'))
+    window._running_dry_run = started_dry_run
+    window.dry_run_check.setChecked(not started_dry_run)
+    window._on_worker_finished(RunSummary(target_hostname='vm',vcf_environment='ops',collector_address='proxy',success=True))
+    assert window.execute_btn.isEnabled() == started_dry_run
+    assert ('DRY-RUN' in window.result_banner.text()) == started_dry_run

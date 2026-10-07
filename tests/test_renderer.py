@@ -311,3 +311,22 @@ def test_render_win_perf_print_valid_and_escaping():
 
 
 
+
+
+def test_additional_perfmon_merges_baseline_and_escapes_counter_names():
+    from vcf_ops_telegraf_helper.models.monitoring import WinPerfCountersInputConfig, PerfmonObject
+    config = MonitoringConfig(win_perf_counters=WinPerfCountersInputConfig(
+        enabled=True, additional_objects=[
+            PerfmonObject(object_name='Processor', counters=['% Processor Time', 'Extra "counter"'], measurement='unused'),
+            PerfmonObject(object_name='Custom\\Object', counters=['one', 'two'], measurement='custom'),
+        ]))
+    rendered = TelegrafRenderer.render_system_inputs(config)
+    plugins = tomllib.loads(rendered)['inputs']['win_perf_counters']
+    assert len(plugins) == 1
+    objects = plugins[0]['object']
+    processor = [item for item in objects if item['ObjectName'] == 'Processor']
+    assert len(processor) == 1
+    assert processor[0]['Measurement'] == 'win_cpu'
+    assert processor[0]['Counters'].count('% Processor Time') == 1
+    assert 'Extra "counter"' in processor[0]['Counters']
+    assert any(item['ObjectName'] == 'Custom\\Object' for item in objects)

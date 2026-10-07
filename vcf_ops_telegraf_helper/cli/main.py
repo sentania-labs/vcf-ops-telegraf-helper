@@ -127,7 +127,7 @@ def gui_smoke_cmd() -> None:
         window.show()
         app.processEvents()
         image = window.grab()
-        if image.isNull() or window.width() > 1024 or window.height() > 740:
+        if image.isNull() or window.windowIcon().isNull() or window.width() > 1024 or window.height() > 740:
             raise click.ClickException("GUI did not render within a VM console")
         window.close()
     click.echo("GUI smoke passed")

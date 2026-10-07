@@ -8,6 +8,12 @@ from __future__ import annotations
 
 import ipaddress
 import json
+import sys
+
+if sys.version_info >= (3, 11):
+    import tomllib
+else:
+    import tomli as tomllib
 from typing import Any, List, Optional
 
 from vcf_ops_telegraf_helper.models.monitoring import MonitoringConfig
@@ -128,6 +134,7 @@ class TelegrafRenderer:
 
         # Windows Performance Counters
         if config.win_perf_counters.enabled:
+            perf_start = len(lines)
             proc_insts = config.win_perf_counters.process_instances or ["_Total", "telegraf"]
             proc_insts_formatted = ", ".join(_escape_toml_str(p) for p in proc_insts)
             print_valid_str = str(config.win_perf_counters.print_valid).lower()
@@ -206,6 +213,28 @@ class TelegrafRenderer:
                 '    Measurement = "win_net_udp"',
                 "",
             ])
+
+            if config.win_perf_counters.additional_objects:
+                objects = tomllib.loads("\n".join(lines[perf_start:]))['inputs']['win_perf_counters'][0]['object']
+                for extra in config.win_perf_counters.additional_objects:
+                    existing = next((item for item in objects if item['ObjectName'] == extra.object_name), None)
+                    if existing:
+                        existing['Counters'] = list(dict.fromkeys(existing['Counters'] + extra.counters))
+                    else:
+                        objects.append(dict(ObjectName=extra.object_name, Counters=extra.counters,
+                                            Instances=extra.instances, Measurement=extra.measurement))
+                lines[perf_start:] = ['[[inputs.win_perf_counters]]', f'  PrintValid = {print_valid_str}', '']
+                for item in objects:
+                    lines.append('  [[inputs.win_perf_counters.object]]')
+                    for key, value in item.items():
+                        if isinstance(value, list):
+                            formatted = '[' + ', '.join(_escape_toml_str(v) for v in value) + ']'
+                        elif isinstance(value, bool):
+                            formatted = str(value).lower()
+                        else:
+                            formatted = _escape_toml_str(value)
+                        lines.append(f'    {key} = {formatted}')
+                    lines.append('')
 
         # Windows Services
         if config.win_services.enabled:

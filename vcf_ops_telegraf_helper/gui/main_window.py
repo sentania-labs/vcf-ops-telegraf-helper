@@ -15,6 +15,12 @@ import shlex
 import sys
 from typing import Any, Optional
 
+if sys.version_info >= (3, 11):
+    import tomllib
+else:
+    import tomli as tomllib
+
+from PySide6.QtGui import QIcon
 from PySide6.QtCore import QObject, QThread, QTimer, Signal, Qt
 from PySide6.QtWidgets import (
     QApplication,
@@ -71,6 +77,7 @@ from vcf_ops_telegraf_helper.models.monitoring import (
     NetInputConfig,
     NginxInputConfig,
     PingInputConfig,
+    PerfmonObject,
     PostgresqlInputConfig,
     ProcessesInputConfig,
     SwapInputConfig,
@@ -95,7 +102,8 @@ from vcf_ops_telegraf_helper.renderer.renderer import TelegrafRenderer
 from vcf_ops_telegraf_helper.storage.state import StateStore
 from vcf_ops_telegraf_helper.workflow.engine import ConfigureEndpointWorkflow
 from vcf_ops_telegraf_helper.workflow.uninstall import UninstallEndpointWorkflow
-from vcf_ops_telegraf_helper.workflow.windows import detect_windows_telegraf
+from vcf_ops_telegraf_helper.gui.busy import run_busy
+from vcf_ops_telegraf_helper.gui.probes import probe_endpoint
 from vcf_ops_telegraf_helper.gui.discovery_dialogs import (
     DatabaseConnectDialog,
     DatabaseDiscoveryDialog,
@@ -239,6 +247,7 @@ class MainWindow(QMainWindow):
         self._next_buttons: dict[int, QPushButton] = {}
 
         self.setWindowTitle("VCF Operations Open Telegraf Helper")
+        self.setWindowIcon(QIcon(str(Path(__file__).parent / "assets/app.svg")))
         self.resize(1000, 700)
         # Narrow enough for small laptop screens, wide enough that no step needs a sideways scroll
         self.setMinimumSize(980, 640)
@@ -301,6 +310,9 @@ class MainWindow(QMainWindow):
         title_label.setProperty("class", "lattice-title")
         title_label.setWordWrap(True)
 
+        icon_label = QLabel()
+        icon_label.setPixmap(self.windowIcon().pixmap(36, 36))
+        header_layout.addWidget(icon_label)
         header_layout.addWidget(title_label)
         header_layout.addStretch()
 
@@ -384,6 +396,8 @@ class MainWindow(QMainWindow):
         self._refresh_step_gating()
 
     def _on_step_changed(self, row: int) -> None:
+        if getattr(self, "_workflow_active", False):
+            return
         if row < 0:
             return
         reason = self._gate_reason(row) if row > self._current_step else None
@@ -393,6 +407,8 @@ class MainWindow(QMainWindow):
             self.step_list.setCurrentRow(self._current_step)
             self.step_list.blockSignals(False)
             return
+        if row < self.STEP_EXECUTE and self.last_summary and self.last_summary.success:
+            self.execute_btn.setEnabled(True)
         self._current_step = row
         if row == self.STEP_TARGET:
             self._update_target_summary()
@@ -696,10 +712,14 @@ class MainWindow(QMainWindow):
             env = self._get_vcf_env()
             self.logger.info("Validating VCF connection to %s", env.url)
             adapter = get_adapter(env)
-            valid = adapter.validate_connection()
+            def validate():
+                valid = adapter.validate_connection()
+                if valid:
+                    adapter.verify_credentials()
+                return valid
+            valid = run_busy(self, "Connecting to VCF Operations...", validate)
             if valid:
                 # Reachability alone is not enough: an HTTP 401 still counts as reachable
-                adapter.verify_credentials()
                 self.logger.info("VCF connection validated successfully to %s", env.url)
                 self.vcf_status_label.setText("Status: PASS (Connected)")
                 self.vcf_status_label.setStyleSheet("color: #199e70; font-weight: 600;")
@@ -750,7 +770,7 @@ class MainWindow(QMainWindow):
         filter_row.setSpacing(8)
 
         self.vm_search_input = QLineEdit()
-        self.vm_search_input.setPlaceholderText("Filter by name, IP, hostname, or MOR...")
+        self.vm_search_input.setPlaceholderText("Filter by name, IP, or hostname...")
         self.vm_search_input.textChanged.connect(self._filter_vm_table)
         filter_row.addWidget(self.vm_search_input, 2)
 
@@ -782,16 +802,17 @@ class MainWindow(QMainWindow):
         c_layout.addLayout(filter_row)
         c_layout.addLayout(secondary_filter_row)
         self.vm_status_filter.blockSignals(True)
-        self.vm_status_filter.setCurrentText("Reporting")
+        self.vm_status_filter.setCurrentText("All Agent States")
         self.vm_status_filter.blockSignals(False)
 
         self.vm_table = QTableWidget()
         self.vm_table.setColumnCount(6)
         self.vm_table.setHorizontalHeaderLabels(["VM Name", "IP Address", "Guest OS", "Power", "VM MOR", "Agent Status"])
         header = self.vm_table.horizontalHeader()
-        header.setSectionResizeMode(0, QHeaderView.Stretch)
-        for col in range(1, 6):
-            header.setSectionResizeMode(col, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(QHeaderView.Interactive)
+        for col, width in enumerate((180, 115, 135, 85, 0, 115)):
+            self.vm_table.setColumnWidth(col, width)
+        self.vm_table.setColumnHidden(4, True)
         self.vm_table.verticalHeader().setVisible(False)
         self.vm_table.setSelectionBehavior(QTableWidget.SelectRows)
         self.vm_table.setSelectionMode(QTableWidget.SingleSelection)
@@ -816,7 +837,7 @@ class MainWindow(QMainWindow):
         self.vm_count_label.setText("Querying VCF Operations...")
         try:
             adapter = adapter or get_adapter(self._get_vcf_env())
-            self._cached_vms = adapter.list_virtual_machines(strict=True)
+            self._cached_vms = run_busy(self, "Loading VM inventory...", lambda: adapter.list_virtual_machines(strict=True))
             self._populate_vm_table(self._cached_vms)
             self._filter_vm_table()
             self._reconcile_binding()
@@ -943,11 +964,13 @@ class MainWindow(QMainWindow):
         )
         self.vm_inspector_label.setText(
             f"Selected: {vm.name} | {vm.ip_address or 'No IP'} | {vm.os_name or vm.os_family.capitalize()} | "
-            f"{vm.power_state or 'Unknown power state'} | MOR {vm.vm_mor or 'N/A'} | Agent: {self._agent_status_text(vm)}, {registration}"
+            f"{vm.power_state or 'Unknown power state'} | Agent: {self._agent_status_text(vm)}, {registration}"
         )
         if changed:
+            self._installation_choice_explicit = False
             self.ep_os_combo.setCurrentText("Windows" if vm.os_family.lower() == "windows" else "Linux")
             self.ep_host_input.setText(vm.ip_address or vm.hostname or vm.name)
+            self._default_installation(vm.telegraf_status in ("Reporting", "No data"))
             self._preselect_collector(vm)
             self.discovered_hostname = None
             self._invalidate_endpoint_detection()
@@ -1044,10 +1067,11 @@ class MainWindow(QMainWindow):
             "Auto-install Official 1.30.0 (1.30 Series)",
             "Do Not Install (Use Existing Host Agent)",
         ])
-        self.ep_version_combo.setCurrentIndex(4)
+        self.ep_version_combo.setCurrentIndex(0)
         if self.ep_version_combo.lineEdit():
             self.ep_version_combo.lineEdit().setCursorPosition(0)
-        self.ep_version_combo.currentIndexChanged.connect(self._on_version_combo_changed)
+        self.ep_version_combo.currentTextChanged.connect(self._on_version_combo_changed)
+        self.ep_version_combo.activated.connect(self._on_version_combo_changed)
         grid.addWidget(self.ep_version_combo, 6, 1)
 
         grid.addWidget(QLabel("Collector / Collector Group:"), 7, 0)
@@ -1140,7 +1164,7 @@ class MainWindow(QMainWindow):
             else "no existing agent registration"
         )
         self.target_summary_label.setText(
-            f"Target VM: {vm.name} (MOR {vm.vm_mor or 'N/A'}, vCenter {vm.vc_id or 'N/A'}). "
+            f"Target VM: {vm.name}. "
             f"VCF Operations reports {vm.os_name or 'an unknown guest OS'}, {vm.power_state or 'unknown power state'}, "
             f"agent {self._agent_status_text(vm).lower()}, {registration}."
         )
@@ -1149,7 +1173,7 @@ class MainWindow(QMainWindow):
         previous = self._selected_collector()
         error = None
         try:
-            targets = adapter.list_collector_targets()
+            targets = run_busy(self, "Loading collectors...", adapter.list_collector_targets)
         except Exception as exc:
             self.logger.warning("Failed to load collector targets: %s", exc)
             error = str(exc)
@@ -1275,9 +1299,16 @@ class MainWindow(QMainWindow):
         if hasattr(self, "ep_pass_input"):
             self.ep_pass_input.clear()
             self.ep_user_input.clear()
+        self._installation_choice_explicit = False
+        self._default_installation(False)
         self.discovered_hostname = None
         self.detected_config_dir = None
         self.last_summary = None
+        if hasattr(self, 'perfmon_metrics_box'):
+            self._additional_perfmon = []
+            self._refresh_perfmon_list()
+        if hasattr(self, "execute_btn"):
+            self.execute_btn.setEnabled(True)
         if hasattr(self, "stage_list_box"):
             self.stage_list_box.clear()
             self.result_banner.clear()
@@ -1320,8 +1351,16 @@ class MainWindow(QMainWindow):
             self.ep_version_combo.setEnabled(checked)
 
     def _on_version_combo_changed(self) -> None:
+        self._installation_choice_explicit = True
         if hasattr(self, "ep_version_combo") and self.ep_version_combo.lineEdit():
             self.ep_version_combo.lineEdit().setCursorPosition(0)
+
+    def _default_installation(self, installed: bool) -> None:
+        if getattr(self, "_installation_choice_explicit", False):
+            return
+        self.ep_version_combo.blockSignals(True)
+        self.ep_version_combo.setCurrentIndex(4 if installed else 0)
+        self.ep_version_combo.blockSignals(False)
 
     def _get_selected_telegraf_version(self) -> str:
         if not hasattr(self, "ep_version_combo"):
@@ -1429,166 +1468,43 @@ class MainWindow(QMainWindow):
 
     def _run_endpoint_detection(self) -> None:
         self.ep_status_label.setText("Detecting...")
-        if hasattr(self, "ep_missing_banner"):
-            self.ep_missing_banner.setVisible(False)
+        self.ep_missing_banner.setVisible(False)
         try:
             target = self._get_endpoint_target()
-            if target.connection_method in (ConnectionMethod.SSH, ConnectionMethod.WINRM) and not target.username:
+            if not target.username:
                 raise ValueError("Enter an endpoint username before detecting or applying.")
-            self.logger.info("Detecting endpoint %s (%s, OS: %s)", target.hostname, target.connection_method.value, target.os_family.value)
             executor = self._create_executor(target)
-            connected = executor.test_connection()
-            if not connected:
-                self.logger.warning("Endpoint connection test failed for %s", target.hostname)
-                self.ep_status_label.setText(f"Connection failed: {getattr(executor, 'connection_error', 'unable to connect')}")
-                self.ep_status_label.setStyleSheet("color: #d95926;")
-                if hasattr(self, "ep_missing_banner"):
-                    self.ep_missing_banner.setVisible(False)
-                return
-
-            if target.os_family == OSFamily.WINDOWS:
-                os_version = "Microsoft Windows"
-                arch = "x86_64"
-                installed = False
-                version_str = "N/A"
-                running = False
-                binary_path = None
-                service_name = None
-                if target.connection_method in (ConnectionMethod.WINRM, ConnectionMethod.LOCAL):
-                    if target.connection_method == ConnectionMethod.WINRM or sys.platform == "win32":
-                        win_det = detect_windows_telegraf(executor)
-                        if (win_det.service_name or "").lower() == "ucp-telegraf" or "ucp-telegraf" in (win_det.binary_path or "").lower():
-                            raise RuntimeError("VCF Operations owns this ucp-telegraf agent. Manage it through Ops.")
-                        self.detected_config_dir = win_det.config_dir
-                        installed = win_det.installed
-                        binary_path = win_det.binary_path
-                        service_name = win_det.service_name
-                        version_str = win_det.version or "N/A"
-                        running = win_det.running
-                        caption_res = executor.execute("(Get-CimInstance Win32_OperatingSystem).Caption", timeout=10)
-                        if caption_res.success and caption_res.stdout.strip():
-                            os_version = caption_res.stdout.strip().splitlines()[0]
-                        h_res = executor.execute("$env:COMPUTERNAME", timeout=10)
-                        if h_res.success and h_res.stdout.strip():
-                            lines = [ln.strip() for ln in h_res.stdout.splitlines() if ln.strip()]
-                            self.discovered_hostname = lines[-1].split(".")[0] if lines else target.hostname
-                        else:
-                            self.discovered_hostname = target.hostname
-
-                self.ep_missing_banner.setVisible(not installed)
-
-                self._endpoint_detected = True
-                self.ep_status_label.setText("Connected & Discovered (Windows)")
-                self.ep_status_label.setStyleSheet("color: #199e70; font-weight: 600;")
-                auto_install = "Do Not Install" not in self.ep_version_combo.currentText()
-                if installed:
-                    inst_str = "YES"
-                elif auto_install:
-                    inst_str = "NO (auto-install will download InfluxData agent)"
-                else:
-                    inst_str = "NO (auto-install disabled)"
-
-                disc_name = getattr(self, "discovered_hostname", target.hostname)
-                details = [
-                    f"OS: {os_version}",
-                    f"Discovered Hostname: {disc_name}",
-                    f"Architecture: {arch}",
-                    f"Telegraf Installed: {inst_str}",
-                    f"Telegraf Version: {version_str}",
-                    f"Service Running: {'YES' if running else 'NO'}",
-                ]
-                if binary_path:
-                    details.append(f"Telegraf Binary: {binary_path}")
-                if service_name:
-                    details.append(f"Service Name: {service_name}")
-                details.extend([
-                    f"Config Directory: {self.detected_config_dir}",
-                    "Agent Distribution: InfluxData Official Open-Source",
-                ])
-                self.ep_details_box.setPlainText("\n".join(details))
-                self.state_store.record_endpoint(target.hostname)
-                self.logger.info("Endpoint discovered successfully: %s (hostname: %s)", target.hostname, disc_name)
-                if hasattr(self, "catalog_items"):
-                    self._update_catalog_os_compatibility(True)
-                    if getattr(self, "_last_detected_os", None) != "windows":
-                        self._last_detected_os = "windows"
-                        self._apply_baseline_preset()
-                return
-
-            arch_res = executor.execute("uname -m", timeout=5)
-            arch = arch_res.stdout.strip() if arch_res.success else "x86_64"
-
-            os_rel = executor.execute("cat /etc/os-release", timeout=5)
-            os_version = "Unknown Linux"
-            if os_rel.success and os_rel.stdout.strip():
-                for line in os_rel.stdout.splitlines():
-                    if line.startswith("PRETTY_NAME="):
-                        os_version = line.split("=", 1)[1].strip('"\'')
-                        break
-                    if line.startswith("NAME=") and os_version == "Unknown Linux":
-                        os_version = line.split("=", 1)[1].strip('"\'')
-                if os_version == "Unknown Linux" and not any("=" in entry for entry in os_rel.stdout.splitlines()):
-                    os_version = os_rel.stdout.strip().splitlines()[0]
-
-            which_res = executor.execute("which telegraf", timeout=5)
-            installed = which_res.success
-            telegraf_bin = which_res.stdout.strip() if installed else "/usr/bin/telegraf"
-
-            version_str = "N/A"
-            if installed:
-                ver_res = executor.execute(f"{telegraf_bin} version", timeout=5)
-                if ver_res.success:
-                    version_str = ver_res.stdout.strip()
-
-            svc_res = executor.execute("systemctl is-active telegraf", timeout=5)
-            running = svc_res.success and svc_res.stdout.strip() == "active"
-
-            h_res = executor.execute("hostname -s", timeout=5)
-            if h_res.success and h_res.stdout.strip():
-                lines = [ln.strip() for ln in h_res.stdout.splitlines() if ln.strip()]
-                self.discovered_hostname = lines[-1].split(".")[0] if lines else target.hostname
-            else:
-                self.discovered_hostname = target.hostname
-
-            self.ep_missing_banner.setVisible(not installed)
-
+            found = run_busy(self, "Connecting to target and inspecting agent...",
+                             lambda: probe_endpoint(target, executor))
+            self.discovered_hostname = found['hostname']
+            self.detected_config_dir = found['config_dir']
+            self._default_installation(found['installed'])
+            self.ep_missing_banner.setVisible(not found['installed'])
             self._endpoint_detected = True
-            self.ep_status_label.setText("Connected & Discovered")
+            self.ep_status_label.setText("Connected & Discovered (Windows)" if target.os_family == OSFamily.WINDOWS else "Connected & Discovered")
             self.ep_status_label.setStyleSheet("color: #199e70; font-weight: 600;")
-
-            auto_install = "Do Not Install" not in self.ep_version_combo.currentText()
-            if installed:
-                inst_str = "YES"
-            elif auto_install:
-                inst_str = "NO (auto-install will download InfluxData agent)"
-            else:
-                inst_str = "NO (auto-install disabled)"
-
-            disc_name = getattr(self, "discovered_hostname", target.hostname)
-            details = [
-                f"OS: {os_version}",
-                f"Discovered Hostname: {disc_name}",
-                f"Architecture: {arch}",
-                f"Telegraf Installed: {inst_str}",
-                f"Telegraf Version: {version_str}",
-                f"Service Running: {'YES' if running else 'NO'}",
-                "Config Directory: /etc/telegraf/telegraf.d",
-                "Agent Distribution: InfluxData Official Open-Source",
-            ]
+            installation = "YES" if found['installed'] else ("NO (auto-install selected)" if self._get_endpoint_target().install_telegraf else "NO (auto-install disabled)")
+            details = [f"OS: {found['os']}", f"Discovered Hostname: {found['hostname']}",
+                       f"Architecture: {found['arch']}", f"Telegraf Installed: {installation}",
+                       f"Telegraf Version: {found['version']}",
+                       "Service Running: " + ('YES' if found['running'] else 'NO'),
+                       f"Config Directory: {found['config_dir']}", "Agent Distribution: InfluxData Official Open-Source"]
+            if found['binary']:
+                details.append(f"Telegraf Binary: {found['binary']}")
+            if found['service']:
+                details.append(f"Service Name: {found['service']}")
             self.ep_details_box.setPlainText("\n".join(details))
             self.state_store.record_endpoint(target.hostname)
-            self.logger.info("Endpoint discovered successfully: %s (hostname: %s)", target.hostname, disc_name)
-            if hasattr(self, "catalog_items"):
-                self._update_catalog_os_compatibility(False)
-                if getattr(self, "_last_detected_os", None) != "linux":
-                    self._last_detected_os = "linux"
-                    self._apply_baseline_preset()
+            is_win = target.os_family == OSFamily.WINDOWS
+            self._update_catalog_os_compatibility(is_win)
+            os_name = 'windows' if is_win else 'linux'
+            if getattr(self, '_last_detected_os', None) != os_name:
+                self._last_detected_os = os_name
+                self._apply_baseline_preset()
         except Exception as exc:
-            self.logger.exception("Endpoint detection exception for %s", self.ep_host_input.text().strip())
+            self.logger.exception("Endpoint detection failed")
             self.ep_status_label.setText(f"Detection error: {exc}")
             self.ep_status_label.setStyleSheet("color: #d95926;")
-            if hasattr(self, "ep_missing_banner"):
-                self.ep_missing_banner.setVisible(False)
 
     # --------------------------------------------------------------------------
     # Step 3: Monitoring Inputs
@@ -1826,6 +1742,12 @@ class MainWindow(QMainWindow):
         self.btn_browse_perfmon.setToolTip("Query installed Windows Performance Counter sets from target endpoint")
         self.btn_browse_perfmon.clicked.connect(self._on_browse_perfmon_clicked)
         wp_layout.addWidget(self.btn_browse_perfmon)
+        self.perfmon_metrics_box = QPlainTextEdit()
+        self.perfmon_metrics_box.setReadOnly(True)
+        self.perfmon_metrics_box.setMinimumHeight(180)
+        wp_layout.addWidget(self.perfmon_metrics_box)
+        self._additional_perfmon = []
+        self._refresh_perfmon_list()
         self.plugin_config_stack.addWidget(self._create_plugin_card(
             "Windows Performance Counters (inputs.win_perf_counters)", "Windows",
             "Collects native Windows Processor, Memory, LogicalDisk, Network Interface, and System counters matching VCF Operations Windows guest OS dashboards.",
@@ -2134,6 +2056,9 @@ class MainWindow(QMainWindow):
             self.vcf_ca_input.setText(selected_file)
 
     def _apply_baseline_preset(self) -> None:
+        if hasattr(self, 'perfmon_metrics_box'):
+            self._additional_perfmon = []
+            self._refresh_perfmon_list()
         is_win = bool(
             getattr(self, "ep_os_combo", None)
             and self.ep_os_combo.currentText().strip().lower().startswith("win")
@@ -2263,7 +2188,7 @@ class MainWindow(QMainWindow):
 
         try:
             executor = self._create_discovery_executor(target)
-            services = executor.discover_services()
+            services = run_busy(self, "Loading services...", executor.discover_services)
             if not services:
                 QMessageBox.information(
                     self,
@@ -2311,7 +2236,7 @@ class MainWindow(QMainWindow):
 
         try:
             executor = self._create_discovery_executor(target)
-            counter_sets = executor.discover_perfmon_sets()
+            counter_sets = run_busy(self, "Loading performance counters...", executor.discover_perfmon_sets)
             if not counter_sets:
                 QMessageBox.information(
                     self,
@@ -2323,26 +2248,16 @@ class MainWindow(QMainWindow):
             dlg = PerfmonDiscoveryDialog(self, counter_sets)
             if dlg.exec() == QDialog.Accepted and dlg.selected_sets:
                 self.win_perf_check.setChecked(True)
-                stanzas = []
+                by_name = {obj.object_name: obj for obj in self._additional_perfmon}
                 for cs in dlg.selected_sets:
-                    clean_name = cs.name.replace(" ", "_").lower()
-                    counters = cs.counters if cs.counters else ["*"]
-                    counters_toml = ", ".join(f'"{c}"' for c in counters[:8])
-                    stanzas.append(
-                        f"# Discovered Perfmon Counter Set: {cs.name}\n"
-                        f"[[inputs.win_perf_counters]]\n"
-                        f"  PrintValid = false\n"
-                        f"  [[inputs.win_perf_counters.object]]\n"
-                        f'    ObjectName = "{cs.name}"\n'
-                        f"    Counters = [{counters_toml}]\n"
-                        f'    Instances = ["*"]\n'
-                        f'    Measurement = "win_{clean_name}"\n'
-                    )
-                new_text = "\n".join(stanzas)
-                curr = self.custom_toml_input.toPlainText().strip()
-                self.custom_toml_input.setPlainText(f"{curr}\n\n{new_text}".strip() if curr else new_text)
-                self.custom_toml_check.setChecked(True)
-                self.logger.info("Added %d extra Perfmon counter sets to Telegraf configuration", len(dlg.selected_sets))
+                    by_name[cs.name] = PerfmonObject(
+                        object_name=cs.name, counters=cs.counters or ["*"],
+                        measurement="win_" + cs.name.replace(" ", "_").lower())
+                self._additional_perfmon = list(by_name.values())
+                self._refresh_perfmon_list()
+                bar = self.perfmon_metrics_box.verticalScrollBar()
+                bar.setValue(bar.maximum())
+                self.logger.info("Updated visible Perfmon metrics with %d sets", len(dlg.selected_sets))
         except Exception as exc:
             self.logger.exception("Failed to discover perfmon counter sets on %s", target.hostname)
             QMessageBox.warning(
@@ -2350,6 +2265,15 @@ class MainWindow(QMainWindow):
                 "Perfmon Discovery Error",
                 f"Failed to query Performance Counter sets from target host:\n{exc}",
             )
+
+    def _refresh_perfmon_list(self) -> None:
+        config = MonitoringConfig(win_perf_counters=WinPerfCountersInputConfig(
+            enabled=True, additional_objects=getattr(self, '_additional_perfmon', [])))
+        rendered = TelegrafRenderer.render_system_inputs(config)
+        objects = tomllib.loads(rendered)['inputs']['win_perf_counters'][0]['object']
+        self.perfmon_metrics_box.setPlainText("\n\n".join(
+            item['ObjectName'] + " (" + item['Measurement'] + ")\n  " + "\n  ".join(item['Counters'])
+            for item in objects))
 
     def _on_discover_databases_clicked(self, engine: str) -> None:
         try:
@@ -2386,13 +2310,14 @@ class MainWindow(QMainWindow):
 
         try:
             executor = self._create_discovery_executor(target)
-            dbs = executor.discover_databases(
+            kwargs = dict(
                 db_type=engine,
                 auth_mode=conn_dlg.auth_mode,
                 username=conn_dlg.username or None,
                 password=conn_dlg.password or None,
                 port=conn_dlg.port,
             )
+            dbs = run_busy(self, "Loading databases...", lambda: executor.discover_databases(**kwargs))
             if not dbs:
                 QMessageBox.information(
                     self,
@@ -2861,6 +2786,15 @@ class MainWindow(QMainWindow):
             self.cli_command_box.setPlainText(self._build_cli_command())
 
     def _run_workflow(self) -> None:
+        if getattr(self, '_workflow_active', False):
+            return
+        self._workflow_active = True
+        self._running_dry_run = self.dry_run_check.isChecked()
+        self.last_summary = None
+        self.result_banner.clear()
+        self.step_list.setEnabled(False)
+        self.dry_run_check.setEnabled(False)
+        self.replace_inputs_check.setEnabled(False)
         self.execute_btn.setEnabled(False)
         self.stage_list_box.clear()
         self.export_md_btn.setEnabled(False)
@@ -2892,7 +2826,7 @@ class MainWindow(QMainWindow):
         executor = self._create_executor(target)
         adapter = get_adapter(env)
 
-        self.worker_thread = QThread()
+        self.worker_thread = QThread(self)
         self.worker = WorkflowWorker(
             environment=env,
             target=target,
@@ -2911,6 +2845,8 @@ class MainWindow(QMainWindow):
         self.worker.failed.connect(self._on_worker_failed)
         self.worker.finished.connect(self.worker_thread.quit)
         self.worker.failed.connect(self.worker_thread.quit)
+        self.worker_thread.finished.connect(self.worker.deleteLater)
+        self.worker_thread.finished.connect(self.worker_thread.deleteLater)
 
         self.worker_thread.start()
 
@@ -2929,14 +2865,24 @@ class MainWindow(QMainWindow):
         if result.details:
             self.stage_list_box.appendPlainText(result.details)
 
+    def _finish_running_ui(self) -> None:
+        self._workflow_active = False
+        self.step_list.setEnabled(True)
+        self.dry_run_check.setEnabled(True)
+        self.replace_inputs_check.setEnabled(True)
+
     def _on_worker_finished(self, summary: RunSummary) -> None:
-        dry_run = self.dry_run_check.isChecked()
+        self._finish_running_ui()
+        dry_run = getattr(self, '_running_dry_run', self.dry_run_check.isChecked())
         pending = any(str(v).startswith("PENDING") for v in summary.verifications.values())
         outcome = "FAILED: review the stage details below" if not summary.success else ("DRY-RUN COMPLETE: live verification skipped" if dry_run else ("APPLIED: ingestion confirmation pending" if pending else "SUCCESS: configuration verified"))
         self.result_banner.setText(outcome)
         self.result_banner.setStyleSheet("font-weight: 700; color: " + ("#d95926" if not summary.success or pending else "#199e70") + ";")
         self.last_summary = summary
-        self.execute_btn.setEnabled(True)
+        applied = summary.success and not dry_run
+        self.execute_btn.setEnabled(not applied)
+        if applied:
+            self.result_banner.setText(outcome + ". You may exit, or go back to revise options and run again.")
         self.export_md_btn.setEnabled(True)
         self.export_json_btn.setEnabled(True)
 
@@ -2959,6 +2905,7 @@ class MainWindow(QMainWindow):
         self._update_cli_command()
 
     def _on_worker_failed(self, error: str) -> None:
+        self._finish_running_ui()
         self.execute_btn.setEnabled(True)
         self.result_banner.setText("FAILED: " + error)
         self.stage_list_box.appendPlainText(f"\nFATAL WORKFLOW ERROR: {error}")
@@ -3108,7 +3055,8 @@ class MainWindow(QMainWindow):
             diskio=DiskIoInputConfig(enabled=bool(getattr(self, "diskio_check", None) and self.diskio_check.isChecked())),
             processes=ProcessesInputConfig(enabled=bool(getattr(self, "proc_check", None) and self.proc_check.isChecked())),
             win_perf_counters=WinPerfCountersInputConfig(
-                enabled=bool(is_win and getattr(self, "win_perf_check", None) and self.win_perf_check.isChecked())
+                enabled=bool(is_win and getattr(self, "win_perf_check", None) and self.win_perf_check.isChecked()),
+                additional_objects=getattr(self, "_additional_perfmon", []),
             ),
             win_services=WinServicesInputConfig(
                 enabled=bool(is_win and getattr(self, "win_svc_check", None) and self.win_svc_check.isChecked()),
