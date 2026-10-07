@@ -44,7 +44,7 @@ Windows releases are Authenticode signed. Mac apps are Developer ID signed, nota
 5. **Review & Preview:** inspect the offline configuration template.
 6. **Execute & Verify:** use dry-run to inspect the exact prepared configuration, then apply it. After a successful apply, exit or go back to revise options and run again.
 
-On Windows, desktop launch hides the executable's console window. Commands launched in an existing terminal retain their output.
+On Windows, desktop launch hides the executable's classic Command Prompt window. Commands launched in an existing terminal retain their output.
 
 A small **New version available** link beneath the app name opens the newer release page. The app checks GitHub in the background at most once a day, with no login or Ops credentials. Offline or failed checks stay silent.
 

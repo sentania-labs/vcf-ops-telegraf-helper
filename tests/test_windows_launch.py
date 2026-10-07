@@ -8,13 +8,13 @@ from scripts import build_binary
 from vcf_ops_telegraf_helper.gui import app
 
 
-def test_windows_build_hides_console_in_bootloader(monkeypatch):
+def test_windows_build_preserves_cli_without_touching_terminal_host(monkeypatch):
     monkeypatch.setattr(build_binary, 'windows_icon', lambda: 'app.ico')
     run = Mock()
     monkeypatch.setattr(build_binary.subprocess, 'run', run)
     build_binary.build('windows')
     args = run.call_args.args[0]
-    assert args[args.index('--hide-console') + 1] == 'hide-early'
+    assert '--hide-console' not in args  # This can minimize unrelated Terminal tabs.
     assert '--windowed' not in args  # CLI output and redirects remain available.
 
 
@@ -22,7 +22,7 @@ def test_windows_build_hides_console_in_bootloader(monkeypatch):
 def test_hide_console_preserves_shared_terminal(monkeypatch, frozen, count):
     kernel = SimpleNamespace(GetConsoleWindow=Mock(return_value=123),
                              GetConsoleProcessList=Mock(return_value=count), FreeConsole=Mock())
-    user = SimpleNamespace(ShowWindow=Mock())
+    user = SimpleNamespace(ShowWindow=Mock(), IsWindowVisible=Mock(return_value=True))
     monkeypatch.setattr(app.sys, 'platform', 'win32')
     monkeypatch.setattr(ctypes, 'windll', SimpleNamespace(kernel32=kernel, user32=user), raising=False)
     monkeypatch.setattr(app.sys, "frozen", frozen, raising=False)
@@ -35,7 +35,7 @@ def test_hide_owned_console_uses_pointer_sized_handle(monkeypatch):
     hwnd = 0x123456789
     kernel = SimpleNamespace(GetConsoleWindow=Mock(return_value=hwnd),
                              GetConsoleProcessList=Mock(return_value=2), FreeConsole=Mock())
-    user = SimpleNamespace(ShowWindow=Mock())
+    user = SimpleNamespace(ShowWindow=Mock(), IsWindowVisible=Mock(return_value=True))
     monkeypatch.setattr(app.sys, 'platform', 'win32')
     monkeypatch.setattr(ctypes, 'windll', SimpleNamespace(kernel32=kernel, user32=user), raising=False)
     monkeypatch.setattr(app.sys, "frozen", True, raising=False)
@@ -56,3 +56,14 @@ def test_double_click_distinguishes_existing_terminal(monkeypatch, frozen, count
     monkeypatch.setattr(app.sys.stdout, 'isatty', lambda: True)
     monkeypatch.setattr(ctypes, 'windll', SimpleNamespace(kernel32=kernel), raising=False)
     assert _is_windows_double_click() is expected
+
+
+def test_hide_skips_windows_terminal_message_only_handle(monkeypatch):
+    kernel = SimpleNamespace(GetConsoleWindow=Mock(return_value=123),
+                             GetConsoleProcessList=Mock(return_value=2))
+    user = SimpleNamespace(ShowWindow=Mock(), IsWindowVisible=Mock(return_value=False))
+    monkeypatch.setattr(app.sys, 'platform', 'win32')
+    monkeypatch.setattr(app.sys, 'frozen', True, raising=False)
+    monkeypatch.setattr(ctypes, 'windll', SimpleNamespace(kernel32=kernel, user32=user), raising=False)
+    app.hide_console_window()
+    user.ShowWindow.assert_not_called()

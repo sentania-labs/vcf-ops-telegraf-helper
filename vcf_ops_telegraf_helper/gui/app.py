@@ -16,6 +16,7 @@ def hide_console_window() -> None:
             user = ctypes.windll.user32
             kernel.GetConsoleWindow.restype = ctypes.c_void_p
             user.ShowWindow.argtypes = [ctypes.c_void_p, ctypes.c_int]
+            user.IsWindowVisible.argtypes = [ctypes.c_void_p]
             # A one-file launch has a bootloader parent and application child.
             processes = (ctypes.c_uint * 4)()
             count = kernel.GetConsoleProcessList(processes, 4)
@@ -23,7 +24,9 @@ def hide_console_window() -> None:
             if not 0 < count <= owned_count:
                 return
             hwnd = kernel.GetConsoleWindow()
-            if hwnd:
+            # Windows Terminal exposes an invisible message-only console handle.
+            # Leave that host alone, including unrelated tabs in its window.
+            if hwnd and user.IsWindowVisible(hwnd):
                 user.ShowWindow(hwnd, 0)  # SW_HIDE
             # Keep the console attached so startup diagnostics retain valid handles.
         except Exception:
