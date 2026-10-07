@@ -189,6 +189,7 @@ def test_workflow_windows_schannel_with_confirmed_ingestion():
         return CommandResult(exit_code=0, stdout="", command=cmd)
 
     mock_exec.execute.side_effect = _exec
+    mock_exec.download.return_value = "# existing empty main config\n"
     mock_exec.file_exists.return_value = True
 
     wf = ConfigureEndpointWorkflow(
@@ -249,6 +250,7 @@ def test_workflow_windows_schannel_with_unknown_ingestion_reports_pending():
         return CommandResult(exit_code=0, stdout="", command=cmd)
 
     mock_exec.execute.side_effect = _exec
+    mock_exec.download.return_value = "# existing empty main config\n"
     mock_exec.file_exists.return_value = True
 
     wf = ConfigureEndpointWorkflow(
@@ -535,6 +537,7 @@ def test_workflow_sha256_idempotency_skips_restart():
 
     mock_exec = MagicMock()
     mock_exec.execute.return_value = CommandResult(exit_code=0, stdout="", command="cmd")
+    mock_exec.download.return_value = "# existing empty main config\n"
     mock_exec.file_exists.return_value = True
 
     wf = ConfigureEndpointWorkflow(
@@ -632,6 +635,7 @@ def test_workflow_cleanup_bak_files_on_successful_verification():
     )
     mock_exec = MagicMock()
     mock_exec.execute.return_value = CommandResult(exit_code=0, stdout="", command="cmd")
+    mock_exec.download.return_value = "# existing empty main config\n"
     mock_exec.file_exists.return_value = True
 
     wf = ConfigureEndpointWorkflow(
@@ -692,6 +696,7 @@ def test_workflow_expired_cert_triggers_fresh_minting():
     ).decode("ascii")
 
     mock_exec = MagicMock()
+    mock_exec.download.return_value = "# existing empty main config\n"
     mock_exec.file_exists.return_value = True
     def mock_download(path):
         if "cert.pem" in path:
@@ -745,6 +750,7 @@ def _idempotency_workflow(remote_overrides: dict[str, str]):
     )
     mock_exec = MagicMock()
     mock_exec.execute.return_value = CommandResult(exit_code=0, stdout="", command="cmd")
+    mock_exec.download.return_value = "# existing empty main config\n"
     mock_exec.file_exists.return_value = True
     wf = ConfigureEndpointWorkflow(
         environment=env,

@@ -20,6 +20,8 @@ _SENSITIVE_PATTERNS = [
     re.compile(r'((?:Bearer|vRealizeOpsToken)\s+)([a-zA-Z0-9_\-\.]+)', re.IGNORECASE),
     # Basic Authorization headers
     re.compile(r'(Authorization:\s*Basic\s+)([a-zA-Z0-9+/=]+)', re.IGNORECASE),
+    # MySQL driver DSNs, including credentials read from deployed configurations.
+    re.compile(r'([^\s"\']+:)([^@]*)(@(?:tcp|unix)\()', re.IGNORECASE),
     # URLs with embedded user:password credentials
     re.compile(r'(https?://[^:\s/]+:)([^@\s]+)(@)', re.IGNORECASE),
     # Explicit CLI token flags: telegraf-utils.sh/.ps1 -t <token>, --token <token>

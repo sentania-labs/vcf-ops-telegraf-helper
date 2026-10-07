@@ -125,7 +125,7 @@ def test_vcf91_prepare_artifacts():
     assert artifacts.collector_address == "10.10.10.50"
     assert artifacts.script_url == "https://10.10.10.50/downloads/salt/telegraf-utils.sh"
     assert artifacts.output_url == "https://10.10.10.50/opensource/default/metric"
-    assert artifacts.skip_certificate is True
+    assert artifacts.skip_certificate is False
     assert "CA-DATA" in (artifacts.ca_cert_content or "")
     assert "CLIENT-CERT" in (artifacts.client_cert_content or "")
     assert "CLIENT-KEY" in (artifacts.client_key_content or "")

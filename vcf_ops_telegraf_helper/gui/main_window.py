@@ -107,22 +107,26 @@ from vcf_ops_telegraf_helper.gui.discovery_dialogs import (
 class QtProgressReporter:
     """Adapts workflow progress events into Qt signals."""
 
-    def __init__(self, callback: Any) -> None:
+    def __init__(self, callback: Any, message_callback=None) -> None:
         self._callback = callback
+        self._message_callback = message_callback
 
     def on_stage_start(self, stage: WorkflowStage) -> None:
-        pass
+        self.on_message(f"{stage.value}: starting...")
 
     def on_stage_complete(self, result: StageResult) -> None:
         self._callback(result)
 
     def on_message(self, message: str) -> None:
-        pass
+        if self._message_callback:
+            self._message_callback(message)
 
 
 class WorkflowWorker(QObject):
     """Background worker executing the ConfigureEndpointWorkflow to keep Qt event loop responsive."""
 
+    message = Signal(str)
+    prepared = Signal(str, str)
     stage_updated = Signal(object)  # StageResult
     finished = Signal(object)  # RunSummary
     failed = Signal(str)
@@ -137,7 +141,7 @@ class WorkflowWorker(QObject):
         options: Optional[WorkflowOptions] = None,
     ) -> None:
         super().__init__()
-        self.reporter = QtProgressReporter(self.stage_updated.emit)
+        self.reporter = QtProgressReporter(self.stage_updated.emit, self.message.emit)
         self.workflow = ConfigureEndpointWorkflow(
             environment=environment,
             target=target,
@@ -150,6 +154,7 @@ class WorkflowWorker(QObject):
 
     def run(self) -> None:
         try:
+            self.workflow.preview_callback = lambda: self.prepared.emit(self.workflow.system_conf_content, self.workflow.vcf_conf_content)
             summary = self.workflow.run()
             self.finished.emit(summary)
         except Exception as exc:
@@ -234,9 +239,9 @@ class MainWindow(QMainWindow):
         self._next_buttons: dict[int, QPushButton] = {}
 
         self.setWindowTitle("VCF Operations Open Telegraf Helper")
-        self.resize(1150, 840)
+        self.resize(1000, 700)
         # Narrow enough for small laptop screens, wide enough that no step needs a sideways scroll
-        self.setMinimumSize(1120, 680)
+        self.setMinimumSize(980, 640)
 
         self._init_ui()
         self._apply_theme()
@@ -294,6 +299,7 @@ class MainWindow(QMainWindow):
 
         title_label = QLabel(f"VCF Operations Open Telegraf Helper v{__version__}")
         title_label.setProperty("class", "lattice-title")
+        title_label.setWordWrap(True)
 
         header_layout.addWidget(title_label)
         header_layout.addStretch()
@@ -550,7 +556,7 @@ class MainWindow(QMainWindow):
         grid.addWidget(self.vcf_token_input, 2, 1)
 
         self.vcf_user_label = QLabel("Username:")
-        self.vcf_user_input = QLineEdit("admin")
+        self.vcf_user_input = QLineEdit()
         grid.addWidget(self.vcf_user_label, 3, 0)
         grid.addWidget(self.vcf_user_input, 3, 1)
 
@@ -574,10 +580,14 @@ class MainWindow(QMainWindow):
         c_layout.addLayout(grid)
         self._update_vcf_auth_visibility()
 
-        self.vcf_ssl_check = QCheckBox("Verify TLS certificates (disable for self-signed lab certs)")
+        self.vcf_ssl_check = QCheckBox("Verify desktop TLS to VCF Operations")
         self.vcf_ssl_check.setChecked(True)
         self.vcf_ssl_check.toggled.connect(self._on_vcf_ssl_toggled)
         c_layout.addWidget(self.vcf_ssl_check)
+
+        self.agent_ssl_check = QCheckBox("Verify agent TLS to collector")
+        self.agent_ssl_check.setChecked(True)
+        c_layout.addWidget(self.agent_ssl_check)
 
         self.vcf_ca_widget = QWidget()
         ca_row = QHBoxLayout(self.vcf_ca_widget)
@@ -757,18 +767,23 @@ class MainWindow(QMainWindow):
         self.vm_show_off_check = QCheckBox("Show powered-off VMs")
         self.vm_show_off_check.setChecked(False)
         self.vm_show_off_check.toggled.connect(self._filter_vm_table)
-        filter_row.addWidget(self.vm_show_off_check)
+        secondary_filter_row = QHBoxLayout()
+        secondary_filter_row.addWidget(self.vm_show_off_check)
 
         self.fetch_vms_btn = QPushButton("Refresh")
         self.fetch_vms_btn.setProperty("class", "secondary")
         self.fetch_vms_btn.clicked.connect(lambda: self._fetch_vcf_inventory())
-        filter_row.addWidget(self.fetch_vms_btn)
+        secondary_filter_row.addWidget(self.fetch_vms_btn)
 
         self.vm_count_label = QLabel("0 VMs")
         self.vm_count_label.setProperty("class", "lattice-caption")
-        filter_row.addWidget(self.vm_count_label)
+        secondary_filter_row.addWidget(self.vm_count_label)
 
         c_layout.addLayout(filter_row)
+        c_layout.addLayout(secondary_filter_row)
+        self.vm_status_filter.blockSignals(True)
+        self.vm_status_filter.setCurrentText("Reporting")
+        self.vm_status_filter.blockSignals(False)
 
         self.vm_table = QTableWidget()
         self.vm_table.setColumnCount(6)
@@ -865,6 +880,7 @@ class MainWindow(QMainWindow):
                 st_item.setForeground(Qt.darkYellow)
             self.vm_table.setItem(row, 5, st_item)
         self.vm_table.setSortingEnabled(True)
+        self.vm_table.sortItems(0, Qt.AscendingOrder)
 
     def _filter_vm_table(self) -> None:
         if not getattr(self, "_cached_vms", None):
@@ -996,7 +1012,7 @@ class MainWindow(QMainWindow):
         grid.addWidget(self.ep_auth_radio_widget, 2, 1)
 
         self.ep_user_label = QLabel("Username:")
-        self.ep_user_input = QLineEdit("root")
+        self.ep_user_input = QLineEdit()
         grid.addWidget(self.ep_user_label, 3, 0)
         grid.addWidget(self.ep_user_input, 3, 1)
 
@@ -1004,7 +1020,13 @@ class MainWindow(QMainWindow):
         self.ep_pass_input = QLineEdit()
         self.ep_pass_input.setEchoMode(QLineEdit.Password)
         grid.addWidget(self.ep_pass_label, 4, 0)
-        grid.addWidget(self.ep_pass_input, 4, 1)
+        credential_row = QHBoxLayout()
+        credential_row.addWidget(self.ep_pass_input)
+        self.ep_key_browse_btn = QPushButton("Browse...")
+        self.ep_key_browse_btn.clicked.connect(self._browse_ssh_key)
+        self.ep_key_browse_btn.setVisible(False)
+        credential_row.addWidget(self.ep_key_browse_btn)
+        grid.addLayout(credential_row, 4, 1)
 
         self.ep_winrm_ssl_check = QCheckBox("Use HTTPS for WinRM (port 5986)")
         self.ep_winrm_ssl_check.setChecked(False)
@@ -1014,7 +1036,7 @@ class MainWindow(QMainWindow):
         grid.addWidget(QLabel("Telegraf Distribution:"), 6, 0)
         self.ep_version_combo = QComboBox()
         self.ep_version_combo.setEditable(True)
-        self.ep_version_combo.setMinimumWidth(380)
+        self.ep_version_combo.setMinimumWidth(200)
         self.ep_version_combo.addItems([
             "Auto-install Official 1.40.1 (Latest Stable - Recommended)",
             "Auto-install Official 1.34.0 (1.34 Series)",
@@ -1022,7 +1044,7 @@ class MainWindow(QMainWindow):
             "Auto-install Official 1.30.0 (1.30 Series)",
             "Do Not Install (Use Existing Host Agent)",
         ])
-        self.ep_version_combo.setCurrentIndex(0)
+        self.ep_version_combo.setCurrentIndex(4)
         if self.ep_version_combo.lineEdit():
             self.ep_version_combo.lineEdit().setCursorPosition(0)
         self.ep_version_combo.currentIndexChanged.connect(self._on_version_combo_changed)
@@ -1191,6 +1213,8 @@ class MainWindow(QMainWindow):
             return
         is_win = self.ep_os_combo.currentText().lower().startswith("win")
 
+        if hasattr(self, "ep_key_browse_btn"):
+            self.ep_key_browse_btn.setVisible(not is_win and self.ep_auth_radio_key.isChecked())
         if hasattr(self, "ep_winrm_ssl_check"):
             self.ep_winrm_ssl_check.setVisible(is_win)
         if is_win:
@@ -1248,6 +1272,17 @@ class MainWindow(QMainWindow):
             self.state_store.save_preference("vcf_auth_mode", text)
 
     def _on_target_host_changed(self, text: str) -> None:
+        if hasattr(self, "ep_pass_input"):
+            self.ep_pass_input.clear()
+            self.ep_user_input.clear()
+        self.discovered_hostname = None
+        self.detected_config_dir = None
+        self.last_summary = None
+        if hasattr(self, "stage_list_box"):
+            self.stage_list_box.clear()
+            self.result_banner.clear()
+            self.export_md_btn.setEnabled(False)
+            self.export_json_btn.setEnabled(False)
         # The VM identity comes from Step 2; the address only changes how we reach it
         self._invalidate_endpoint_detection()
 
@@ -1257,15 +1292,11 @@ class MainWindow(QMainWindow):
         if is_win:
             if not self.ep_advanced_check.isChecked() or self.ep_port_input.text() == "22":
                 self.ep_port_input.setText("5986" if self.ep_winrm_ssl_check.isChecked() else "5985")
-            if self.ep_user_input.text() == "root":
-                self.ep_user_input.setText("Administrator")
             if hasattr(self, "docker_endpoint_input") and self.docker_endpoint_input.text().strip() in ("", "unix:///var/run/docker.sock"):
                 self.docker_endpoint_input.setText("npipe:////./pipe/docker_engine")
         else:
             if not self.ep_advanced_check.isChecked() or self.ep_port_input.text() in ("5985", "5986"):
                 self.ep_port_input.setText("22")
-            if self.ep_user_input.text() == "Administrator":
-                self.ep_user_input.setText("root")
             if hasattr(self, "docker_endpoint_input") and self.docker_endpoint_input.text().strip() in ("", "npipe:////./pipe/docker_engine"):
                 self.docker_endpoint_input.setText("unix:///var/run/docker.sock")
 
@@ -1296,6 +1327,8 @@ class MainWindow(QMainWindow):
         if not hasattr(self, "ep_version_combo"):
             return "1.40.1"
         text = self.ep_version_combo.currentText().strip()
+        if text.startswith("Do Not Install"):
+            return "1.40.1"
         if text.startswith("Auto-install Official "):
             text = text[len("Auto-install Official "):].strip()
         if " " in text:
@@ -1400,12 +1433,14 @@ class MainWindow(QMainWindow):
             self.ep_missing_banner.setVisible(False)
         try:
             target = self._get_endpoint_target()
+            if target.connection_method in (ConnectionMethod.SSH, ConnectionMethod.WINRM) and not target.username:
+                raise ValueError("Enter an endpoint username before detecting or applying.")
             self.logger.info("Detecting endpoint %s (%s, OS: %s)", target.hostname, target.connection_method.value, target.os_family.value)
             executor = self._create_executor(target)
             connected = executor.test_connection()
             if not connected:
                 self.logger.warning("Endpoint connection test failed for %s", target.hostname)
-                self.ep_status_label.setText("Connection failed: unable to connect (details in View Log)")
+                self.ep_status_label.setText(f"Connection failed: {getattr(executor, 'connection_error', 'unable to connect')}")
                 self.ep_status_label.setStyleSheet("color: #d95926;")
                 if hasattr(self, "ep_missing_banner"):
                     self.ep_missing_banner.setVisible(False)
@@ -1422,6 +1457,9 @@ class MainWindow(QMainWindow):
                 if target.connection_method in (ConnectionMethod.WINRM, ConnectionMethod.LOCAL):
                     if target.connection_method == ConnectionMethod.WINRM or sys.platform == "win32":
                         win_det = detect_windows_telegraf(executor)
+                        if (win_det.service_name or "").lower() == "ucp-telegraf" or "ucp-telegraf" in (win_det.binary_path or "").lower():
+                            raise RuntimeError("VCF Operations owns this ucp-telegraf agent. Manage it through Ops.")
+                        self.detected_config_dir = win_det.config_dir
                         installed = win_det.installed
                         binary_path = win_det.binary_path
                         service_name = win_det.service_name
@@ -1464,7 +1502,7 @@ class MainWindow(QMainWindow):
                 if service_name:
                     details.append(f"Service Name: {service_name}")
                 details.extend([
-                    "Config Directory: C:\\telegraf\\telegraf.d",
+                    f"Config Directory: {self.detected_config_dir}",
                     "Agent Distribution: InfluxData Official Open-Source",
                 ])
                 self.ep_details_box.setPlainText("\n".join(details))
@@ -1701,12 +1739,11 @@ class MainWindow(QMainWindow):
         ]
 
         # Two-pane container
-        pane_layout = QHBoxLayout()
+        pane_layout = QVBoxLayout()
         pane_layout.setSpacing(12)
 
         # Left pane: Catalog list
         left_box = QFrame()
-        left_box.setFixedWidth(320)
         left_box.setProperty("class", "lattice-card")
         left_layout = QVBoxLayout(left_box)
         left_layout.setContentsMargins(10, 10, 10, 10)
@@ -1718,7 +1755,7 @@ class MainWindow(QMainWindow):
 
         self.plugin_catalog_list = QListWidget()
         self.plugin_catalog_list.setProperty("class", "step-list")
-        self.plugin_catalog_list.setMinimumHeight(360)
+        self.plugin_catalog_list.setFixedHeight(180)
         left_layout.addWidget(self.plugin_catalog_list)
         pane_layout.addWidget(left_box)
 
@@ -2076,6 +2113,11 @@ class MainWindow(QMainWindow):
             elif not self.custom_toml_check.isChecked() and not getattr(self, "_custom_toml_manually_unchecked", False) and not self._updating_catalog:
                 self.custom_toml_check.setChecked(True)
 
+    def _browse_ssh_key(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(self, "Select SSH private key")
+        if path:
+            self.ep_pass_input.setText(path)
+
     def _browse_ca_cert(self) -> None:
         init_file = (
             self.vcf_ca_input.text().strip()
@@ -2418,7 +2460,7 @@ class MainWindow(QMainWindow):
 
         desc = QLabel(
             "Review generated Telegraf TOML fragments and planned actions before any execution. "
-            "No endpoints are contacted during preview."
+            "This is an offline template. Dry-run on Step 6 prepares the exact configuration using endpoint discovery and Ops identity."
         )
         desc.setProperty("class", "lattice-muted")
         desc.setWordWrap(True)
@@ -2477,7 +2519,7 @@ class MainWindow(QMainWindow):
         mon = self._get_monitoring_config()
 
         is_win = target.os_family == OSFamily.WINDOWS
-        conf_dir = "C:\\telegraf\\telegraf.d" if is_win else "/etc/telegraf/telegraf.d"
+        conf_dir = getattr(self, "detected_config_dir", None) or ("C:\\telegraf\\telegraf.d" if is_win else "/etc/telegraf/telegraf.d")
         default_ca = f"{conf_dir}\\ca.pem" if is_win else f"{conf_dir}/ca.pem"
         default_cert = f"{conf_dir}\\cert.pem" if is_win else f"{conf_dir}/cert.pem"
         default_key = f"{conf_dir}\\key.pem" if is_win else f"{conf_dir}/key.pem"
@@ -2486,8 +2528,11 @@ class MainWindow(QMainWindow):
         sys_toml = renderer.render_system_inputs(mon)
         out_toml = renderer.render_vcf_output(
             collector_address=env.collector.address,
-            hostname=target.hostname,
-            verify_ssl=env.verify_ssl,
+            hostname=target.registered_hostname or target.hostname,
+            is_windows=is_win,
+            vm_mor=target.vm_mor,
+            vc_id=target.vc_id,
+            verify_ssl=env.agent_verify_ssl,
             ca_cert_path=default_ca,
             cert_path=default_cert,
             key_path=default_key,
@@ -2560,6 +2605,11 @@ class MainWindow(QMainWindow):
         self.review_summary_box.setPlainText("\n".join(plan_lines))
         self.preview_system_box.setPlainText(sys_toml)
         self.preview_output_box.setPlainText(out_toml)
+        prepared = getattr(self, "_prepared_config", None)
+        if prepared and prepared[0] == self._preview_key():
+            self.preview_system_box.setPlainText(prepared[1])
+            self.preview_output_box.setPlainText(prepared[2])
+            self.review_summary_box.setPlainText("Exact configuration prepared by the last run for these settings.\n" + "\n".join(plan_lines))
 
     # --------------------------------------------------------------------------
     # Step 5: Execution & Honest Verification
@@ -2593,7 +2643,13 @@ class MainWindow(QMainWindow):
         c_layout.addWidget(desc)
 
         action_row = QHBoxLayout()
-        self.dry_run_check = QCheckBox("Dry-run only (Simulate without target modifications)")
+        self.replace_inputs_check = QCheckBox("Replace existing helper inputs")
+        self.replace_inputs_check.setToolTip("Unchecked preserves deployed helper inputs; other fragments are always retained.")
+        c_layout.addWidget(self.replace_inputs_check)
+        self.result_banner = QLabel()
+        self.result_banner.setWordWrap(True)
+        c_layout.addWidget(self.result_banner)
+        self.dry_run_check = QCheckBox("Dry-run (no endpoint changes)")
         action_row.addWidget(self.dry_run_check)
 
         action_row.addStretch()
@@ -2629,6 +2685,7 @@ class MainWindow(QMainWindow):
         cli_header_row = QHBoxLayout()
         cli_desc = QLabel("Command-line invocation to repeat this exact onboarding workflow from CLI or scripts:")
         cli_desc.setProperty("class", "lattice-muted")
+        cli_desc.setWordWrap(True)
         cli_header_row.addWidget(cli_desc)
         cli_header_row.addStretch()
 
@@ -2682,37 +2739,42 @@ class MainWindow(QMainWindow):
         env = self._get_vcf_env()
         mon = self._get_monitoring_config()
         dry_run = getattr(self, "dry_run_check", None) and self.dry_run_check.isChecked()
+        quote = (lambda value: "'" + value.replace("'", "''") + "'") if sys.platform == "win32" else shlex.quote
         parts = ["vcf-telegraf-helper run"]
-        parts.append(f"--vcf-url {shlex.quote(env.url)}")
+        if self.replace_inputs_check.isChecked():
+            parts.append("--replace-inputs")
+        if not env.agent_verify_ssl:
+            parts.append("--no-agent-verify-ssl")
+        parts.append(f"--vcf-url {quote(env.url)}")
         use_token_auth = hasattr(self, "vcf_auth_type_combo") and "token" in self.vcf_auth_type_combo.currentText().lower()
         if use_token_auth:
             parts.append('--vcf-token "<token>"')
         elif env.username:
-            parts.append(f"--vcf-user {shlex.quote(env.username)}")
+            parts.append(f"--vcf-user {quote(env.username)}")
             if env.auth_source and env.auth_source.lower() != "local":
-                parts.append(f"--vcf-auth-source {shlex.quote(env.auth_source)}")
+                parts.append(f"--vcf-auth-source {quote(env.auth_source)}")
             if env.password:
                 parts.append('--vcf-pass "<password>"')
 
         if not env.verify_ssl:
             parts.append("--no-verify-ssl")
-        parts.append(f"--collector {shlex.quote(env.collector.address)}")
+        parts.append(f"--collector {quote(env.collector.address)}")
         if env.collector.name:
-            parts.append(f"--collector-group {shlex.quote(env.collector.name)}")
+            parts.append(f"--collector-group {quote(env.collector.name)}")
         if env.ca_cert_path:
-            parts.append(f"--ca-cert {shlex.quote(env.ca_cert_path)}")
+            parts.append(f"--ca-cert {quote(env.ca_cert_path)}")
 
-        parts.append(f"--target-host {shlex.quote(target.hostname)}")
+        parts.append(f"--target-host {quote(target.hostname)}")
         parts.append(f"--os {target.os_family.value}")
-        parts.append(f"--connection {shlex.quote(target.connection_method.value)}")
+        parts.append(f"--connection {quote(target.connection_method.value)}")
         std_port = (5986 if target.winrm_use_ssl else 5985) if target.os_family == OSFamily.WINDOWS else 22
         if target.port != std_port:
             parts.append(f"--port {target.port}")
 
         if target.username:
-            parts.append(f"--ssh-user {shlex.quote(target.username)}")
+            parts.append(f"--ssh-user {quote(target.username)}")
         if target.key_filename:
-            parts.append(f"--ssh-key {shlex.quote(target.key_filename)}")
+            parts.append(f"--ssh-key {quote(target.key_filename)}")
         else:
             parts.append('--ssh-pass "<password>"')
 
@@ -2722,17 +2784,17 @@ class MainWindow(QMainWindow):
         if target.install_telegraf:
             parts.append("--install-telegraf")
             if target.telegraf_version and target.telegraf_version != "1.40.1":
-                parts.append(f"--telegraf-version {shlex.quote(target.telegraf_version)}")
+                parts.append(f"--telegraf-version {quote(target.telegraf_version)}")
 
         reg_host = getattr(target, "registered_hostname", None) or getattr(self, "discovered_hostname", None)
         if reg_host and reg_host != target.hostname:
-            parts.append(f"--hostname {shlex.quote(reg_host)}")
+            parts.append(f"--hostname {quote(reg_host)}")
         if getattr(target, "vm_mor", None):
-            parts.append(f"--vm-id {shlex.quote(target.vm_mor)}")
+            parts.append(f"--vm-id {quote(target.vm_mor)}")
             if getattr(target, "vc_id", None):
-                parts.append(f"--vc-id {shlex.quote(target.vc_id)}")
+                parts.append(f"--vc-id {quote(target.vc_id)}")
         if getattr(self, "selected_vm_name", None):
-            parts.append(f"--vm-name {shlex.quote(self.selected_vm_name)}")
+            parts.append(f"--vm-name {quote(self.selected_vm_name)}")
 
         if target.os_family == OSFamily.WINDOWS:
             has_win_core = mon.win_perf_counters.enabled or (mon.win_services.enabled and bool(mon.win_services.service_names))
@@ -2745,7 +2807,7 @@ class MainWindow(QMainWindow):
                     parts.append("--no-win-services")
                 elif mon.win_services.service_names != ["telegraf"]:
                     svcs = ",".join(mon.win_services.service_names)
-                    parts.append(f"--win-services {shlex.quote(svcs)}")
+                    parts.append(f"--win-services {quote(svcs)}")
         else:
             core_plugins = [
                 ("cpu", mon.cpu.enabled),
@@ -2773,23 +2835,25 @@ class MainWindow(QMainWindow):
                 parts.append("--processes")
 
         if mon.nginx.enabled and mon.nginx.urls:
-            parts.append(f"--nginx {shlex.quote(mon.nginx.urls[0])}")
+            parts.append(f"--nginx {quote(mon.nginx.urls[0])}")
         if mon.apache.enabled and mon.apache.urls:
-            parts.append(f"--apache {shlex.quote(mon.apache.urls[0])}")
+            parts.append(f"--apache {quote(mon.apache.urls[0])}")
         if mon.mysql.enabled and mon.mysql.servers:
-            parts.append(f"--mysql {shlex.quote(mon.mysql.servers[0])}")
+            parts.append(f"--mysql {quote(mon.mysql.servers[0])}")
         if mon.postgresql.enabled and mon.postgresql.address:
-            parts.append(f"--postgres {shlex.quote(mon.postgresql.address)}")
+            parts.append(f"--postgres {quote(mon.postgresql.address)}")
         if mon.mssql.enabled and mon.mssql.servers:
-            parts.append(f"--mssql {shlex.quote(mon.mssql.servers[0])}")
+            parts.append(f"--mssql {quote(mon.mssql.servers[0])}")
         if mon.docker.enabled and mon.docker.endpoint:
-            parts.append(f"--docker {shlex.quote(mon.docker.endpoint)}")
+            parts.append(f"--docker {quote(mon.docker.endpoint)}")
         if mon.ping.enabled and mon.ping.urls:
-            parts.append(f"--ping {shlex.quote(mon.ping.urls[0])}")
+            parts.append(f"--ping {quote(mon.ping.urls[0])}")
 
         if dry_run:
             parts.append("--dry-run")
 
+        if sys.platform == "win32":
+            return " ".join(parts)
         return " \\\n  ".join(parts)
 
     def _update_cli_command(self) -> None:
@@ -2816,11 +2880,15 @@ class MainWindow(QMainWindow):
         mon = self._get_monitoring_config()
         opts = WorkflowOptions(
             dry_run=self.dry_run_check.isChecked(),
+            replace_inputs=self.replace_inputs_check.isChecked(),
             restart_service=not self.dry_run_check.isChecked(),
             install_telegraf=target.install_telegraf,
             telegraf_version=target.telegraf_version,
         )
 
+        if target.connection_method in (ConnectionMethod.SSH, ConnectionMethod.WINRM) and not target.username:
+            raise ValueError("Enter an endpoint username before detecting or applying.")
+        self._running_preview_key = self._preview_key()
         executor = self._create_executor(target)
         adapter = get_adapter(env)
 
@@ -2836,6 +2904,8 @@ class MainWindow(QMainWindow):
         self.worker.moveToThread(self.worker_thread)
 
         self.worker_thread.started.connect(self.worker.run)
+        self.worker.message.connect(self.stage_list_box.appendPlainText)
+        self.worker.prepared.connect(self._show_prepared_config)
         self.worker.stage_updated.connect(self._on_worker_stage)
         self.worker.finished.connect(self._on_worker_finished)
         self.worker.failed.connect(self._on_worker_failed)
@@ -2844,11 +2914,27 @@ class MainWindow(QMainWindow):
 
         self.worker_thread.start()
 
+    def _preview_key(self):
+        return (self._get_endpoint_target().model_dump_json(), self._get_vcf_env().model_dump_json(),
+                self._get_monitoring_config().model_dump_json(), self.replace_inputs_check.isChecked())
+
+    def _show_prepared_config(self, system: str, output: str) -> None:
+        self._prepared_config = (self._running_preview_key, system, output)
+        self.preview_system_box.setPlainText(system)
+        self.preview_output_box.setPlainText(output)
+
     def _on_worker_stage(self, result: StageResult) -> None:
         line = f"[{result.stage.value}] {result.status.value:<7} {result.message}"
         self.stage_list_box.appendPlainText(line)
+        if result.details:
+            self.stage_list_box.appendPlainText(result.details)
 
     def _on_worker_finished(self, summary: RunSummary) -> None:
+        dry_run = self.dry_run_check.isChecked()
+        pending = any(str(v).startswith("PENDING") for v in summary.verifications.values())
+        outcome = "FAILED: review the stage details below" if not summary.success else ("DRY-RUN COMPLETE: live verification skipped" if dry_run else ("APPLIED: ingestion confirmation pending" if pending else "SUCCESS: configuration verified"))
+        self.result_banner.setText(outcome)
+        self.result_banner.setStyleSheet("font-weight: 700; color: " + ("#d95926" if not summary.success or pending else "#199e70") + ";")
         self.last_summary = summary
         self.execute_btn.setEnabled(True)
         self.export_md_btn.setEnabled(True)
@@ -2857,7 +2943,7 @@ class MainWindow(QMainWindow):
         v_lines = [
             "",
             "============================================================",
-            f"OPERATIONAL VERIFICATION: {'PASS' if summary.success else 'FAIL'}",
+            f"WORKFLOW RESULT: {outcome}",
             "============================================================",
         ]
         if summary.verifications:
@@ -2874,6 +2960,7 @@ class MainWindow(QMainWindow):
 
     def _on_worker_failed(self, error: str) -> None:
         self.execute_btn.setEnabled(True)
+        self.result_banner.setText("FAILED: " + error)
         self.stage_list_box.appendPlainText(f"\nFATAL WORKFLOW ERROR: {error}")
         QMessageBox.critical(self, "Workflow Error", f"Workflow execution failed: {error}")
 
@@ -2910,7 +2997,7 @@ class MainWindow(QMainWindow):
             password = None
         else:
             token = None
-            username = self.vcf_user_input.text().strip() or "admin"
+            username = self.vcf_user_input.text().strip()
             password = self.vcf_pass_input.text() or None
             source_text = self.vcf_auth_source_combo.currentText().strip() if hasattr(self, "vcf_auth_source_combo") else ""
             if source_text and source_text.lower() != "local":
@@ -2925,6 +3012,7 @@ class MainWindow(QMainWindow):
             auth_source=auth_source,
             collector=collector,
             verify_ssl=self.vcf_ssl_check.isChecked(),
+            agent_verify_ssl=self.agent_ssl_check.isChecked(),
             ca_cert_path=ca_cert,
         )
 
@@ -2933,7 +3021,7 @@ class MainWindow(QMainWindow):
         is_win = bool(os_str and os_str.currentText().lower().startswith("win"))
         os_family = OSFamily.WINDOWS if is_win else OSFamily.LINUX
         method = ConnectionMethod.WINRM if is_win else ConnectionMethod.SSH
-        default_user = "Administrator" if is_win else "root"
+        default_user = None
         try:
             port_val = int(self.ep_port_input.text().strip())
         except Exception:
@@ -2948,7 +3036,7 @@ class MainWindow(QMainWindow):
 
         if is_win:
             key_filename = None
-            password = self.ep_pass_input.text() or None
+            password = self.ep_pass_input.text()
         else:
             use_key = hasattr(self, "ep_auth_radio_key") and self.ep_auth_radio_key.isChecked()
             if use_key:
@@ -2956,7 +3044,7 @@ class MainWindow(QMainWindow):
                 password = None
             else:
                 key_filename = None
-                password = self.ep_pass_input.text() or None
+                password = self.ep_pass_input.text()
 
         reg_hname = getattr(self, "selected_vm_name", None) or getattr(self, "discovered_hostname", None)
 

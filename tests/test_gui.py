@@ -89,6 +89,7 @@ def test_main_window_endpoint_detection_linux(qapp, tmp_path):
     )
     window._create_executor = lambda target: mock_exec
 
+    window.ep_user_input.setText("operator")
     window._detect_endpoint()
     assert "Connected & Discovered" in window.ep_status_label.text()
     assert "Ubuntu 22.04 LTS" in window.ep_details_box.toPlainText()
@@ -101,12 +102,12 @@ def test_main_window_endpoint_detection_windows(qapp, tmp_path):
     window = MainWindow(state_store=store)
 
     window.ep_os_combo.setCurrentText("Windows")
-    assert window.ep_user_input.text() == "Administrator"
+    assert window.ep_user_input.text() == ""
     assert window.ep_auth_radio_widget.isHidden() is True
     target = window._get_endpoint_target()
     assert target.connection_method == ConnectionMethod.WINRM
     assert window.ep_port_input.text() == "5985"
-    assert "Auto-install" in window.ep_version_combo.currentText()
+    assert "Do Not Install" in window.ep_version_combo.currentText()
 
     from unittest.mock import MagicMock
     mock_exec = MagicMock()
@@ -114,6 +115,7 @@ def test_main_window_endpoint_detection_windows(qapp, tmp_path):
     mock_exec.file_exists.return_value = False
     window._create_executor = lambda target: mock_exec
 
+    window.ep_user_input.setText("operator")
     window._detect_endpoint()
     assert "Connected & Discovered (Windows)" in window.ep_status_label.text()
     assert "C:\\telegraf\\telegraf.d" in window.ep_details_box.toPlainText()
@@ -136,6 +138,7 @@ def test_main_window_endpoint_detection_preserves_auto_install_opt_out(qapp, tmp
     mock_exec.execute.return_value = MagicMock(success=False, stdout="")
     window._create_executor = lambda target: mock_exec
 
+    window.ep_user_input.setText("operator")
     window._detect_endpoint()
     assert not window.ep_missing_banner.isHidden()
     assert "NO (auto-install disabled)" in window.ep_details_box.toPlainText()
@@ -155,6 +158,7 @@ def test_main_window_endpoint_detection_resets_missing_banner_on_failure(qapp, t
     mock_exec.test_connection.return_value = False
     window._create_executor = lambda target: mock_exec
 
+    window.ep_user_input.setText("operator")
     window._detect_endpoint()
     assert window.ep_missing_banner.isHidden()
     assert "Connection failed" in window.ep_status_label.text()
@@ -382,6 +386,7 @@ def test_main_window_endpoint_detection_installed_hides_banner(qapp, tmp_path):
     )
     window._create_executor = lambda target: mock_exec
 
+    window.ep_user_input.setText("operator")
     window._detect_endpoint()
     assert "Connected & Discovered" in window.ep_status_label.text()
     assert window.ep_missing_banner.isHidden() is True
@@ -467,7 +472,7 @@ def test_main_window_telegraf_version_selection(qapp, tmp_path):
     assert hasattr(window, "ep_version_combo")
     assert window.ep_version_combo.isEditable() is True
     assert window.ep_version_combo.count() >= 4
-    assert window.ep_version_combo.minimumWidth() >= 380
+    assert window.ep_version_combo.minimumWidth() <= 300
     assert window.ep_version_combo.lineEdit().cursorPosition() == 0
     assert window._get_selected_telegraf_version() == "1.40.1"
 
@@ -574,7 +579,7 @@ def test_main_window_worker_finished_summary_handling(qapp, tmp_path):
     assert window.export_md_btn.isEnabled()
     assert window.export_json_btn.isEnabled()
     log_text = window.stage_list_box.toPlainText()
-    assert "OPERATIONAL VERIFICATION: PASS" in log_text
+    assert "WORKFLOW RESULT: SUCCESS" in log_text
     assert "Telegraf installed" in log_text
     assert "Collector reachable" in log_text
 
@@ -647,6 +652,7 @@ def _mock_window(qapp, tmp_path, monkeypatch):
 
 
 def _select_vm(window, name):
+    window.vm_status_filter.setCurrentText("All Agent States")
     row = next(r for r in range(window.vm_table.rowCount()) if window.vm_table.item(r, 0).text() == name)
     window.vm_table.selectRow(row)
 
@@ -655,6 +661,7 @@ def _unlock_all(window):
     window._test_vcf_connection()
     _select_vm(window, "oraclesrv01")
     window.ep_pass_input.setText("secret")
+    window.ep_user_input.setText("operator")
     window._detect_endpoint()
 
 
@@ -690,12 +697,14 @@ def test_main_window_step_gating(qapp, tmp_path, monkeypatch):
     assert window.page_stack.currentIndex() == 0
 
     window.ep_pass_input.setText("secret")
+    window.ep_user_input.setText("operator")
     window._detect_endpoint()
     assert window._max_unlocked_step() == window.STEP_EXECUTE
 
     # Changing how we reach the endpoint re-locks everything after Step 3
     window.ep_pass_input.setText("other")
     assert window._max_unlocked_step() == window.STEP_TARGET
+    window.ep_user_input.setText("operator")
     window._detect_endpoint()
 
     # No monitoring inputs locks Review and Execute
@@ -774,7 +783,7 @@ def test_main_window_cli_command_generation_and_copy(qapp, tmp_path, monkeypatch
     assert "--collector 10.10.10.50" in cmd
     assert "--collector-group 'Simulated CP Group'" in cmd
     assert "--vm-id vm-1004" in cmd
-    assert "--install-telegraf" in cmd
+    assert "--install-telegraf" not in cmd
     assert "--mode" not in cmd and "--output-dir" not in cmd
     assert "--dry-run" not in cmd
 
@@ -805,6 +814,7 @@ def test_main_window_vm_inventory_filter_and_binding(qapp, tmp_path, monkeypatch
     assert window.vm_table.columnCount() == 6
     headers = [window.vm_table.horizontalHeaderItem(c).text() for c in range(6)]
     assert "Collector Group" not in headers and "Power" in headers
+    window.vm_status_filter.setCurrentText("All Agent States")
     assert "5 / 6 VMs" in window.vm_count_label.text()
 
     window.vm_show_off_check.setChecked(True)
@@ -955,6 +965,7 @@ def test_main_window_execute_recovers_when_setup_fails(qapp, tmp_path, monkeypat
     window = MainWindow(state_store=StateStore(state_file=tmp_path / "state.json"))
     monkeypatch.setattr(mw.QMessageBox, "critical", lambda *a, **k: None)
     monkeypatch.setattr(window, "_create_executor", lambda target: (_ for _ in ()).throw(RuntimeError("no route to host")))
+    window.ep_user_input.setText("operator")
     window._run_workflow()
     assert window.execute_btn.isEnabled() is True
     assert "no route to host" in window.stage_list_box.toPlainText()
@@ -1000,6 +1011,7 @@ def test_main_window_login_source(qapp, tmp_path, monkeypatch):
     window.vcf_auth_type_combo.setCurrentText("Username & Password")
     assert window.vcf_auth_source_combo.isHidden() is False
     assert window._get_vcf_env().auth_source == "local"
+    window.vcf_user_input.setText("operator")
     window.vcf_auth_source_combo.setCurrentText("VCF SSO")
     assert window._get_vcf_env().auth_source == "VCF SSO"
     assert "--vcf-auth-source 'VCF SSO'" in window._build_cli_command()
@@ -1042,3 +1054,51 @@ def test_main_window_login_source_async(qapp, tmp_path, monkeypatch):
     ]
 
 
+
+
+def test_target_change_clears_credentials_and_results(qapp, tmp_path):
+    window = MainWindow(state_store=StateStore(state_file=tmp_path / 'state.json'))
+    window.ep_user_input.setText('old-admin')
+    window.ep_pass_input.setText('secret')
+    window.stage_list_box.setPlainText('old target files')
+    window.ep_host_input.setText('new-target')
+    assert window.ep_pass_input.text() == ''
+    assert window.ep_user_input.text() == ''
+    assert window.stage_list_box.toPlainText() == ''
+
+
+def test_fresh_profile_has_no_privileged_defaults(qapp, tmp_path):
+    window = MainWindow(state_store=StateStore(state_file=tmp_path / 'state.json'))
+    assert window.ep_user_input.text() == ''
+    assert window.vcf_user_input.text() == ''
+    assert window.minimumWidth() <= 1000
+
+
+def test_prepared_preview_survives_return_to_review(qapp, tmp_path):
+    window = MainWindow(state_store=StateStore(state_file=tmp_path / 'state.json'))
+    window._running_preview_key = window._preview_key()
+    window._show_prepared_config('deployed inputs', 'prepared output')
+    window._update_preview()
+    assert window.preview_output_box.toPlainText() == 'prepared output'
+    window.ep_host_input.setText('another-host')
+    window._update_preview()
+    assert window.preview_output_box.toPlainText() != 'prepared output'
+
+
+def test_powershell_repeat_command_quotes_paths(qapp, tmp_path, monkeypatch):
+    from vcf_ops_telegraf_helper.gui import main_window as mw
+    window = MainWindow(state_store=StateStore(state_file=tmp_path / 'state.json'))
+    window.ep_host_input.setText('host')
+    window.ep_auth_radio_key.setChecked(True)
+    window.ep_pass_input.setText("C:\\Users\\O'Brien\\my key")
+    monkeypatch.setattr(mw.sys, 'platform', 'win32')
+    command = window._build_cli_command()
+    assert "O''Brien" in command
+    assert '\n' not in command
+    assert '--install-telegraf' not in command
+
+
+def test_blank_password_mode_does_not_enable_ambient_ssh_keys(qapp, tmp_path):
+    window = MainWindow(state_store=StateStore(state_file=tmp_path / 'state.json'))
+    window.ep_auth_radio_pass.setChecked(True)
+    assert window._get_endpoint_target().password == ''

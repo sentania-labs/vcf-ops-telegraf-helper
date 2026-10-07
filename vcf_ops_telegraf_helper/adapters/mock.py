@@ -118,7 +118,7 @@ class MockVCFOpsIntegration(VCFOpsIntegration):
             collector_address=collector_addr,
             script_url=f"https://{collector_addr}/downloads/salt/{script_name}",
             output_url=f"https://{collector_addr}/opensource/default/metric",
-            skip_certificate=not self.env.verify_ssl,
+            skip_certificate=not self.env.agent_verify_ssl,
             ca_cert_content=MOCK_CERT_PEM,
             client_cert_content=MOCK_CERT_PEM,
             client_key_content=MOCK_KEY_PEM,
@@ -134,7 +134,7 @@ class MockVCFOpsIntegration(VCFOpsIntegration):
             collector_group="default-collector-group",
         )
 
-    def verify_ingestion(self, target_hostname: str) -> str:
+    def verify_ingestion(self, target_hostname: str, since: Optional[float] = None) -> str:
         return self.ingestion_status
 
     def list_virtual_machines(self, strict: bool = False) -> list[VirtualMachineResource]:

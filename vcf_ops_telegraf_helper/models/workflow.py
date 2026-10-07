@@ -87,6 +87,7 @@ class WorkflowOptions(BaseModel):
     install_telegraf: bool = False
     telegraf_version: Optional[str] = None
     force_new_cert: bool = False
+    replace_inputs: bool = False
 
 
 class RunSummary(BaseModel):
@@ -131,6 +132,10 @@ class RunSummary(BaseModel):
         for s in self.stages:
             badge = f"**{s.status.value}**"
             lines.append(f"| {s.stage.value} | {badge} | {s.message} | {s.duration_ms} ms |")
+
+        for s in self.stages:
+            if s.details:
+                lines.extend(["", f"### {s.stage.value if hasattr(s.stage, 'value') else s.stage}", "", s.details])
 
         if self.verifications:
             lines.extend([

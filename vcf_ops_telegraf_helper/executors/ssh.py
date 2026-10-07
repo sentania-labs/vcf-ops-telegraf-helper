@@ -40,6 +40,8 @@ class SSHExecutor(EndpointExecutor):
         self.key_filename = os.path.expanduser(key_filename) if key_filename else None
         self.timeout = timeout
         self.use_sudo = use_sudo and (username != "root")
+        self.connection_error = ""
+        self.auth_method = "key file" if key_filename else ("password" if password is not None else "public key (SSH agent/default keys)")
         self._client: Optional[paramiko.SSHClient] = None
         self._sftp: Optional[paramiko.SFTPClient] = None
 
@@ -53,11 +55,12 @@ class SSHExecutor(EndpointExecutor):
             hostname=self.hostname,
             port=self.port,
             username=self.username,
-            password=self.password,
+            password=None if self.key_filename else self.password,
+            passphrase=self.password if self.key_filename else None,
             key_filename=self.key_filename,
             timeout=self.timeout,
-            look_for_keys=True,
-            allow_agent=True,
+            look_for_keys=self.password is None and not self.key_filename,
+            allow_agent=self.password is None and not self.key_filename,
         )
         self._client = client
 
@@ -82,11 +85,8 @@ class SSHExecutor(EndpointExecutor):
             detail = (res.stderr or "").strip() or f"exit code {res.exit_code} with no output"
         # Errors can echo input back; never let the password (also the key passphrase) reach the log
         detail = redact_secrets(detail, [self.password] if self.password else None)
-        # paramiko offers every one of these that is available, so name them all
-        sources = [f"key file {self.key_filename}"] if self.key_filename else []
-        if self.password:
-            sources.append("password" if not self.key_filename else "password (also used as key passphrase)")
-        sources.extend(["SSH agent", "default keys"])
+        self.connection_error = detail[:2000]
+        sources = [self.auth_method]
         logger.warning(
             "SSH connection test failed for %s:%d as user %r (%s): %s",
             self.hostname,
@@ -193,6 +193,11 @@ class SSHExecutor(EndpointExecutor):
             sftp.chmod(destination_path, mode)
 
     def download(self, source_path: str) -> str:
+        if self.use_sudo and self._is_privileged_path(source_path):
+            result = self.execute(f"sudo -n cat -- {shlex.quote(source_path)}")
+            if not result.success:
+                raise IOError(f"Cannot read protected file {source_path}: {result.stderr.strip()}")
+            return result.stdout
         sftp = self._get_sftp()
         with sftp.open(source_path, "rb") as remote_file:
             content = remote_file.read()

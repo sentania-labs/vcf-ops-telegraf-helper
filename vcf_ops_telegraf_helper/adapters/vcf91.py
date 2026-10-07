@@ -10,6 +10,7 @@ import ipaddress
 import os
 import re
 import socket
+import sys
 from typing import Any, Dict, List, Optional, Tuple
 import urllib.parse
 import zipfile
@@ -30,6 +31,8 @@ def get_default_ca_bundle(custom_path: Optional[str] = None) -> Any:
         val = os.environ.get(env_var)
         if val and os.path.exists(val):
             return val
+    if sys.platform in ("win32", "darwin"):
+        return True
     system_paths = [
         "/etc/ssl/certs/ca-certificates.crt",
         "/etc/pki/tls/certs/ca-bundle.crt",
@@ -49,6 +52,8 @@ class VCF91OpenTelegrafIntegration(VCFOpsIntegration):
         self.env = env
         self.base_url = env.url.rstrip("/")
         self.session = session or requests.Session()
+        from vcf_ops_telegraf_helper.security.tls import NativeTrustAdapter
+        self.session.mount("https://", NativeTrustAdapter())
         if not env.verify_ssl:
             self.session.verify = False
         else:
@@ -60,11 +65,15 @@ class VCF91OpenTelegrafIntegration(VCFOpsIntegration):
             url = f"{self.base_url}/suite-api/api/versions"
             resp = self.session.get(url, timeout=10, headers={"Accept": "application/json"})
             return resp.status_code in (200, 401)
+        except requests.exceptions.SSLError as exc:
+            raise RuntimeError("TLS certificate verification failed for VCF Operations. Trust its CA in the OS store or select an Enterprise CA Bundle.") from exc
         except Exception:
             # Fall back to root path check if versions path is blocked
             try:
                 resp = self.session.get(f"{self.base_url}/ui/", timeout=10)
                 return resp.status_code in (200, 301, 302, 401)
+            except requests.exceptions.SSLError as exc:
+                raise RuntimeError("TLS certificate verification failed for VCF Operations") from exc
             except Exception:
                 return False
 
@@ -805,8 +814,8 @@ class VCF91OpenTelegrafIntegration(VCFOpsIntegration):
             collector_address=collector_addr,
             script_url=f"https://{collector_addr}/downloads/salt/{script_name}",
             output_url=f"https://{collector_addr}/opensource/default/metric",
-            skip_certificate=not self.env.verify_ssl,
-            ca_cert_path=self.env.ca_cert_path,
+            skip_certificate=not self.env.agent_verify_ssl,
+            ca_cert_path=None,
             ca_cert_content=ca_cert_content,
             client_cert_content=client_cert_content,
             client_key_content=client_key_content,
@@ -822,7 +831,7 @@ class VCF91OpenTelegrafIntegration(VCFOpsIntegration):
             mutual_auth=mutual_auth,
         )
 
-    def verify_ingestion(self, target_hostname: str) -> str:
+    def verify_ingestion(self, target_hostname: str, since: Optional[float] = None) -> str:
         """Check whether metrics for target are appearing in VCF Operations.
 
         Returns:
@@ -865,8 +874,14 @@ class VCF91OpenTelegrafIntegration(VCFOpsIntegration):
                                 if s_resp.status_code == 200:
                                     s_data = s_resp.json()
                                     stat_values = s_data.get("values", [])
-                                    if stat_values:
-                                        return "PASS"
+                                    cutoff = (since if since is not None else __import__('time').time() - 900) * 1000
+                                    for value in stat_values:
+                                        for stat in value.get("stat-list", {}).get("stat", []):
+                                            timestamps = stat.get("timestamps", [])
+                                            samples = stat.get("data", [])
+                                            if any(isinstance(stamp, (int, float)) and stamp > cutoff and sample is not None
+                                                   for stamp, sample in zip(timestamps, samples)):
+                                                return "PASS"
                             except Exception:
                                 pass
                         # Resource enrolled in VCF Ops APPOSUCP, metrics roll-up pending (5-15 min)
@@ -885,8 +900,8 @@ class VCF91OpenTelegrafIntegration(VCFOpsIntegration):
         if not self.env.token and self.env.username and self.env.password:
             try:
                 self.acquire_token(self.env.username, self.env.password)
-            except Exception:
-                pass
+            except requests.exceptions.SSLError as exc:
+                raise RuntimeError("TLS certificate verification failed for VCF Operations") from exc
 
     def _fetch_paged_resources(self, strict: bool, **query: Any) -> List[Dict[str, Any]]:
         """Page through GET /resources. With strict=True a failure raises instead of truncating."""

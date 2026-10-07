@@ -39,6 +39,8 @@ class WinRMExecutor(EndpointExecutor):
         self.use_ssl = use_ssl
         self.transport = transport
         self.timeout = timeout
+        self.connection_error = ""
+        self.auth_method = f"password ({transport})"
         self._session = None
 
     def _get_session(self):
@@ -76,6 +78,7 @@ class WinRMExecutor(EndpointExecutor):
         detail = (res.stderr or "").strip() or f"exit code {res.exit_code} with no output"
         # Errors can echo input back; never let the password reach the persistent log
         detail = redact_secrets(detail, [self.password] if self.password else None)
+        self.connection_error = detail[:2000]
         logger.warning(
             "WinRM connection test failed for %s://%s:%d/wsman as user %r (transport %s): %s",
             "https" if self.use_ssl else "http",

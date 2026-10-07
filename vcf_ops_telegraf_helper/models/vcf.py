@@ -36,6 +36,7 @@ class VCFEnvironment(BaseModel):
     )
     collector: CollectorInfo = Field(description="Cloud Proxy or Collector destination")
     verify_ssl: bool = Field(default=True, description="Verify TLS certificates")
+    agent_verify_ssl: bool = Field(default=True, description="Verify agent TLS to the collector independently of desktop TLS")
     ca_cert_path: Optional[str] = Field(default=None, description="Custom CA certificate bundle path")
     token: Optional[str] = Field(default=None, description="Active auth token if previously acquired")
 

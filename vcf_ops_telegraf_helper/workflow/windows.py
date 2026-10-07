@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ntpath
 import re
 from typing import Optional
 
@@ -22,6 +23,7 @@ class WindowsTelegrafDetection:
         version: Optional[str] = None,
         service_state: Optional[str] = None,
         running: bool = False,
+        command_line: str = "",
     ):
         self.installed = installed
         self.binary_path = binary_path
@@ -29,6 +31,20 @@ class WindowsTelegrafDetection:
         self.version = version
         self.service_state = service_state
         self.running = running
+        directory = ntpath.dirname(binary_path or r"C:\telegraf\telegraf.exe")
+        self.main_config_path = self._config_argument(command_line, "config") or ntpath.join(directory, "telegraf.conf")
+        self.config_dir = self._config_argument(command_line, "config-directory") or ntpath.join(directory, "telegraf.d")
+
+    @staticmethod
+    def _config_argument(command_line: str, name: str) -> Optional[str]:
+        pattern = r"(?:^|\s)--" + re.escape(name) + r"(?:=|\s+)(?:\"([^\"]+)\"|'([^']+)'|([^\s]+))"
+        matches = list(re.finditer(pattern, command_line, re.IGNORECASE))
+        if not matches:
+            return None
+        value = next(group for group in matches[-1].groups() if group is not None)
+        if not ntpath.isabs(value) or "%" in value:
+            raise ValueError(f"Service --{name} must resolve to an absolute path before configuration: {value}")
+        return value
 
     def __iter__(self):
         """Enable unpacking as (binary_path, service_name, version)."""
@@ -130,7 +146,7 @@ def detect_windows_telegraf(executor: EndpointExecutor) -> WindowsTelegrafDetect
     svc_cmd = (
         "Get-CimInstance Win32_Service | Where-Object { $_.PathName -match 'telegraf' } "
         "| Sort-Object -Property @{Expression={if ($_.State -eq 'Running') {0} else {1}}} "
-        "| ForEach-Object { '{0}|{1}|{2}' -f $_.Name, $_.State, $_.PathName }"
+        "| ForEach-Object { '{0}|{1}|{2}' -f $_.Name, $_.State, ([Environment]::ExpandEnvironmentVariables($_.PathName)) }"
     )
     res = executor.execute(svc_cmd, timeout=10)
     if _is_valid_stdout(res):
@@ -156,6 +172,7 @@ def detect_windows_telegraf(executor: EndpointExecutor) -> WindowsTelegrafDetect
                             version=ver,
                             service_state=s_state,
                             running=is_running,
+                            command_line=raw_p,
                         )
 
     # 2. Running process named telegraf
@@ -217,6 +234,7 @@ def detect_windows_telegraf(executor: EndpointExecutor) -> WindowsTelegrafDetect
                 version=ver,
                 service_state=s_state or "Stopped",
                 running=is_running,
+                command_line=raw_p,
             )
 
     # 5. Known folders, C:\telegraf last

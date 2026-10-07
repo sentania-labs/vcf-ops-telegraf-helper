@@ -281,5 +281,6 @@ def test_ssh_test_connection_redacts_password_and_lists_auth_sources(caplog):
             assert executor.test_connection() is False
     logged = caplog.text
     assert "S3cret-pw" not in logged
-    assert "key file /tmp/id_test, password (also used as key passphrase), SSH agent, default keys" in logged
+    assert "(key file)" in logged
+    assert "SSH agent" not in logged
 
