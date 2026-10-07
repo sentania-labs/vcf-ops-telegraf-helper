@@ -78,7 +78,7 @@ class VCFOpsIntegration(ABC):
         pass
 
     @abstractmethod
-    def verify_ingestion(self, target_hostname: str) -> str:
+    def verify_ingestion(self, target_hostname: str, since: Optional[float] = None) -> str:
         """Check whether telemetry from the target is visible in VCF Operations.
 
         Returns:

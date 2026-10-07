@@ -1,0 +1,116 @@
+name: Binary builds
+on:
+  workflow_call:
+    inputs:
+      sign:
+        type: boolean
+        default: false
+  workflow_dispatch:
+    inputs:
+      sign:
+        description: Sign and notarize binaries
+        type: boolean
+        default: true
+permissions:
+  contents: read
+jobs:
+  binaries:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            name: linux
+            ext: ""
+          - os: windows-latest
+            name: windows
+            ext: ".exe"
+          - os: macos-latest
+            name: macos-arm64
+            ext: ""
+          - os: macos-15-intel
+            name: macos-x86_64
+            ext: ""
+    runs-on: ${{ matrix.os }}
+    env:
+      QT_QPA_PLATFORM: offscreen
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Install graphics libraries for offscreen Qt
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libegl1 libgl1
+
+      - name: Install dependencies and PyInstaller
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e '.[gui]' pyinstaller
+
+      - name: Build standalone binary
+        run: python scripts/build_binary.py ${{ matrix.name }}
+
+      - name: Sign the binary (macOS)
+        if: inputs.sign && runner.os == 'macOS'
+        uses: sentania-labs/.github/.github/actions/macos-sign@899421db1380620b2d4e2d8ac8b6acf16fe15b99 # sentania-labs/.github main 2026-10-07
+        with:
+          binary: dist/vcf-telegraf-helper-${{ matrix.name }}
+          macos-cert-p12: ${{ secrets.MACOS_CERT_P12 }}
+          macos-cert-password: ${{ secrets.MACOS_CERT_PASSWORD }}
+          macos-team-id: ${{ secrets.MACOS_TEAM_ID }}
+
+      - name: Sign the binary (Windows)
+        if: inputs.sign && runner.os == 'Windows'
+        uses: sentania-labs/.github/.github/actions/windows-sign@899421db1380620b2d4e2d8ac8b6acf16fe15b99 # sentania-labs/.github main 2026-10-07
+        with:
+          files: ${{ github.workspace }}\dist\vcf-telegraf-helper-${{ matrix.name }}${{ matrix.ext }}
+          endpoint: ${{ secrets.ARTIFACT_SIGNING_ENDPOINT }}
+          signing-account-name: ${{ secrets.ARTIFACT_SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ secrets.ARTIFACT_SIGNING_PROFILE }}
+          azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          azure-client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
+
+      - name: Verify Authenticode signature
+        if: inputs.sign && runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $signature = Get-AuthenticodeSignature 'dist/vcf-telegraf-helper-windows.exe'
+          if ($signature.Status -ne 'Valid') { throw "Authenticode verification failed: $($signature.Status)" }
+
+      - name: Verify Developer ID signature
+        if: inputs.sign && runner.os == 'macOS'
+        run: codesign --verify --strict --verbose=2 dist/vcf-telegraf-helper-${{ matrix.name }}
+
+      - name: Smoke test standalone binary including Qt
+        run: python scripts/smoke_binary.py "dist/vcf-telegraf-helper-${{ matrix.name }}${{ matrix.ext }}"
+
+      # macos-sign and macos-notarize clean up their own failures; this covers
+      # a smoke-test failure between them (only matters on a self-hosted Mac).
+      - name: Remove the signing keychain if the smoke failed (macOS)
+        if: always() && inputs.sign && runner.os == 'macOS'
+        run: security delete-keychain "${KEYCHAIN:-$RUNNER_TEMP/signing.keychain-db}" 2>/dev/null || true
+
+      - name: Notarize (macOS)
+        if: inputs.sign && runner.os == 'macOS'
+        uses: sentania-labs/.github/.github/actions/macos-notarize@899421db1380620b2d4e2d8ac8b6acf16fe15b99 # sentania-labs/.github main 2026-10-07
+        with:
+          binary: dist/vcf-telegraf-helper-${{ matrix.name }}
+          notary-issuer-id: ${{ secrets.NOTARY_ISSUER_ID }}
+          notary-key-id: ${{ secrets.NOTARY_KEY_ID }}
+          notary-key-p8: ${{ secrets.NOTARY_KEY_P8 }}
+
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: vcf-telegraf-helper-${{ matrix.name }}
+          path: dist/vcf-telegraf-helper-${{ matrix.name }}${{ matrix.ext }}
+          if-no-files-found: error
+

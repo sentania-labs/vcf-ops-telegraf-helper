@@ -110,6 +110,24 @@ def cli(ctx: click.Context) -> None:
         click.echo(ctx.get_help())
 
 
+@cli.command("gui-smoke", hidden=True)
+def gui_smoke_cmd() -> None:
+    """Exercise bundled Qt imports, window rendering and event processing."""
+    import tempfile
+    from PySide6.QtWidgets import QApplication
+    from vcf_ops_telegraf_helper.gui.main_window import MainWindow
+    app = QApplication.instance() or QApplication([])
+    with tempfile.TemporaryDirectory(prefix="telegraf-gui-") as directory:
+        window = MainWindow(StateStore(state_file=Path(directory) / "state.json"))
+        window.show()
+        app.processEvents()
+        image = window.grab()
+        if image.isNull() or window.width() > 1024 or window.height() > 740:
+            raise click.ClickException("GUI did not render within a VM console")
+        window.close()
+    click.echo("GUI smoke passed")
+
+
 @cli.command("wizard")
 def wizard_cmd() -> None:
     """Launch the interactive terminal onboarding wizard."""
@@ -277,6 +295,8 @@ def resolve_monitoring_config(
 @click.option("--mssql", default=None, help="MSSQL connection string")
 @click.option("--docker", default=None, help="Docker daemon endpoint (e.g. unix:///var/run/docker.sock)")
 @click.option("--ping", default=None, help="Ping target IP or hostname")
+@click.option("--replace-inputs", is_flag=True, help="Replace deployed helper inputs with this selection (default: preserve)")
+@click.option("--agent-verify-ssl/--no-agent-verify-ssl", default=True, help="Verify agent TLS to collector independently of desktop TLS")
 @click.option("--preview", is_flag=True, help="Show preview before execution")
 @click.option("--dry-run", is_flag=True, help="Simulate execution without modifying target")
 @click.option("--export-md", default=None, help="Export summary to Markdown file")
@@ -331,6 +351,8 @@ def run_cmd(
     mssql: Optional[str],
     docker: Optional[str],
     ping: Optional[str],
+    replace_inputs: bool,
+    agent_verify_ssl: bool,
     preview: bool,
     dry_run: bool,
     export_md: Optional[str],
@@ -448,43 +470,10 @@ def run_cmd(
     else:
         adapter = get_adapter(vcf_env)
 
-    if preview or dry_run:
-        system_toml = TelegrafRenderer.render_system_inputs(monitoring)
-        vcf_toml = TelegrafRenderer.render_vcf_output(
-            collector_address=collector,
-            hostname=target.registered_hostname or target_host,
-            ip=target_host,
-            verify_ssl=verify_ssl,
-            is_windows=is_win,
-        )
-        if is_win:
-            planned_cmds = [
-                "mkdir C:\\telegraf\\telegraf.d",
-                "upload vcf-helper-system.conf -> C:\\telegraf\\telegraf.d\\vcf-helper-system.conf",
-                "upload cloudproxy-http.conf -> C:\\telegraf\\telegraf.d\\cloudproxy-http.conf",
-                "& 'C:\\telegraf\\telegraf.exe' --test --config 'C:\\telegraf\\telegraf.conf' --config-directory 'C:\\telegraf\\telegraf.d'",
-                "Restart-Service telegraf -Force",
-            ]
-        else:
-            planned_cmds = [
-                "mkdir -p /etc/telegraf/telegraf.d",
-                "upload vcf-helper-system.conf -> /etc/telegraf/telegraf.d/vcf-helper-system.conf",
-                "upload cloudproxy-http.conf -> /etc/telegraf/telegraf.d/cloudproxy-http.conf",
-                "/usr/bin/telegraf --test",
-                "systemctl restart telegraf",
-            ]
-        display_preview(
-            console,
-            target_host,
-            collector,
-            system_toml,
-            vcf_toml,
-            planned_cmds,
-        )
-
     reporter = RichTerminalProgressReporter(console)
     wf_options = WorkflowOptions(
         dry_run=dry_run,
+        replace_inputs=replace_inputs,
         restart_service=True,
         install_telegraf=install_telegraf,
         telegraf_version=telegraf_version,
@@ -501,6 +490,16 @@ def run_cmd(
         reporter=reporter,
     )
 
+    vcf_env.agent_verify_ssl = agent_verify_ssl
+    if preview or dry_run:
+        def show_prepared_preview():
+            discovery = workflow.discovery
+            display_preview(console, target_host, workflow.artifacts.collector_address,
+                            workflow.system_conf_content, workflow.vcf_conf_content,
+                            [f"Configuration directory: {discovery.config_dir}",
+                             f"Executable: {discovery.telegraf_bin_path}",
+                             f"Service: {discovery.service_name}"])
+        workflow.preview_callback = show_prepared_preview
     summary = workflow.run()
     display_summary(console, summary)
 

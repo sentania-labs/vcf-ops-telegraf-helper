@@ -3,4 +3,8 @@
 A local administrator utility for configuring open-source Telegraf for VCF Operations.
 """
 
-__version__ = "0.7.3"
+try:
+    from vcf_ops_telegraf_helper._version import __version__
+except ImportError:
+    from importlib.metadata import version
+    __version__ = version("vcf-ops-telegraf-helper")

@@ -5,6 +5,8 @@ from __future__ import annotations
 import hashlib
 import ipaddress
 import os
+import ntpath
+import difflib
 import shlex
 import socket
 import time
@@ -53,6 +55,9 @@ class ConfigureEndpointWorkflow:
         options: Optional[WorkflowOptions] = None,
         reporter: Optional[ProgressReporter] = None,
     ):
+        self.started_at = time.time()
+        self.preview_callback = None
+        self.input_diff = ""
         self.env = environment
         self.target = target
         self.monitoring = monitoring
@@ -161,14 +166,14 @@ class ConfigureEndpointWorkflow:
                 res = StageResult(
                     stage=WorkflowStage.CONNECT,
                     status=StageStatus.PASS,
-                    message=f"Connected to {self.target.hostname} ({self.target.connection_method.value})",
+                    message=f"Connected to {self.target.hostname} ({self.target.connection_method.value}; {getattr(self.executor, 'auth_method', 'local/mock')})",
                     duration_ms=dur,
                 )
             else:
                 res = StageResult(
                     stage=WorkflowStage.CONNECT,
                     status=StageStatus.FAIL,
-                    message=f"Failed to connect to {self.target.hostname}",
+                    message=f"Failed to connect to {self.target.hostname}: {getattr(self.executor, 'connection_error', 'Connection unavailable')}",
                     duration_ms=dur,
                 )
         except Exception as e:
@@ -205,6 +210,8 @@ class ConfigureEndpointWorkflow:
                 os_version = ver_res.stdout.strip() if ver_res.success and ver_res.stdout.strip() else "Microsoft Windows"
 
                 win_det = detect_windows_telegraf(self.executor)
+                if (win_det.service_name or "").lower() == "ucp-telegraf" or "ucp-telegraf" in (win_det.binary_path or "").lower():
+                    raise RuntimeError("This agent is managed by VCF Operations (ucp-telegraf). Use VCF Operations to manage it; helper changes are refused.")
                 installed = win_det.installed
                 version_str = win_det.version
                 service_state = win_det.service_state or ("Running" if win_det.running else "Stopped")
@@ -242,8 +249,8 @@ class ConfigureEndpointWorkflow:
                     telegraf_installed=installed,
                     telegraf_version=version_str,
                     service_state=service_state,
-                    config_dir="C:\\telegraf\\telegraf.d",
-                    main_config_path="C:\\telegraf\\telegraf.conf",
+                    config_dir=ntpath.join(ntpath.dirname(telegraf_bin), "telegraf.d"),
+                    main_config_path=ntpath.join(ntpath.dirname(telegraf_bin), "telegraf.conf"),
                     telegraf_bin_path=telegraf_bin,
                     service_name=win_det.service_name,
                     host_uuid=host_uuid,
@@ -421,6 +428,8 @@ class ConfigureEndpointWorkflow:
                                     }
                             except Exception:
                                 existing_bundle = None
+                    except OSError as exc:
+                        raise RuntimeError("Cannot read existing client identity; refusing to replace it. Check sudo/file permissions.") from exc
                     except Exception:
                         existing_bundle = None
 
@@ -478,12 +487,24 @@ class ConfigureEndpointWorkflow:
             uuid_val = self.discovery.host_uuid if self.discovery else ""
             ip_val = self.discovery.host_ip if self.discovery and self.discovery.host_ip else self.target.hostname
             is_win = (self.target.os_family == OSFamily.WINDOWS) or (type(self.executor).__name__ == "WinRMExecutor")
-            default_ca = "C:\\telegraf\\telegraf.d\\ca.pem" if is_win else "/etc/telegraf/telegraf.d/ca.pem"
-            default_cert = "C:\\telegraf\\telegraf.d\\cert.pem" if is_win else "/etc/telegraf/telegraf.d/cert.pem"
-            default_key = "C:\\telegraf\\telegraf.d\\key.pem" if is_win else "/etc/telegraf/telegraf.d/key.pem"
-            mandatory_script = (
-                "C:\\telegraf\\telegraf.d\\mandatory_tags.bat" if is_win else "/etc/telegraf/telegraf.d/mandatory_tags.sh"
-            )
+            config_dir = self.discovery.config_dir if self.discovery else (r"C:\telegraf\telegraf.d" if is_win else "/etc/telegraf/telegraf.d")
+            join = ntpath.join if is_win else os.path.join
+            default_ca = join(config_dir, "ca.pem")
+            default_cert = join(config_dir, "cert.pem")
+            default_key = join(config_dir, "key.pem")
+            mandatory_script = join(config_dir, "mandatory_tags.bat" if is_win else "mandatory_tags.sh")
+            system_file = join(config_dir, "vcf-helper-system.conf")
+            if self.executor.file_exists(system_file):
+                deployed = self.executor.download(system_file)
+                self.input_diff = self._sanitize("".join(difflib.unified_diff(
+                    deployed.splitlines(keepends=True), self.system_conf_content.splitlines(keepends=True),
+                    fromfile="deployed inputs", tofile="requested inputs",
+                ))) or ""
+                if not self.options.replace_inputs:
+                    self.system_conf_content = deployed
+                    self.reporter.on_message("Preserving deployed inputs. Use Replace existing inputs to apply a new selection.")
+                elif self.input_diff:
+                    self.reporter.on_message(self.input_diff)
             telegraf_bin = (
                 self.discovery.telegraf_bin_path
                 if self.discovery
@@ -493,10 +514,10 @@ class ConfigureEndpointWorkflow:
             vc_id_val = self.artifacts.vc_id if self.artifacts else None
             mutual_auth = self.artifacts.mutual_auth if self.artifacts else True
 
-            has_ca = bool(self.artifacts and (self.artifacts.ca_cert_content or self.env.ca_cert_path))
+            has_ca = bool(self.artifacts and self.artifacts.ca_cert_content)
             has_cert = bool(self.artifacts and self.artifacts.client_cert_content)
             has_key = bool(self.artifacts and self.artifacts.client_key_content)
-            ca_path = (self.env.ca_cert_path or default_ca) if has_ca else None
+            ca_path = default_ca if has_ca else None
             cert_path = default_cert if has_cert else None
             key_path = default_key if has_key else None
             reg_hostname = self._get_registered_hostname()
@@ -505,7 +526,7 @@ class ConfigureEndpointWorkflow:
                 hostname=reg_hostname,
                 uuid=uuid_val,
                 ip=ip_val,
-                verify_ssl=self.env.verify_ssl,
+                verify_ssl=self.env.agent_verify_ssl,
                 ca_cert_path=ca_path,
                 cert_path=cert_path,
                 key_path=key_path,
@@ -519,6 +540,10 @@ class ConfigureEndpointWorkflow:
 
             # 3. Render clean base stub to prevent duplicate metric collection
             self.base_stub_content = TelegrafRenderer.render_base_stub()
+            if self.discovery and self.executor.file_exists(self.discovery.main_config_path):
+                existing_base = self.executor.download(self.discovery.main_config_path)
+                if "[[inputs." in existing_base and "Managed by VCF Operations Open Telegraf Helper" not in existing_base:
+                    raise RuntimeError("Existing main configuration contains unmanaged inputs. Migrate/review those inputs before onboarding; no files have been changed.")
 
             # Validate syntax locally
             v1 = Validator.validate_toml_syntax(self.system_conf_content, "System Inputs")
@@ -531,6 +556,7 @@ class ConfigureEndpointWorkflow:
                     stage=WorkflowStage.RENDER_INPUTS,
                     status=StageStatus.PASS,
                     message="Rendered vcf-helper-system.conf and cloudproxy-http.conf",
+                    details=("Requested input changes (preserved unless replacement enabled):\n" + self.input_diff) if self.input_diff else None,
                     duration_ms=dur,
                 )
             else:
@@ -921,6 +947,7 @@ class ConfigureEndpointWorkflow:
                     if self.executor.file_exists(f_dest):
                         self.executor.execute(f"cp {shlex.quote(f_dest)} {shlex.quote(f'{f_dest}.bak')}")
 
+            self.reporter.on_message("Uploading monitoring and output configuration...")
             # Upload managed fragments
             self.executor.upload(self.system_conf_content, system_file)
             self.executor.upload(self.vcf_conf_content, vcf_file)
@@ -928,6 +955,7 @@ class ConfigureEndpointWorkflow:
 
             # Upload mTLS certificates and security artifacts
             for f_dest, f_content, f_mode in self._security_artifact_files(config_dir, is_win):
+                self.reporter.on_message(f"Uploading {f_dest}...")
                 self.executor.upload(f_content, f_dest, mode=f_mode)
                 self.managed_files.append(f_dest)
 
@@ -1245,7 +1273,7 @@ class ConfigureEndpointWorkflow:
             installed = (
                 self.discovery.telegraf_installed if self.discovery else False
             )
-            if not self.options.dry_run:
+            if not (self.options.dry_run or self.options.preview_only):
                 self.verifications["Telegraf installed"] = "PASS" if installed else "FAIL"
             else:
                 self.verifications["Telegraf installed"] = "PASS" if installed else "SKIPPED"
@@ -1254,7 +1282,7 @@ class ConfigureEndpointWorkflow:
             cfg_valid = bool(self.system_conf_content and self.vcf_conf_content)
             self.verifications["Config valid"] = "PASS" if cfg_valid else "FAIL"
 
-            if not self.options.dry_run:
+            if not (self.options.dry_run or self.options.preview_only):
                 # 3. Service running check
                 svc_name = (
                     self.discovery.service_name
@@ -1318,12 +1346,12 @@ class ConfigureEndpointWorkflow:
                     headers=metric_headers,
                     hostname=short_host,
                     is_windows=is_win,
-                    verify_ssl=self.env.verify_ssl,
+                    verify_ssl=self.env.agent_verify_ssl,
                 )
                 # 6. Ingestion in VCF Ops
-                ingestion_status = self.adapter.verify_ingestion(short_host)
+                ingestion_status = self.adapter.verify_ingestion(short_host, since=self.started_at)
                 if ingestion_status == "UNKNOWN" and short_host != self.target.hostname:
-                    ingestion_status = self.adapter.verify_ingestion(self.target.hostname)
+                    ingestion_status = self.adapter.verify_ingestion(self.target.hostname, since=self.started_at)
                 if ingestion_status == "UNKNOWN":
                     self.verifications["VCF Ops ingestion"] = "PENDING (Ops processing typically requires 5 to 15 minutes)"
                 else:
@@ -1384,7 +1412,7 @@ class ConfigureEndpointWorkflow:
                     duration_ms=dur,
                 )
             else:
-                if not self.options.dry_run:
+                if not (self.options.dry_run or self.options.preview_only):
                     config_dir = (
                         self.discovery.config_dir
                         if self.discovery
@@ -1393,8 +1421,8 @@ class ConfigureEndpointWorkflow:
                     self._cleanup_bak_files(config_dir, is_win)
                 res = StageResult(
                     stage=WorkflowStage.VERIFY,
-                    status=StageStatus.PASS,
-                    message="Completed all verification checks",
+                    status=StageStatus.SKIPPED if (self.options.dry_run or self.options.preview_only) else (StageStatus.WARNING if any(str(v).startswith("PENDING") for v in self.verifications.values()) else StageStatus.PASS),
+                    message="Live verification skipped (preview/dry-run)" if (self.options.dry_run or self.options.preview_only) else "Verification completed; see individual checks",
                     duration_ms=dur,
                 )
         except Exception as e:
@@ -1425,7 +1453,12 @@ class ConfigureEndpointWorkflow:
 
         overall_success = True
         for stage_fn in stages:
+            if stage_fn == self.apply and self.preview_callback:
+                self.preview_callback()
             stage_res = stage_fn()
+            stage_res.message = self._sanitize(stage_res.message) or ""
+            stage_res.details = self._sanitize(stage_res.details)
+            stage_res.command_output = self._sanitize(stage_res.command_output)
             self.stage_results.append(stage_res)
 
             # Abort if a critical stage failed

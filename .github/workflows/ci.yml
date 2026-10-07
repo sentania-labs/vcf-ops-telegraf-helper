@@ -49,8 +49,17 @@ jobs:
       - name: Run test suite
         run: make test
 
+      - name: Exercise SSH and package purge in an isolated container
+        if: matrix.python == '3.12'
+        run: python scripts/smoke_ssh.py
+
       - name: Smoke CLI entry points
         run: |
           vcf-telegraf-helper --help
           vcf-telegraf-helper render --cpu --mem --disk --net
           vcf-telegraf-helper run --vcf-url https://vcf.local --collector 10.10.10.50 --mock-vcf --target-host target.local --connection mock --dry-run
+
+  binaries:
+    uses: ./.github/workflows/binaries.yml
+    with:
+      sign: false

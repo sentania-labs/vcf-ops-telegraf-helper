@@ -26,11 +26,23 @@ This helper compresses those manual steps into a fast, guided, transparent, and 
 
 ## Installation
 
+Download the standalone binary for your desktop from [Releases](https://github.com/sentania-labs/vcf-ops-telegraf-helper/releases). These are the primary artifacts: Windows Authenticode signed, macOS Apple Silicon and Intel Developer ID signed and notarized, plus Linux. No Python installation is required. Each release includes `SHA256SUMS` for the final downloads.
+
+Windows SmartScreen may show an unrecognized-app prompt on early signed releases while reputation builds. Organizational application-control policies still apply.
+
+Python wheels and source distributions are secondary artifacts. On managed Windows, invoke `python -m vcf_ops_telegraf_helper gui`; the launcher created by pip is unsigned and may be blocked by Defender ASR.
+
+For development:
+
 ```bash
-git clone https://github.com/example/vcf-ops-telegraf-helper.git
+git clone https://github.com/sentania-labs/vcf-ops-telegraf-helper.git
 cd vcf-ops-telegraf-helper
-pip install -e .
+python -m pip install -e '.[gui]'
 ```
+
+Desktop API trust uses the operating system certificate store, including Windows and macOS. `--ca-cert` selects a desktop-only CA bundle. Agent trust uses the collector CA deployed on the target; `--no-verify-ssl` does not disable it. Agent TLS has its own `--agent-verify-ssl` setting, enabled by default.
+
+Reruns preserve deployed helper inputs unless `--replace-inputs` is selected. Other configuration fragments are retained. Unmanaged inputs in the main configuration require review before onboarding. Use `--dry-run` to inspect the prepared configuration and input diff without changing endpoint files; preparation may request a certificate from Ops. In the GUI, Step 5 is an offline template and Step 6 dry-run populates the exact prepared configuration. Live ingestion remains pending until Ops returns a sample newer than the run.
 
 ## Quick Start
 
@@ -57,7 +69,7 @@ vcf-telegraf-helper run \
   --vcf-url https://vcf-ops.corp.local \
   --collector 10.10.10.50 \
   --target-host 10.10.20.101 \
-  --user root \
+  --ssh-user operator \
   --connection ssh \
   --preview \
   --export-md summary.md

@@ -118,6 +118,9 @@ class MockExecutor(EndpointExecutor):
             self.service_active = False
             return CommandResult(exit_code=0, stdout="", command=command)
 
+        if "dpkg-query -W" in command:
+            return CommandResult(exit_code=0, stdout="PRESENT" if self.telegraf_installed else "ABSENT", command=command)
+
         if (
             "apt-get purge" in cmd_lower
             or "dnf remove" in cmd_lower

@@ -134,7 +134,7 @@ class MockVCFOpsIntegration(VCFOpsIntegration):
             collector_group="default-collector-group",
         )
 
-    def verify_ingestion(self, target_hostname: str) -> str:
+    def verify_ingestion(self, target_hostname: str, since: Optional[float] = None) -> str:
         return self.ingestion_status
 
     def list_virtual_machines(self, strict: bool = False) -> list[VirtualMachineResource]:

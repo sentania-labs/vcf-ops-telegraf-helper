@@ -5,7 +5,7 @@ PYTHON ?= python3
 all: check
 
 lint:
-	$(PYTHON) -m ruff check vcf_ops_telegraf_helper tests
+	$(PYTHON) -m ruff check vcf_ops_telegraf_helper tests scripts
 
 test:
 	$(PYTHON) -m pytest -v tests

@@ -6,6 +6,7 @@ and package repositories from a target endpoint.
 
 from __future__ import annotations
 
+import shlex
 import time
 from typing import List, Optional
 
@@ -193,37 +194,30 @@ class UninstallEndpointWorkflow:
                     self.purged_paths.append("C:\\telegraf directory")
             else:
                 if self.options.purge_packages:
-                    # Package purge
-                    self.executor.execute(
-                        "DEBIAN_FRONTEND=noninteractive apt-get purge -y -qq telegraf 2>/dev/null || true",
-                        timeout=90,
-                    )
-                    self.executor.execute(
-                        "(dnf remove -y -q telegraf 2>/dev/null || yum remove -y -q telegraf 2>/dev/null) || true",
-                        timeout=90,
-                    )
-                    # Binary & systemd files and residual directories
-                    self.executor.execute(
-                        "rm -f /usr/bin/telegraf /usr/local/bin/telegraf /lib/systemd/system/telegraf.service /etc/systemd/system/telegraf.service 2>/dev/null || true",
-                        timeout=15,
-                    )
-                    self.executor.execute(
-                        "rm -rf /etc/default/telegraf /usr/lib/telegraf 2>/dev/null || true",
-                        timeout=15,
-                    )
-                    self.purged_paths.append("Telegraf package and binary")
-
+                    # Run the whole script under sudo, including env assignments and fallbacks.
+                    script = """set -e
+if command -v apt-get >/dev/null; then
+    env DEBIAN_FRONTEND=noninteractive apt-get purge -y -qq telegraf
+elif command -v dnf >/dev/null; then
+    dnf remove -y -q telegraf
+elif command -v yum >/dev/null; then
+    yum remove -y -q telegraf
+fi
+rm -f /usr/bin/telegraf /usr/local/bin/telegraf /lib/systemd/system/telegraf.service /etc/systemd/system/telegraf.service
+rm -rf /etc/default/telegraf /usr/lib/telegraf
+if id telegraf >/dev/null 2>&1; then userdel telegraf; fi
+if getent group telegraf >/dev/null; then groupdel telegraf; fi
+systemctl daemon-reload
+"""
                     if self.options.purge_repositories:
-                        self.executor.execute(
-                            "rm -f /etc/apt/sources.list.d/influxdata.list /etc/apt/trusted.gpg.d/influxdata* /etc/yum.repos.d/influxdata.repo 2>/dev/null || true",
-                            timeout=15,
-                        )
-                        self.purged_paths.append("InfluxData repository configurations")
-
-                    # Remove telegraf system user and group (avoiding -r recursive home deletion)
-                    self.executor.execute("userdel telegraf 2>/dev/null || deluser telegraf 2>/dev/null || true", timeout=10)
-                    self.executor.execute("groupdel telegraf 2>/dev/null || delgroup telegraf 2>/dev/null || true", timeout=10)
-                    self.executor.execute("systemctl daemon-reload 2>/dev/null || true", timeout=10)
+                        script += "rm -f /etc/apt/sources.list.d/influxdata.list* /etc/apt/trusted.gpg.d/influxdata* /etc/yum.repos.d/influxdata.repo\n"
+                    result = self.executor.execute("bash -c " + shlex.quote(script), timeout=120)
+                    if not result.success:
+                        raise RuntimeError(result.stderr.strip() or "Package purge failed")
+                    package = self.executor.execute(self._package_check(), timeout=10)
+                    if not package.success or package.stdout.strip() != "ABSENT":
+                        raise RuntimeError("Package manager still reports Telegraf, or absence could not be verified")
+                    self.purged_paths.append("Telegraf package, binary, system account and requested repository files")
 
             dur = int((time.monotonic() - start) * 1000)
             res = StageResult(
@@ -243,6 +237,16 @@ class UninstallEndpointWorkflow:
 
         self.reporter.on_stage_complete(res)
         return res
+
+    @staticmethod
+    def _package_check() -> str:
+        return "bash -c " + shlex.quote("""if command -v dpkg-query >/dev/null; then
+packages=$(dpkg-query -W -f='${binary:Package}\t${db:Status-Status}\n') || exit 1
+if printf '%s\n' "$packages" | grep -Eq '^telegraf(:[^[:space:]]+)?[[:space:]]'; then echo PRESENT; else echo ABSENT; fi
+elif command -v rpm >/dev/null; then
+packages=$(rpm -qa --qf '%{NAME}\n') || exit 1
+if printf '%s\n' "$packages" | grep -qx telegraf; then echo PRESENT; else echo ABSENT; fi
+else echo ABSENT; fi""")
 
     def verify(self) -> StageResult:
         """Stage 5: Verify clean endpoint state (service inactive, binary absent, config removed)."""
@@ -282,7 +286,12 @@ class UninstallEndpointWorkflow:
                 self.verifications["Binary absent"] = "SKIPPED (packages preserved)"
             self.verifications["Configuration absent"] = "PASS" if cfg_absent else "FAIL"
 
-            all_clean = svc_absent and bin_absent and cfg_absent
+            package_absent = True
+            if not is_win and self.options.purge_packages:
+                package = self.executor.execute(self._package_check(), timeout=10)
+                package_absent = package.success and package.stdout.strip() == "ABSENT"
+                self.verifications["Package absent"] = "PASS" if package_absent else "FAIL"
+            all_clean = svc_absent and bin_absent and cfg_absent and package_absent
             dur = int((time.monotonic() - start) * 1000)
 
             if all_clean:

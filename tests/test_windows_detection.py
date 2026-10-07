@@ -247,6 +247,7 @@ def test_gui_and_engine_consistent_on_custom_path(qapp, tmp_path):
     window.ep_os_combo.setCurrentText("Windows")
     window._create_executor = lambda t: gui_exec
 
+    window.ep_user_input.setText("operator")
     window._detect_endpoint()
     assert window._endpoint_detected is True
     assert window.ep_missing_banner.isHidden() is True

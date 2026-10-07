@@ -27,3 +27,6 @@ MANIFEST
 *~
 .DS_Store
 *.log
+
+vcf_ops_telegraf_helper/_version.py
+*.spec
