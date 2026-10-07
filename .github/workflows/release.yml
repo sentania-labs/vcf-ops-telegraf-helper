@@ -129,6 +129,7 @@ jobs:
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           path: binaries
+          pattern: vcf-telegraf-helper-*
           merge-multiple: true
 
       - name: Hash the final signed artifacts and Python packages
@@ -144,10 +145,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          chmod +x binaries/vcf-telegraf-helper-linux binaries/vcf-telegraf-helper-macos-arm64 binaries/vcf-telegraf-helper-macos-x86_64 || true
+          chmod +x binaries/vcf-telegraf-helper-linux
           ls -l binaries/
           TAG="$GITHUB_REF_NAME"
-          ASSETS=(SHA256SUMS dist/*.whl dist/*.tar.gz binaries/vcf-telegraf-helper-linux binaries/vcf-telegraf-helper-macos-arm64 binaries/vcf-telegraf-helper-macos-x86_64 binaries/vcf-telegraf-helper-windows.exe)
+          ASSETS=(SHA256SUMS dist/*.whl dist/*.tar.gz binaries/vcf-telegraf-helper-linux binaries/vcf-telegraf-helper-macos-arm64.zip binaries/vcf-telegraf-helper-macos-x86_64.zip binaries/vcf-telegraf-helper-windows.exe)
           if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             gh release upload "$TAG" "${ASSETS[@]}" --clobber --repo "$GITHUB_REPOSITORY"
           else
@@ -155,5 +156,5 @@ jobs:
               --repo "$GITHUB_REPOSITORY" \
               --title "vcf-ops-telegraf-helper $TAG" \
               --generate-notes \
-              --notes "Standalone binaries are the primary downloads. Windows is Authenticode signed; macOS builds are Developer ID signed and notarized. Verify downloads against SHA256SUMS. SmartScreen may still show an unrecognized-app prompt while the publisher builds reputation. Python packages are secondary; on managed Windows use python -m vcf_ops_telegraf_helper to avoid the unsigned pip launcher."
+              --notes "Standalone binaries are the primary downloads. Windows is Authenticode signed; macOS downloads are zipped apps for Apple Silicon (arm64) or Intel (x86_64), Developer ID signed, notarized and stapled. Extract the matching ZIP, move VCF Telegraf Helper.app to Applications, and double-click it. See the README for bundled CLI access. Verify downloads against SHA256SUMS. SmartScreen may still show an unrecognized-app prompt while the publisher builds reputation. Python packages are secondary; on managed Windows use python -m vcf_ops_telegraf_helper to avoid the unsigned pip launcher."
           fi

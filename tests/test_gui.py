@@ -1102,3 +1102,20 @@ def test_blank_password_mode_does_not_enable_ambient_ssh_keys(qapp, tmp_path):
     window = MainWindow(state_store=StateStore(state_file=tmp_path / 'state.json'))
     window.ep_auth_radio_pass.setChecked(True)
     assert window._get_endpoint_target().password == ''
+
+
+def test_macos_gui_does_not_require_linux_display_variables(qapp, monkeypatch, tmp_path):
+    import sys
+    from unittest.mock import patch
+    from vcf_ops_telegraf_helper.gui.app import run_gui
+
+    monkeypatch.setattr(sys, 'platform', 'darwin')
+    for key in ('DISPLAY', 'WAYLAND_DISPLAY', 'QT_QPA_PLATFORM'):
+        monkeypatch.delenv(key, raising=False)
+    with patch.object(qapp, 'exec', return_value=0), patch(
+        'vcf_ops_telegraf_helper.gui.main_window.MainWindow',
+        return_value=MainWindow(StateStore(state_file=tmp_path / 'state.json')),
+    ) as window:
+        assert run_gui() == 0
+        assert window.return_value.isVisible()
+        window.return_value.close()

@@ -874,3 +874,27 @@ def test_cli_vcf_auth_source_envvar_reaches_environment(monkeypatch):
     assert res.exit_code == 0, res.output
     assert seen["sources"] == ["Corp AD", "Corp AD"]
 
+
+
+@pytest.mark.parametrize("args,launch_gui", [([], True), (["--help"], False),
+                                                (["render", "--cpu"], False)])
+def test_macos_bundle_launch_and_cli(monkeypatch, args, launch_gui):
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.delenv("VCF_HELPER_NO_GUI", raising=False)
+    with patch("vcf_ops_telegraf_helper.gui.app.run_gui", return_value=0) as gui:
+        result = CliRunner().invoke(cli, args)
+    assert result.exit_code == 0, result.output
+    assert gui.called == launch_gui
+    if args == ["render", "--cpu"]:
+        assert "inputs.cpu" in result.output
+
+
+def test_macos_source_no_args_keeps_help(monkeypatch):
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.delattr(sys, "frozen", raising=False)
+    with patch("vcf_ops_telegraf_helper.gui.app.run_gui") as gui:
+        result = CliRunner().invoke(cli, [])
+    assert result.exit_code == 0
+    assert "Usage:" in result.output
+    gui.assert_not_called()
