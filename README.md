@@ -1,6 +1,6 @@
 # VCF Operations Open Telegraf Helper
 
-A local administrator utility that simplifies and automates the supported open-source Telegraf onboarding workflow for VMware Cloud Foundation (VCF) Operations 9.1.
+A desktop app that guides you through installing and configuring open-source Telegraf agents for VMware Cloud Foundation (VCF) Operations 9.1.
 
 ## Why this exists
 
@@ -13,117 +13,78 @@ VCF Operations supports collecting telemetry from open-source Telegraf agents on
 
 This helper compresses those manual steps into a fast, guided, transparent, and repeatable process on your local workstation.
 
-## Product Principles
+## Get started
 
-* **Follows Broadcom Documentation**: Uses the official VCF Operations 9.1 open-source Telegraf workflow. See [docs/references.md](docs/references.md).
-* **Local-First Helper**: Behaves like an administrator utility (such as `vcf-cf-migrator`). No background daemons, databases, or centralized server infrastructure.
-* **Safe Changes (Low Blast Radius)**: Generates isolated configuration fragments in `/etc/telegraf/telegraf.d/` (`vcf-helper-system.conf` and `cloudproxy-http.conf`). Existing user or vendor configurations are never overwritten.
-* **Idempotent and Drift-Free**: Re-running configuration against an existing target produces deterministic files and reports whether updates were needed.
-* **Transparent**: Every generated TOML fragment and planned command is previewed before application.
-* **Honest Validation**: Separately validates configuration syntax, endpoint reachability, collector connectivity, and service state. Failures in one layer are never masked.
-* **Direct Push**: Deploys over SSH (Linux) or WinRM (Windows). The GUI shows the equivalent `vcf-telegraf-helper run` command for anyone who needs to adapt it.
-* **Inventory-Driven Targeting**: Pick the VM from VCF Operations inventory (templates and deleted VMs excluded, powered-off VMs hidden by default). Guest OS, IP, agent status, and the agent's current collector come from VCF Operations, and each step unlocks only when the previous one is complete.
+**[Download the latest release](https://github.com/sentania-labs/vcf-ops-telegraf-helper/releases/latest), then launch the app.** No Python installation is required.
 
-## Installation
+| Your desktop | Download | Launch |
+| --- | --- | --- |
+| Windows | [Windows app (.exe)](https://github.com/sentania-labs/vcf-ops-telegraf-helper/releases/latest/download/vcf-telegraf-helper-windows.exe) | Double-click the executable. |
+| Mac, Apple Silicon | [Apple Silicon app (.zip)](https://github.com/sentania-labs/vcf-ops-telegraf-helper/releases/latest/download/vcf-telegraf-helper-macos-arm64.zip) | Extract the ZIP, move **VCF Telegraf Helper.app** to **Applications**, then double-click the app. |
+| Mac, Intel | [Intel Mac app (.zip)](https://github.com/sentania-labs/vcf-ops-telegraf-helper/releases/latest/download/vcf-telegraf-helper-macos-x86_64.zip) | Extract the ZIP, move **VCF Telegraf Helper.app** to **Applications**, then double-click the app. |
+| Linux desktop | [Linux executable](https://github.com/sentania-labs/vcf-ops-telegraf-helper/releases/latest/download/vcf-telegraf-helper-linux) | Mark the file executable, then run it with `gui` to open the app. |
 
-Download the standalone binary for your desktop from [Releases](https://github.com/sentania-labs/vcf-ops-telegraf-helper/releases). These are the primary artifacts: Windows Authenticode signed, macOS Apple Silicon and Intel apps that are Developer ID signed, notarized and stapled, plus a Linux executable. No Python installation is required. Each release includes `SHA256SUMS` for the final downloads.
+On a Mac, check **Apple menu > About This Mac** if you are unsure which download to choose. Keep the whole app together when moving it. The Mac ZIP/app instructions apply from v0.7.5 onward; older releases contain bare executables.
 
-Uploaded release assets carry GitHub build provenance attestations from v0.7.5 onward.
-This covers the binaries, Python packages, and `SHA256SUMS`; GitHub's automatically
-generated “Source code” archives are not covered. Verify an uploaded asset came from
-this repository's build:
+Windows releases are Authenticode signed. Mac apps are Developer ID signed, notarized, and stapled. Windows SmartScreen may still show an unrecognized-app prompt while reputation builds, and macOS may ask you to confirm opening a downloaded app. Your organization's application-control policies still apply. PR artifacts are unsigned development builds.
 
-```bash
-gh attestation verify <file> --repo sentania-labs/vcf-ops-telegraf-helper
-```
+### Have these ready
 
-Windows SmartScreen may show an unrecognized-app prompt on early signed releases while reputation builds. Organizational application-control policies still apply.
+- Your VCF Operations URL and an API token, or a username and password.
+- The Cloud Proxy or collector group that should receive the agent's metrics.
+- Guest credentials for the target VM: SSH with root or passwordless sudo for Linux, or WinRM with administrative rights for Windows.
+- Any enterprise CA bundle needed to trust your Ops server.
 
-### macOS
+### Follow the six steps in the app
 
-Choose `vcf-telegraf-helper-macos-arm64.zip` for **Apple Silicon** or
-`vcf-telegraf-helper-macos-x86_64.zip` for **Intel** (Apple menu > About This Mac).
-Download `SHA256SUMS` from the same release. In Terminal, from the download directory,
-verify the selected archive before extracting it:
+1. **Connect:** enter the Ops connection details and validate them.
+2. **Select VM:** pick the VM from inventory. All agent states are shown by default; resize columns as needed.
+3. **Configure Target VM:** enter guest credentials, select the collector, and detect the endpoint. A missing agent defaults to the latest recommended version; an installed agent defaults to keeping it.
+4. **Monitoring Inputs:** choose the metrics you want. Additional Windows Perfmon counters appear in the same panel.
+5. **Review & Preview:** inspect the offline configuration template.
+6. **Execute & Verify:** use dry-run to inspect the exact prepared configuration, then apply it. After a successful apply, exit or go back to revise options and run again.
+
+The app shows progress while connecting and querying. Dry-run leaves endpoint files unchanged, but preparation may request a client certificate from Ops. Fresh agent data can take a collection cycle to appear; a running service alone does not establish ingestion.
+
+**Already running an Ops-managed agent?** Takeover is not supported in v0.7.5. Manage that installation through Ops; detecting a Windows `ucp-telegraf` service stops onboarding.
+
+## Verify downloads (optional)
+
+Each release includes `SHA256SUMS`. Download it alongside your chosen asset and verify the checksum before running it. On macOS, from the download directory:
 
 ```bash
 shasum -a 256 -c SHA256SUMS --ignore-missing
 ```
 
-Confirm that your selected ZIP reports `OK`. Double-click the ZIP, move
-**VCF Telegraf Helper.app** to **Applications**, then double-click the app to open
-the wizard. No Python install or Terminal window is needed. The app has a Dock icon;
-Quit or close the wizard when finished. Keep the entire app together when moving it.
+Confirm that your selected ZIP reports `OK`. On Linux, use `sha256sum --check SHA256SUMS --ignore-missing`. On Windows, use `Get-FileHash .\vcf-telegraf-helper-windows.exe -Algorithm SHA256` and compare it with the matching entry in `SHA256SUMS`.
 
-Release apps are signed and include a stapled Apple notarization ticket. macOS may
-still ask you to confirm opening an application downloaded from the internet, and
-organizational application-control policies still apply. PR build artifacts are
-unsigned development builds and do not have the release's notarization ticket.
-These ZIP/app instructions apply to releases containing `.zip` Mac assets; v0.7.4
-and earlier provide bare executables instead.
+Uploaded release assets carry GitHub build provenance attestations from v0.7.5 onward. This covers binaries, Python packages, and `SHA256SUMS`; GitHub's automatically generated “Source code” archives are not covered. With GitHub CLI installed, verify an uploaded asset came from this repository's build:
 
-For command-line use, the same app contains the full CLI:
+```bash
+gh attestation verify <file> --repo sentania-labs/vcf-ops-telegraf-helper
+```
+
+## Optional command-line use
+
+The app includes a CLI for administrators who want repeatable commands or a terminal workflow. The GUI also displays a command for repeating the selected workflow.
+
+On Windows, invoke the downloaded executable with a command. On Linux, use `./vcf-telegraf-helper-linux`. On macOS, use the executable inside the app:
 
 ```bash
 "/Applications/VCF Telegraf Helper.app/Contents/MacOS/vcf-telegraf-helper" --help
 "/Applications/VCF Telegraf Helper.app/Contents/MacOS/vcf-telegraf-helper" render --cpu --mem
 ```
 
-Optional one-line symlink (no administrator access needed):
+The examples below use `vcf-telegraf-helper` as shorthand for your platform's executable, or the command installed with the Python package.
 
 ```bash
-mkdir -p "$HOME/.local/bin" && ln -s "/Applications/VCF Telegraf Helper.app/Contents/MacOS/vcf-telegraf-helper" "$HOME/.local/bin/vcf-telegraf-helper"
-```
-
-Add `$HOME/.local/bin` to your shell's `PATH` if it is not already there. The command
-refuses to replace an existing link or program. Explicit commands such as `wizard`,
-`render`, and `run` retain their usual behavior; invoking the bundled executable
-without a command opens the GUI. Moving the app later requires updating the symlink.
-
-### Python and development
-
-Python wheels and source distributions are secondary artifacts. On managed Windows, invoke `python -m vcf_ops_telegraf_helper gui`; the launcher created by pip is unsigned and may be blocked by Defender ASR.
-
-For development:
-
-```bash
-git clone https://github.com/sentania-labs/vcf-ops-telegraf-helper.git
-cd vcf-ops-telegraf-helper
-python -m pip install -e '.[gui]'
-```
-
-Desktop API trust uses the operating system certificate store, including Windows and macOS. `--ca-cert` selects a desktop-only CA bundle. Agent trust uses the collector CA deployed on the target; `--no-verify-ssl` does not disable it. Agent TLS has its own `--agent-verify-ssl` setting, enabled by default.
-
-Reruns preserve deployed helper inputs unless `--replace-inputs` is selected. Other configuration fragments are retained. Unmanaged inputs in the main configuration require review before onboarding. Use `--dry-run` to inspect the prepared configuration and input diff without changing endpoint files; preparation may request a certificate from Ops. In the GUI, Step 5 is an offline template and Step 6 dry-run populates the exact prepared configuration. Live ingestion remains pending until Ops returns a sample newer than the run.
-
-The VM picker starts with all agent states and lets you drag column boundaries to resize them.
-Target detection selects the latest recommended agent when none is installed and keeps an
-existing agent by default. An explicit installation/version choice is retained. Perfmon
-selections appear directly in the counter panel; the Baseline preset resets additions.
-Connection and discovery queries show an animated waiting dialog. After a successful apply,
-you can exit or go back to revise settings and run again; Execute remains disabled until then.
-
-## Quick Start
-
-### 1. Native Desktop GUI (Lattice Design)
-Launch the native PySide6 desktop helper interface styled with Lattice:
-```bash
-# Install with optional GUI dependencies:
-pip install -e '.[gui]'
-
-# Launch native desktop application:
-vcf-telegraf-helper gui
-```
-
-### 2. Interactive Terminal Wizard
-Step through environment configuration, endpoint detection, monitoring selection, preview, and execution in your terminal:
-```bash
+# Optional interactive terminal workflow
 vcf-telegraf-helper wizard
-```
 
-### 3. Direct CLI Run
-Run directly with options, generating a summary report:
-```bash
+# Preview TOML without connecting to a target
+vcf-telegraf-helper render --cpu --mem --disk --net
+
+# Configure a Linux target using explicit options
 vcf-telegraf-helper run \
   --vcf-url https://vcf-ops.corp.local \
   --collector 10.10.10.50 \
@@ -134,14 +95,47 @@ vcf-telegraf-helper run \
   --export-md summary.md
 ```
 
-### 3. Preview Generated TOML
-Generate and inspect the Broadcom-recommended OS input configuration:
+For an optional Mac CLI symlink:
+
 ```bash
-vcf-telegraf-helper render --cpu --mem --disk --net
+mkdir -p "$HOME/.local/bin" && ln -s "/Applications/VCF Telegraf Helper.app/Contents/MacOS/vcf-telegraf-helper" "$HOME/.local/bin/vcf-telegraf-helper"
 ```
+
+Add `$HOME/.local/bin` to your shell's `PATH` if needed. The command refuses to replace an existing link or program. Moving the app later requires updating the symlink.
+
+## Existing configuration and trust
+
+Reruns preserve deployed helper inputs unless you select **Replace existing inputs** (`--replace-inputs` in the CLI). Other configuration fragments are retained. Unrelated inputs in the main configuration require review before onboarding. The Baseline preset resets added Perfmon selections.
+
+Desktop API trust uses the operating system certificate store, including Windows and macOS. An enterprise CA bundle affects desktop-to-Ops trust. Agent-to-collector TLS is a separate setting, enabled by default, using the collector CA deployed on the target.
+
+## Product Principles
+
+* **Follows Broadcom Documentation**: Uses the official VCF Operations 9.1 open-source Telegraf workflow. See [docs/references.md](docs/references.md).
+* **Local-First Helper**: Behaves like an administrator utility (such as `vcf-cf-migrator`). No background daemons, databases, or centralized server infrastructure.
+* **Safe Changes (Low Blast Radius)**: Generates isolated configuration fragments in `/etc/telegraf/telegraf.d/` (`vcf-helper-system.conf` and `cloudproxy-http.conf`). Existing helper input selections and unrelated fragments are retained by default; replacing helper inputs is an explicit choice. Helper-managed collector output and security files are updated for the selected integration. A main configuration containing unrelated inputs requires review before onboarding.
+* **Idempotent and Drift-Free**: Re-running configuration against an existing target produces deterministic files and reports whether updates were needed.
+* **Transparent**: The app offers configuration previews and dry-run so you can inspect the prepared configuration before applying it.
+* **Honest Validation**: Separately validates configuration syntax, endpoint reachability, collector connectivity, and service state. Failures in one layer are never masked.
+* **Direct Push**: Deploys over SSH (Linux) or WinRM (Windows). The GUI shows the equivalent `vcf-telegraf-helper run` command for anyone who needs to adapt it.
+* **Inventory-Driven Targeting**: Pick the VM from VCF Operations inventory (templates and deleted VMs excluded, powered-off VMs hidden by default). Guest OS, IP, agent status, and the agent's current collector come from VCF Operations, and each step unlocks only when the previous one is complete.
+
+## Python and development
+
+Python wheels and source distributions are secondary artifacts. The signed standalone app is the usual desktop entry point. For development:
+
+```bash
+git clone https://github.com/sentania-labs/vcf-ops-telegraf-helper.git
+cd vcf-ops-telegraf-helper
+python -m pip install -e '.[gui]'
+python -m vcf_ops_telegraf_helper gui
+```
+
+On managed Windows, the pip-generated launcher is unsigned and may be blocked by Defender ASR; invoke `python -m vcf_ops_telegraf_helper gui` when using the Python installation.
 
 ## Documentation
 
+* [docs/agent-takeover-plan.md](docs/agent-takeover-plan.md): Planned managed-agent takeover, configuration preservation, recovery, and validation limits.
 * [docs/architecture.md](docs/architecture.md): Architectural design, boundaries, and safety models.
 * [docs/supported-workflow.md](docs/supported-workflow.md): Detailed comparison against Broadcom's documented procedure.
 * [docs/references.md](docs/references.md): Direct links to authoritative Broadcom technical documentation.
