@@ -37,7 +37,6 @@ from vcf_ops_telegraf_helper.models.monitoring import (
 )
 from vcf_ops_telegraf_helper.models.vcf import CollectorInfo, VCFEnvironment
 from vcf_ops_telegraf_helper.models.workflow import WorkflowOptions
-from vcf_ops_telegraf_helper.renderer.renderer import TelegrafRenderer
 from vcf_ops_telegraf_helper.storage.state import StateStore
 from vcf_ops_telegraf_helper.workflow.engine import ConfigureEndpointWorkflow
 
@@ -67,7 +66,7 @@ def run_wizard(console: Optional[Console] = None) -> None:
     else:
         vcf_pass = Prompt.ask("VCF Operations Password", password=True, console=con)
     collector_ip = Prompt.ask("Cloud Proxy / Collector IP or FQDN", default=default_collector, console=con)
-    verify_ssl = Confirm.ask("Verify TLS/SSL certificates?", default=True, console=con)
+    verify_ssl = Confirm.ask("Verify desktop TLS to VCF Operations?", default=True, console=con)
 
     vcf_env = VCFEnvironment(
         name="current",
@@ -232,37 +231,7 @@ def run_wizard(console: Optional[Console] = None) -> None:
     # Step 4: Review
     # -------------------------------------------------------------------------
     con.print("\n[bold blue]Step 4: Configuration Review & Preview[/bold blue]")
-    system_toml = TelegrafRenderer.render_system_inputs(monitoring)
-    vcf_toml = TelegrafRenderer.render_vcf_output(
-        collector_address=collector_ip,
-        hostname=target.registered_hostname or target_host,
-        ip=target_host,
-        verify_ssl=verify_ssl,
-        is_windows=is_win,
-    )
-
-    if is_win:
-        planned_cmds = [
-            "mkdir C:\\telegraf\\telegraf.d",
-            "upload vcf-helper-system.conf -> C:\\telegraf\\telegraf.d\\vcf-helper-system.conf",
-            "upload cloudproxy-http.conf -> C:\\telegraf\\telegraf.d\\cloudproxy-http.conf",
-            "& 'C:\\telegraf\\telegraf.exe' --test --config 'C:\\telegraf\\telegraf.conf' --config-directory 'C:\\telegraf\\telegraf.d'",
-            "Restart-Service telegraf -Force",
-        ]
-    else:
-        planned_cmds = [
-            "mkdir -p /etc/telegraf/telegraf.d",
-            "upload vcf-helper-system.conf -> /etc/telegraf/telegraf.d/vcf-helper-system.conf",
-            "upload cloudproxy-http.conf -> /etc/telegraf/telegraf.d/cloudproxy-http.conf",
-            "/usr/bin/telegraf --test --config /etc/telegraf/telegraf.conf --config-directory /etc/telegraf/telegraf.d",
-            "systemctl restart telegraf",
-        ]
-    display_preview(con, target_host, collector_ip, system_toml, vcf_toml, planned_cmds)
-
-    proceed = Confirm.ask("\nProceed with execution?", default=True, console=con)
-    if not proceed:
-        con.print("[yellow]Execution aborted by user.[/yellow]")
-        return
+    con.print("Preparing the exact preview from endpoint discovery and Ops identity; this may request a client certificate.")
 
     # -------------------------------------------------------------------------
     # Step 5: Execute
@@ -285,7 +254,25 @@ def run_wizard(console: Optional[Console] = None) -> None:
         reporter=reporter,
     )
 
-    summary = workflow.run()
+    class PreviewCancelled(Exception):
+        pass
+
+    def review_prepared_config():
+        discovery = workflow.discovery
+        display_preview(con, target_host, workflow.artifacts.collector_address,
+                        workflow.system_conf_content, workflow.vcf_conf_content,
+                        [f"Configuration directory: {discovery.config_dir}",
+                         f"Executable: {discovery.telegraf_bin_path}",
+                         f"Service: {discovery.service_name}"])
+        if not Confirm.ask("Apply this prepared configuration?", default=True, console=con):
+            raise PreviewCancelled()
+
+    workflow.preview_callback = review_prepared_config
+    try:
+        summary = workflow.run()
+    except PreviewCancelled:
+        con.print("[yellow]Execution aborted by user. Endpoint files were not changed.[/yellow]")
+        return
 
     # -------------------------------------------------------------------------
     # Step 6: Summary & Export

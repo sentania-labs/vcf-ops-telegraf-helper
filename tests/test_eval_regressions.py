@@ -174,3 +174,31 @@ def test_source_import_without_installed_metadata(tmp_path):
                              'import vcf_ops_telegraf_helper as app; print(app.__version__)'],
                             cwd=tmp_path, capture_output=True, text=True, check=True)
     assert result.stdout.strip() == '0.0.0+source'
+
+
+@pytest.mark.parametrize('proceed', [False, True])
+def test_terminal_wizard_reviews_prepared_content_before_apply(tmp_path, monkeypatch, proceed):
+    import io
+    from rich.console import Console
+    from vcf_ops_telegraf_helper.cli import wizard
+    from vcf_ops_telegraf_helper.adapters.mock import MockVCFOpsIntegration
+    from vcf_ops_telegraf_helper.executors.mock import MockExecutor
+    from vcf_ops_telegraf_helper.storage.state import StateStore
+    monkeypatch.delenv('VCF_PASS', raising=False)
+    monkeypatch.setattr(wizard, 'StateStore', lambda: StateStore(state_file=tmp_path / 'state.json'))
+    monkeypatch.setattr(wizard, 'get_adapter', MockVCFOpsIntegration)
+    executor = MockExecutor()
+    monkeypatch.setattr(wizard, 'MockExecutor', lambda **kw: executor)
+    answers = iter(['https://ops.example', 'operator', 'local', 'test-password', 'collector', 'node', 'mock'])
+    confirmations = iter([True, True, proceed, False])
+    monkeypatch.setattr(wizard.Prompt, 'ask', lambda *args, **kw: next(answers))
+    monkeypatch.setattr(wizard.Confirm, 'ask', lambda *args, **kw: next(confirmations))
+    previews = []
+    monkeypatch.setattr(wizard, 'display_preview', lambda *args: previews.append(args))
+    wizard.run_wizard(Console(file=io.StringIO()))
+    assert len(previews) == 1
+    if proceed:
+        assert previews[0][3] == executor.uploaded_files['/etc/telegraf/telegraf.d/vcf-helper-system.conf']
+        assert previews[0][4] == executor.uploaded_files['/etc/telegraf/telegraf.d/cloudproxy-http.conf']
+    else:
+        assert not executor.uploaded_files
