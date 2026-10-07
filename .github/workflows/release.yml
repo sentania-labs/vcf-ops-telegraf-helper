@@ -1,6 +1,21 @@
 # Release workflow for VCF Operations Open Telegraf Helper.
 # Builds multi-platform standalone executables (Linux, Windows, macOS ARM64 and x86_64).
-# Supports Apple Developer ID signing and notarization via xcrun notarytool when secrets are configured.
+#
+# Signing is the org's shared actions in sentania-labs/.github (pinned by commit
+# below; onboarding checklist in that repo's README): Developer ID signing and
+# notarization on macOS, Authenticode through Azure Artifact Signing on Windows.
+# The credentials are org secrets visible to every repo; nothing is configured
+# here. Signing is mandatory, not "if secrets are configured": before this
+# there was no Windows signing at all and the macOS steps keyed on secret
+# names that never existed, so every release shipped unsigned binaries. A
+# managed Windows desktop refuses an unsigned .exe outright (2026-10-06 eval,
+# finding N-A).
+#
+# The release therefore depends on Apple and Azure being up at tag time. If
+# notarization or signing fails for a reason that is not this binary (Apple
+# 403s, service outages), `gh run rerun <id> --failed` resumes it; publish is
+# idempotent per tag.
+#
 # Placement (github-ci skill): GitHub-hosted runners for multi-OS build matrix.
 
 name: Release
@@ -25,6 +40,36 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+
+      - name: Refuse to start without every macOS signing secret
+        uses: sentania-labs/.github/.github/actions/signing-secrets-present@899421db1380620b2d4e2d8ac8b6acf16fe15b99 # sentania-labs/.github main 2026-10-07
+        with:
+          macos-cert-p12: ${{ secrets.MACOS_CERT_P12 }}
+          macos-cert-password: ${{ secrets.MACOS_CERT_PASSWORD }}
+          macos-team-id: ${{ secrets.MACOS_TEAM_ID }}
+          notary-issuer-id: ${{ secrets.NOTARY_ISSUER_ID }}
+          notary-key-id: ${{ secrets.NOTARY_KEY_ID }}
+          notary-key-p8: ${{ secrets.NOTARY_KEY_P8 }}
+
+      - name: Refuse to start without every Windows signing secret
+        env:
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+          ARTIFACT_SIGNING_ENDPOINT: ${{ secrets.ARTIFACT_SIGNING_ENDPOINT }}
+          ARTIFACT_SIGNING_ACCOUNT: ${{ secrets.ARTIFACT_SIGNING_ACCOUNT }}
+          ARTIFACT_SIGNING_PROFILE: ${{ secrets.ARTIFACT_SIGNING_PROFILE }}
+        run: |
+          # windows-sign checks these itself, but only after the macOS legs may
+          # have spent up to two hours on Apple. Fail here, in seconds.
+          missing=""
+          for name in AZURE_TENANT_ID AZURE_CLIENT_ID AZURE_CLIENT_SECRET ARTIFACT_SIGNING_ENDPOINT ARTIFACT_SIGNING_ACCOUNT ARTIFACT_SIGNING_PROFILE; do
+            [ -n "${!name:-}" ] || missing="$missing $name"
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::Windows signing org secrets with no value:$missing"
+            exit 1
+          fi
 
       - name: Refuse tag not reachable from main
         run: |
@@ -105,50 +150,35 @@ jobs:
             --hidden-import PySide6.QtWidgets \
             vcf_ops_telegraf_helper/cli/main.py
 
-      # Apple Code Signing and Notarization for macOS builds
-      - name: Sign macOS binary (if signing certificate provided)
-        if: runner.os == 'macOS' && env.MACOS_CERTIFICATE != ''
-        shell: bash
-        env:
-          MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
-          MACOS_CERTIFICATE_PWD: ${{ secrets.MACOS_CERTIFICATE_PWD }}
-        run: |
-          echo "Setting up temporary keychain for Developer ID signing..."
-          KEYCHAIN_PATH=$RUNNER_TEMP/build.keychain
-          KEYCHAIN_PWD="temporary-keychain-password"
-          security create-keychain -p "$KEYCHAIN_PWD" "$KEYCHAIN_PATH"
-          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
-          security unlock-keychain -p "$KEYCHAIN_PWD" "$KEYCHAIN_PATH"
+      # Sign before the smoke test so the smoke runs the SIGNED binary: a
+      # signature that breaks startup (hardened runtime vs PyInstaller's
+      # one-file unpack) is caught in seconds, before Apple's notarization
+      # round trip. Known gap: the smoke commands never import PySide6 (the
+      # GUI import is lazy and `gui` blocks on an event loop), so a signed
+      # binary whose Qt libraries fail under hardened runtime would pass here
+      # and fail on a user's Mac at `gui`. The migrator proves the Python
+      # runtime under the same entitlement; Qt is unproven until a release is
+      # run by hand or a non-blocking Qt smoke exists.
+      - name: Sign the binary (macOS)
+        if: runner.os == 'macOS'
+        uses: sentania-labs/.github/.github/actions/macos-sign@899421db1380620b2d4e2d8ac8b6acf16fe15b99 # sentania-labs/.github main 2026-10-07
+        with:
+          binary: dist/vcf-telegraf-helper-${{ matrix.name }}
+          macos-cert-p12: ${{ secrets.MACOS_CERT_P12 }}
+          macos-cert-password: ${{ secrets.MACOS_CERT_PASSWORD }}
+          macos-team-id: ${{ secrets.MACOS_TEAM_ID }}
 
-          CERT_PATH=$RUNNER_TEMP/cert.p12
-          echo "$MACOS_CERTIFICATE" | base64 --decode > "$CERT_PATH"
-          security import "$CERT_PATH" -k "$KEYCHAIN_PATH" -P "$MACOS_CERTIFICATE_PWD" -T /usr/bin/codesign
-          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PWD" "$KEYCHAIN_PATH"
-
-          echo "Signing binary with hardened runtime..."
-          codesign --deep --force --options runtime --timestamp \
-            --sign "Developer ID Application" \
-            --keychain "$KEYCHAIN_PATH" \
-            "dist/vcf-telegraf-helper-${{ matrix.name }}"
-
-      - name: Notarize macOS binary with Apple (if credentials provided)
-        if: runner.os == 'macOS' && env.APPLE_ID != ''
-        shell: bash
-        env:
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-        run: |
-          echo "Zipping binary for Apple notarization..."
-          ZIP_PATH="$RUNNER_TEMP/vcf-telegraf-helper-${{ matrix.name }}.zip"
-          ditto -c -k --keepParent "dist/vcf-telegraf-helper-${{ matrix.name }}" "$ZIP_PATH"
-
-          echo "Submitting to Apple notary service..."
-          xcrun notarytool submit "$ZIP_PATH" \
-            --apple-id "$APPLE_ID" \
-            --password "$APPLE_APP_SPECIFIC_PASSWORD" \
-            --team-id "$APPLE_TEAM_ID" \
-            --wait
+      - name: Sign the binary (Windows)
+        if: runner.os == 'Windows'
+        uses: sentania-labs/.github/.github/actions/windows-sign@899421db1380620b2d4e2d8ac8b6acf16fe15b99 # sentania-labs/.github main 2026-10-07
+        with:
+          files: ${{ github.workspace }}\dist\vcf-telegraf-helper-${{ matrix.name }}${{ matrix.ext }}
+          endpoint: ${{ secrets.ARTIFACT_SIGNING_ENDPOINT }}
+          signing-account-name: ${{ secrets.ARTIFACT_SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ secrets.ARTIFACT_SIGNING_PROFILE }}
+          azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          azure-client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
 
       - name: Smoke test standalone binary
         shell: bash
@@ -165,6 +195,21 @@ jobs:
           "./vcf-telegraf-helper-${{ matrix.name }}${{ matrix.ext }}" > default.txt
           cat default.txt
           grep -q "VCF Operations Open Telegraf Helper" default.txt
+
+      # macos-sign and macos-notarize clean up their own failures; this covers
+      # a smoke-test failure between them (only matters on a self-hosted Mac).
+      - name: Remove the signing keychain if the smoke failed (macOS)
+        if: always() && runner.os == 'macOS'
+        run: security delete-keychain "${KEYCHAIN:-$RUNNER_TEMP/signing.keychain-db}" 2>/dev/null || true
+
+      - name: Notarize (macOS)
+        if: runner.os == 'macOS'
+        uses: sentania-labs/.github/.github/actions/macos-notarize@899421db1380620b2d4e2d8ac8b6acf16fe15b99 # sentania-labs/.github main 2026-10-07
+        with:
+          binary: dist/vcf-telegraf-helper-${{ matrix.name }}
+          notary-issuer-id: ${{ secrets.NOTARY_ISSUER_ID }}
+          notary-key-id: ${{ secrets.NOTARY_KEY_ID }}
+          notary-key-p8: ${{ secrets.NOTARY_KEY_P8 }}
 
       - name: Upload binary artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
