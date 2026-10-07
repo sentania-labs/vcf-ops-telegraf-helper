@@ -19,10 +19,10 @@ This helper compresses those manual steps into a fast, guided, transparent, and 
 
 | Your desktop | Download | Launch |
 | --- | --- | --- |
-| Windows | `vcf-telegraf-helper-windows.exe` | Double-click the executable. |
-| Mac, Apple Silicon | `vcf-telegraf-helper-macos-arm64.zip` | Extract the ZIP, move **VCF Telegraf Helper.app** to **Applications**, then double-click the app. |
-| Mac, Intel | `vcf-telegraf-helper-macos-x86_64.zip` | Extract the ZIP, move **VCF Telegraf Helper.app** to **Applications**, then double-click the app. |
-| Linux desktop | `vcf-telegraf-helper-linux` | Mark the file executable, then run it with `gui` to open the app. |
+| Windows | [Windows app (.exe)](https://github.com/sentania-labs/vcf-ops-telegraf-helper/releases/latest/download/vcf-telegraf-helper-windows.exe) | Double-click the executable. |
+| Mac, Apple Silicon | [Apple Silicon app (.zip)](https://github.com/sentania-labs/vcf-ops-telegraf-helper/releases/latest/download/vcf-telegraf-helper-macos-arm64.zip) | Extract the ZIP, move **VCF Telegraf Helper.app** to **Applications**, then double-click the app. |
+| Mac, Intel | [Intel Mac app (.zip)](https://github.com/sentania-labs/vcf-ops-telegraf-helper/releases/latest/download/vcf-telegraf-helper-macos-x86_64.zip) | Extract the ZIP, move **VCF Telegraf Helper.app** to **Applications**, then double-click the app. |
+| Linux desktop | [Linux executable](https://github.com/sentania-labs/vcf-ops-telegraf-helper/releases/latest/download/vcf-telegraf-helper-linux) | Mark the file executable, then run it with `gui` to open the app. |
 
 On a Mac, check **Apple menu > About This Mac** if you are unsure which download to choose. Keep the whole app together when moving it. The Mac ZIP/app instructions apply from v0.7.5 onward; older releases contain bare executables.
 
