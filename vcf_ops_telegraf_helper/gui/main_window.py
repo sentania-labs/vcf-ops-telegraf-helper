@@ -2552,6 +2552,8 @@ class MainWindow(QMainWindow):
             active_plugins.append("processes")
         if mon.win_perf_counters.enabled:
             active_plugins.append("win_perf_counters")
+        if mon.win_os.enabled:
+            active_plugins.append("win_os (cpu, mem, swap with the win. prefix)")
         if mon.win_services.enabled:
             active_plugins.append("win_services")
         if mon.nginx.enabled:

@@ -3,16 +3,17 @@
 The managed agent on VCF Operations 9.1 ships a single telegraf.conf (telegraf.d empty by
 default) with an [agent] table, an outputs.http to https://<collector>/arc/metric, an
 inputs.exec running mandatory_tags.bat, the Windows perf counter set, and inputs.cpu/mem/swap
-prefixed "win.". Everything the helper renders itself is dropped and replaced; everything it
-can express structurally is mapped; the rest is retained verbatim as a custom TOML fragment so
-nothing is silently lost.
+prefixed "win.". Everything the helper renders itself is dropped and replaced. A plugin
+instance is mapped onto the structured catalog only when the catalog can express every one of
+its settings; anything else is retained verbatim as a custom TOML fragment, so no setting is
+lost silently. A fragment that cannot be parsed blocks the import rather than being guessed at.
 """
 
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 try:
     import tomllib
@@ -39,12 +40,23 @@ from vcf_ops_telegraf_helper.renderer.renderer import TelegrafRenderer
 
 RETAINED_HEADER = "# Retained from the Ops-managed agent configuration (not editable in the structured catalog)"
 
-_SECRET_KEY = re.compile(r"(password|passwd|pwd|token|secret|api_key)\s*=\s*([^;,\s\"']+)", re.IGNORECASE)
+_SECRET_PATTERNS = [
+    # key = "value", key = 'value', key=value inside connection strings
+    re.compile(r"(?i)\b(password|passwd|pwd|token|secret|api_key|client_secret)(\s*=\s*)(?:\"[^\"]*\"|'[^']*'|[^;,\s\"']+)"),
+    # scheme://user:password@host
+    re.compile(r"(?i)(://[^/:@\s]+:)([^@\s]+)(@)"),
+]
 
 
 def mask_secrets(text: str) -> str:
-    """Mask password-like values in connection strings for display."""
-    return _SECRET_KEY.sub(lambda m: f"{m.group(1)}=***", text)
+    """Mask password-like values (TOML strings, connection strings, URL credentials) for display."""
+    def _mask(m: "re.Match[str]") -> str:
+        value = m.group(0)[len(m.group(1)) + len(m.group(2)):]
+        quote = value[0] if value[:1] in ("\"", "'") else ""
+        return f"{m.group(1)}{m.group(2)}{quote}***{quote}"
+
+    masked = _SECRET_PATTERNS[0].sub(_mask, text)
+    return _SECRET_PATTERNS[1].sub(r"\1***\3", masked)
 
 
 @dataclass
@@ -58,11 +70,17 @@ class ImportedConfig:
     retained: List[str] = field(default_factory=list)    # carried verbatim into the custom TOML fragment
     changed: List[str] = field(default_factory=list)     # same plugin, different settings
     warnings: List[str] = field(default_factory=list)
+    blocked: List[str] = field(default_factory=list)     # the import cannot be trusted; do not cut over
     source_files: List[str] = field(default_factory=list)
+
+    @property
+    def ok(self) -> bool:
+        return not self.blocked
 
     def summary_lines(self) -> List[str]:
         lines = []
         for title, items in (
+            ("Blocked", self.blocked),
             ("Preserved", self.preserved),
             ("Added", self.added),
             ("Changed", self.changed),
@@ -74,6 +92,30 @@ class ImportedConfig:
                 lines.append(f"{title}:")
                 lines.extend(f"  - {mask_secrets(item)}" for item in items)
         return lines
+
+
+# Keys the structured catalog can express for each known plugin (beyond the plugin table itself)
+_EXPRESSIBLE: Dict[str, set] = {
+    "cpu": {"percpu", "totalcpu", "collect_cpu_time", "report_active"},
+    "mem": set(),
+    "swap": set(),
+    "system": set(),
+    "disk": {"mount_points", "ignore_fs"},
+    "net": {"interfaces"},
+    "diskio": {"devices"},
+    "processes": set(),
+    "win_services": {"service_names"},
+    "nginx": {"urls"},
+    "apache": {"urls"},
+    "mysql": {"servers"},
+    "postgresql": {"address"},
+    "sqlserver": {"servers"},
+    "docker": {"endpoint"},
+    "ping": {"urls", "count"},
+    "win_perf_counters": {"object", "PrintValid"},
+}
+_PERF_OBJECT_KEYS = {"ObjectName", "Counters", "Instances", "Measurement", "IncludeTotal", "UseRawValues",
+                     "WarnOnMissing", "FailOnMissing"}
 
 
 def _as_list(value: Any) -> List[Dict[str, Any]]:
@@ -99,6 +141,31 @@ def _measurement_key(name: str) -> str:
     return (name or "").replace("_", ".").lower()
 
 
+def _merge_retained(into: Dict[str, Any], table: str, value: Any, source: str, result: ImportedConfig) -> None:
+    """Merge a retained top-level table from one source into the accumulated retained tables."""
+    if table not in into:
+        into[table] = value
+        return
+    existing = into[table]
+    if isinstance(existing, dict) and isinstance(value, dict):
+        for key, sub in value.items():
+            if key not in existing:
+                existing[key] = sub
+            elif isinstance(existing[key], list) and isinstance(sub, list):
+                existing[key].extend(sub)
+            elif isinstance(existing[key], dict) and isinstance(sub, dict):
+                existing[key].update(sub)
+                result.warnings.append(f"[{table}.{key}] from {source} overrides earlier keys with the same name")
+            else:
+                existing[key] = sub
+                result.warnings.append(f"[{table}] {key} from {source} overrides an earlier value")
+    elif isinstance(existing, list) and isinstance(value, list):
+        existing.extend(value)
+    else:
+        into[table] = value
+        result.warnings.append(f"[{table}] from {source} replaced an earlier table of a different shape")
+
+
 def import_managed_config(
     telegraf_conf: Optional[str],
     fragments: Optional[Dict[str, str]] = None,
@@ -115,7 +182,7 @@ def import_managed_config(
     monitoring.win_services = WinServicesInputConfig(enabled=False)
     result = ImportedConfig(monitoring=monitoring)
 
-    sources: List[tuple[str, str]] = []
+    sources: List[Tuple[str, str]] = []
     if telegraf_conf:
         sources.append(("telegraf.conf", telegraf_conf))
     for name in sorted(fragments):
@@ -126,16 +193,13 @@ def import_managed_config(
         return result
 
     retained: Dict[str, Any] = {}
-    perf_objects: List[Dict[str, Any]] = []
-    win_perf_seen = False
+    mapped_plugins: set = set()
 
     for source_name, text in sources:
         try:
             parsed = tomllib.loads(text)
         except Exception as exc:
-            result.warnings.append(f"{source_name}: could not parse TOML ({exc}); fragment retained verbatim")
-            result.retained.append(f"{source_name} (unparsed)")
-            retained.setdefault("_verbatim", []).append((source_name, text))
+            result.blocked.append(f"{source_name}: could not parse TOML ({exc}); resolve it before taking over")
             continue
         result.source_files.append(source_name)
 
@@ -155,142 +219,189 @@ def import_managed_config(
                         else:
                             result.retained.append(f"[[outputs.{plugin}]] {url or ''}".rstrip())
                             result.warnings.append(f"[[outputs.{plugin}]] retained: check its paths and credentials still apply")
-                            retained.setdefault("outputs", {}).setdefault(plugin, []).append(inst)
+                            _merge_retained(retained, "outputs", {plugin: [inst]}, source_name, result)
                 continue
             if table == "inputs":
                 for plugin, instances in (value or {}).items():
                     for inst in _as_list(instances):
-                        _map_input(plugin, inst, result, retained, perf_objects)
-                        if plugin == "win_perf_counters":
-                            win_perf_seen = True
+                        _map_input(plugin, inst, result, retained, mapped_plugins, source_name)
                 continue
             # processors, aggregators, global_tags, anything else; an empty table carries nothing
             if not value:
                 continue
             result.retained.append(f"[{table}] table")
-            retained[table] = value
-
-    if win_perf_seen:
-        _map_perf_objects(perf_objects, result)
+            _merge_retained(retained, table, value, source_name, result)
 
     # Helper additions the managed stock config lacks
-    if is_windows and not result.monitoring.win_services.enabled:
+    if is_windows and not result.monitoring.win_services.enabled and "win_services" not in mapped_plugins:
         result.monitoring.win_services = WinServicesInputConfig(enabled=True, service_names=["telegraf"])
         result.added.append("[[inputs.win_services]] telegraf (agent self-check)")
 
-    verbatim = retained.pop("_verbatim", [])
-    custom_parts: List[str] = []
     if retained:
-        custom_parts.append(tomli_w.dumps(retained).strip())
-    for source_name, text in verbatim:
-        custom_parts.append(f"# {source_name}\n{text.strip()}")
-    if custom_parts:
-        result.monitoring.custom_toml = RETAINED_HEADER + "\n" + "\n\n".join(custom_parts) + "\n"
+        result.monitoring.custom_toml = RETAINED_HEADER + "\n" + tomli_w.dumps(retained).strip() + "\n"
     return result
 
 
+def _retain(plugin: str, inst: Dict[str, Any], reason: str, result: ImportedConfig, retained: Dict[str, Any],
+            source: str) -> None:
+    prefix = str(inst.get("name_prefix", ""))
+    label = f"[[inputs.{plugin}]]" + (f' name_prefix "{prefix}"' if prefix else "")
+    result.retained.append(f"{label} ({reason})")
+    _merge_retained(retained, "inputs", {plugin: [inst]}, source, result)
+
+
 def _map_input(plugin: str, inst: Dict[str, Any], result: ImportedConfig, retained: Dict[str, Any],
-               perf_objects: List[Dict[str, Any]]) -> None:
+               mapped: set, source: str) -> None:
     mon = result.monitoring
     prefix = str(inst.get("name_prefix", ""))
+    keys = set(inst)
+
     if plugin == "exec":
-        commands = " ".join(str(c) for c in inst.get("commands", []))
-        if "mandatory_tags" in commands.lower():
+        commands = [str(c) for c in inst.get("commands", [])]
+        if len(commands) == 1 and "mandatory_tags" in commands[0].lower():
             result.dropped.append("[[inputs.exec]] mandatory_tags (replaced by the helper's own tag script)")
             return
-    if plugin == "win_perf_counters":
-        perf_objects.extend(_as_list(inst.get("object")))
+        _retain(plugin, inst, "custom exec command", result, retained, source)
         return
+
+    if plugin == "win_perf_counters":
+        if plugin in mapped:
+            _retain(plugin, inst, "second instance; the catalog holds one", result, retained, source)
+            return
+        extra = keys - _EXPRESSIBLE[plugin]
+        if extra:
+            _retain(plugin, inst, f"plugin options the catalog cannot express: {', '.join(sorted(extra))}",
+                    result, retained, source)
+            return
+        objects = _as_list(inst.get("object"))
+        if not _map_perf_objects(objects, result):
+            _retain(plugin, inst, "object set the catalog cannot express", result, retained, source)
+            return
+        mon.win_perf_counters.print_valid = bool(inst.get("PrintValid", True))
+        mapped.add(plugin)
+        return
+
     if plugin in ("cpu", "mem", "swap") and prefix == "win.":
+        extra = keys - _EXPRESSIBLE[plugin] - {"name_prefix"}
+        standard = all(inst.get(k, True) is True for k in ("percpu", "totalcpu", "collect_cpu_time", "report_active"))
+        if extra or not standard or getattr(mon.win_os, plugin):
+            _retain(plugin, inst, "options differ from the Windows OS totals the catalog renders", result, retained, source)
+            return
         mon.win_os.enabled = True
         setattr(mon.win_os, plugin, True)
         result.preserved.append(f'[[inputs.{plugin}]] name_prefix "win." (Windows OS totals)')
         return
-    if plugin in ("cpu", "mem", "disk", "net", "system", "swap", "diskio", "processes") and not prefix:
-        getattr(mon, plugin).enabled = True
+
+    if plugin in _EXPRESSIBLE and plugin != "win_perf_counters":
+        extra = keys - _EXPRESSIBLE[plugin]
+        if plugin in mapped:
+            _retain(plugin, inst, "second instance; the catalog holds one", result, retained, source)
+            return
+        if extra:
+            _retain(plugin, inst, f"options the catalog cannot express: {', '.join(sorted(extra))}",
+                    result, retained, source)
+            return
+        if plugin == "cpu":
+            for k in ("percpu", "totalcpu", "collect_cpu_time", "report_active"):
+                setattr(mon.cpu, k, bool(inst.get(k, True)))
+        if plugin == "disk":
+            if "mount_points" in inst:
+                mon.disk.mount_points = [str(m) for m in inst["mount_points"]]
+            if "ignore_fs" in inst:
+                mon.disk.ignore_fs = [str(f) for f in inst["ignore_fs"]]
+        if plugin == "net" and "interfaces" in inst:
+            mon.net.interfaces = [str(i) for i in inst["interfaces"]]
+        if plugin == "diskio" and "devices" in inst:
+            mon.diskio.devices = [str(d) for d in inst["devices"]]
+        if plugin in ("cpu", "mem", "disk", "net", "system", "swap", "diskio", "processes"):
+            getattr(mon, plugin).enabled = True
+            if plugin in ("cpu", "mem", "disk", "net", "system", "swap", "processes") and mon.win_perf_counters.enabled:
+                result.warnings.append(f"[[inputs.{plugin}]] without a win. prefix reports Linux-style metrics on a Windows host")
+        elif plugin == "win_services":
+            mon.win_services = WinServicesInputConfig(
+                enabled=True, service_names=[str(n) for n in inst.get("service_names", [])] or ["telegraf"]
+            )
+        elif plugin == "nginx":
+            mon.nginx = NginxInputConfig(enabled=True, urls=[str(u) for u in inst.get("urls", [])] or mon.nginx.urls)
+        elif plugin == "apache":
+            mon.apache = ApacheInputConfig(enabled=True, urls=[str(u) for u in inst.get("urls", [])] or mon.apache.urls)
+        elif plugin == "mysql":
+            mon.mysql = MysqlInputConfig(enabled=True, servers=[str(s) for s in inst.get("servers", [])] or mon.mysql.servers)
+        elif plugin == "postgresql":
+            mon.postgresql = PostgresqlInputConfig(enabled=True, address=str(inst.get("address") or mon.postgresql.address))
+        elif plugin == "sqlserver":
+            mon.mssql = MssqlInputConfig(enabled=True, servers=[str(s) for s in inst.get("servers", [])] or mon.mssql.servers)
+        elif plugin == "docker":
+            mon.docker = DockerInputConfig(enabled=True, endpoint=str(inst.get("endpoint") or mon.docker.endpoint))
+        elif plugin == "ping":
+            mon.ping = PingInputConfig(enabled=True, urls=[str(u) for u in inst.get("urls", [])] or mon.ping.urls,
+                                       count=int(inst.get("count", 1)))
+        mapped.add(plugin)
         result.preserved.append(f"[[inputs.{plugin}]]")
-        extras = {k: v for k, v in inst.items() if k not in ("percpu", "totalcpu", "collect_cpu_time", "report_active")}
-        if plugin == "disk" and "mount_points" in extras:
-            mon.disk.mount_points = list(extras.pop("mount_points"))
-        if plugin == "disk" and "ignore_fs" in extras:
-            mon.disk.ignore_fs = list(extras.pop("ignore_fs"))
-        if plugin == "net" and "interfaces" in extras:
-            mon.net.interfaces = list(extras.pop("interfaces"))
-        if plugin == "diskio" and "devices" in extras:
-            mon.diskio.devices = list(extras.pop("devices"))
-        if extras:
-            result.changed.append(f"[[inputs.{plugin}]] options not carried: {', '.join(sorted(extras))}")
         return
-    if plugin == "win_services":
-        names = [str(n) for n in inst.get("service_names", [])] or ["telegraf"]
-        mon.win_services = WinServicesInputConfig(enabled=True, service_names=names)
-        result.preserved.append(f"[[inputs.win_services]] {', '.join(names)}")
-        return
-    if plugin == "nginx" and inst.get("urls"):
-        mon.nginx = NginxInputConfig(enabled=True, urls=[str(u) for u in inst["urls"]])
-        result.preserved.append("[[inputs.nginx]]")
-        return
-    if plugin == "apache" and inst.get("urls"):
-        mon.apache = ApacheInputConfig(enabled=True, urls=[str(u) for u in inst["urls"]])
-        result.preserved.append("[[inputs.apache]]")
-        return
-    if plugin == "mysql" and inst.get("servers"):
-        mon.mysql = MysqlInputConfig(enabled=True, servers=[str(s) for s in inst["servers"]])
-        result.preserved.append("[[inputs.mysql]]")
-        return
-    if plugin == "postgresql" and inst.get("address"):
-        mon.postgresql = PostgresqlInputConfig(enabled=True, address=str(inst["address"]))
-        result.preserved.append("[[inputs.postgresql]]")
-        return
-    if plugin == "sqlserver" and inst.get("servers"):
-        mon.mssql = MssqlInputConfig(enabled=True, servers=[str(s) for s in inst["servers"]])
-        result.preserved.append("[[inputs.sqlserver]]")
-        return
-    if plugin == "docker" and inst.get("endpoint"):
-        mon.docker = DockerInputConfig(enabled=True, endpoint=str(inst["endpoint"]))
-        result.preserved.append("[[inputs.docker]]")
-        return
-    if plugin == "ping" and inst.get("urls"):
-        mon.ping = PingInputConfig(enabled=True, urls=[str(u) for u in inst["urls"]], count=int(inst.get("count", 1)))
-        result.preserved.append("[[inputs.ping]]")
-        return
-    # Anything else is carried verbatim
-    result.retained.append(f"[[inputs.{plugin}]]" + (f' name_prefix "{prefix}"' if prefix else ""))
-    retained.setdefault("inputs", {}).setdefault(plugin, []).append(inst)
+
+    _retain(plugin, inst, "not in the structured catalog", result, retained, source)
 
 
-def _map_perf_objects(objects: List[Dict[str, Any]], result: ImportedConfig) -> None:
-    """Compare the managed counter set with the helper's baseline, object by object."""
+def _map_perf_objects(objects: List[Dict[str, Any]], result: ImportedConfig) -> bool:
+    """Compare the managed counter set with the helper's baseline, object by object.
+
+    Returns False when the objects cannot be expressed structurally (duplicate names, unknown keys),
+    in which case the caller retains the whole instance verbatim and nothing here is applied.
+    """
+    names = [str(o.get("ObjectName", "")) for o in objects]
+    if len(set(names)) != len(names):
+        dupes = sorted({n for n in names if names.count(n) > 1})
+        result.warnings.append(f"win_perf_counters: object names repeated ({', '.join(dupes)}); instance retained verbatim")
+        return False
+    for obj in objects:
+        unknown = set(obj) - _PERF_OBJECT_KEYS
+        if unknown:
+            result.warnings.append(
+                f"win_perf_counters object {obj.get('ObjectName')}: keys the catalog cannot express ({', '.join(sorted(unknown))}); instance retained verbatim"
+            )
+            return False
+
     baseline = _baseline_perf_objects()
     mon = result.monitoring
-    mon.win_perf_counters = WinPerfCountersInputConfig(enabled=True)
+    config = WinPerfCountersInputConfig(enabled=True)
     additional: List[PerfmonObject] = []
     matched = 0
     for obj in objects:
         name = str(obj.get("ObjectName", ""))
         counters = [str(c) for c in obj.get("Counters", [])]
-        instances = [str(i) for i in obj.get("Instances", ["*"])]
+        instances = [str(i) for i in obj.get("Instances", [])]
         measurement = str(obj.get("Measurement", ""))
+        options = {k: obj[k] for k in ("IncludeTotal", "UseRawValues", "WarnOnMissing", "FailOnMissing") if k in obj}
         base = baseline.get(name)
         if base is None:
             additional.append(PerfmonObject(object_name=name, counters=counters, instances=instances,
-                                            measurement=measurement or f"win_{name.lower().replace(' ', '_')}"))
+                                            measurement=measurement or f"win_{name.lower().replace(' ', '_')}",
+                                            options=options))
             result.preserved.append(f"win_perf_counters object {name} (added to the baseline set)")
             continue
         if name == "Process":
-            mon.win_perf_counters.process_instances = list(dict.fromkeys(instances))
+            config.process_instances = list(dict.fromkeys(instances)) or config.process_instances
         extra_counters = [c for c in counters if c not in base.get("Counters", [])]
-        extra_instances = [i for i in instances if i not in base.get("Instances", []) and name != "Process"]
+        extra_instances = [i for i in instances if i not in base.get("Instances", [])] if name != "Process" else []
         missing = [c for c in base.get("Counters", []) if c not in counters]
-        if _measurement_key(measurement) != _measurement_key(base.get("Measurement", "")) and measurement:
-            result.changed.append(f"win_perf_counters {name}: measurement {measurement} becomes {base.get('Measurement')} (same series in Ops)")
+        if measurement and _measurement_key(measurement) != _measurement_key(base.get("Measurement", "")):
+            result.changed.append(
+                f"win_perf_counters {name}: measurement {measurement} becomes {base.get('Measurement')} "
+                "(the series name in Ops changes; dashboards built on the old name need updating)"
+            )
+        for key, value in options.items():
+            if base.get(key, False) != value:
+                result.changed.append(f"win_perf_counters {name}: {key} {value} becomes {base.get(key, False)} (helper baseline)")
         if extra_counters or extra_instances:
-            additional.append(PerfmonObject(object_name=name, counters=extra_counters or [],
-                                            instances=extra_instances or [], measurement=base.get("Measurement", measurement)))
+            additional.append(PerfmonObject(object_name=name, counters=extra_counters, instances=extra_instances,
+                                            measurement=base.get("Measurement", measurement)))
             result.changed.append(f"win_perf_counters {name}: extra counters/instances carried ({', '.join(extra_counters + extra_instances)})")
         if missing:
             result.added.append(f"win_perf_counters {name}: baseline counters the managed agent lacked ({', '.join(missing)})")
         matched += 1
-    mon.win_perf_counters.additional_objects = [a for a in additional if a.counters or a.instances or a.object_name not in baseline]
+    config.additional_objects = additional
+    mon.win_perf_counters = config
     if matched:
         result.preserved.append(f"[[inputs.win_perf_counters]] {matched} baseline objects")
+    return True

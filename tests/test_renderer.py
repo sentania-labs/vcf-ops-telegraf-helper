@@ -225,7 +225,7 @@ def test_render_vcf_output_windows_cmd_quoting():
     )
     parsed = tomllib.loads(rendered)
     exec_cmd = parsed["inputs"]["exec"][0]["commands"][0]
-    assert exec_cmd == 'cmd.exe /c "C:/telegraf/telegraf.d/mandatory_tags.bat" "C:/telegraf/telegraf.exe"'
+    assert exec_cmd == 'cmd.exe /c "C:/telegraf/telegraf.d/mandatory_tags.bat"'
 
 
 def test_render_vcf_output_windows_cmd_quoting_with_spaces():
@@ -239,7 +239,7 @@ def test_render_vcf_output_windows_cmd_quoting_with_spaces():
     )
     parsed = tomllib.loads(rendered)
     exec_cmd = parsed["inputs"]["exec"][0]["commands"][0]
-    assert exec_cmd == 'cmd.exe /c "C:/Program Files/Telegraf/mandatory_tags.bat" "C:/Program Files/Telegraf/telegraf.exe"'
+    assert exec_cmd == 'cmd.exe /c "C:/Program Files/Telegraf/mandatory_tags.bat"'
 
 
 def test_render_vcf_output_omits_tls_cert_when_not_provided():

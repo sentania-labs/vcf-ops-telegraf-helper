@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, Field
 
 
@@ -79,6 +79,10 @@ class PerfmonObject(BaseModel):
     counters: List[str] = Field(default_factory=lambda: ["*"])
     instances: List[str] = Field(default_factory=lambda: ["*"])
     measurement: str
+    options: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="Other object keys carried as-is (IncludeTotal, UseRawValues, WarnOnMissing, FailOnMissing)",
+    )
 
 
 class WinPerfCountersInputConfig(BaseModel):

@@ -224,7 +224,8 @@ class TelegrafRenderer:
                             existing[key] = ['*'] if '*' in combined else combined
                     else:
                         objects.append(dict(ObjectName=extra.object_name, Counters=extra.counters,
-                                            Instances=extra.instances, Measurement=extra.measurement))
+                                            Instances=extra.instances, Measurement=extra.measurement,
+                                            **{k: v for k, v in extra.options.items() if k not in ("ObjectName", "Counters", "Instances", "Measurement")}))
                 lines[perf_start:] = ['[[inputs.win_perf_counters]]', f'  PrintValid = {print_valid_str}', '']
                 for item in objects:
                     lines.append('  [[inputs.win_perf_counters.object]]')
@@ -458,12 +459,12 @@ class TelegrafRenderer:
 
         if mandatory_tags_path:
             if is_windows:
-                # Always quote both paths: Telegraf splits the command on spaces, and an unquoted
-                # path under C:\Program Files runs C:\Program and the Guest Info tags never arrive.
-                cmd_pfx = "cmd.exe /c"
+                # Run the script with no argument (issue #62): the binary path is written into the
+                # script's own default line instead. Two quoted arguments would give cmd.exe four quote
+                # characters, and it strips the outer pair, so a path under C:\Program Files would run
+                # C:\Program and the Guest Info tags would never arrive.
                 norm_script = mandatory_tags_path.replace("\\", "/")
-                norm_bin = (telegraf_bin_path or "C:/telegraf/telegraf.exe").replace("\\", "/")
-                cmd_str = f'{cmd_pfx} "{norm_script}" "{norm_bin}"'
+                cmd_str = f'cmd.exe /c "{norm_script}"'
             else:
                 cmd_pfx = "/bin/bash"
                 bin_path = telegraf_bin_path or "/usr/bin/telegraf"

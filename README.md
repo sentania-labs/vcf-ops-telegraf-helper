@@ -40,7 +40,7 @@ Windows releases are Authenticode signed. Mac apps are Developer ID signed, nota
 1. **Connect:** enter the Ops connection details and validate them.
 2. **Select VM:** pick the VM from inventory. All agent states are shown by default; resize columns as needed.
 3. **Configure Target VM:** enter guest credentials, select the collector, and detect the endpoint. A missing agent defaults to the latest recommended version; an installed agent defaults to keeping it.
-4. **Monitoring Inputs:** choose the metrics you want. Additional Windows Perfmon counters appear in the same panel.
+4. **Monitoring Inputs:** choose the metrics you want. Additional Windows Perfmon counters appear in the same panel. The Windows baseline includes **Windows OS Totals** (cpu, mem and swap with the `win.` prefix), the same inputs the Ops-managed agent collects, so the Windows OS object carries its full stat-key set. Re-running an existing Windows endpoint with **Replace existing helper inputs** adds them; if you added that fragment by hand as custom TOML, remove it to avoid collecting twice.
 5. **Review & Preview:** inspect the offline configuration template.
 6. **Execute & Verify:** use dry-run to inspect the exact prepared configuration, then apply it. After a successful apply, exit or go back to revise options and run again.
 

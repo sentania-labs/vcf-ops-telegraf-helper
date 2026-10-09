@@ -428,3 +428,31 @@ def _managed_path_exists(executor: EndpointExecutor, path: str) -> bool:
     # file_exists shortcut and ask the endpoint directly.
     res = executor.execute(f"Test-Path -Path '{path}'", timeout=10)
     return _is_valid_stdout(res) and res.stdout.strip().splitlines()[-1].strip().lower() == "true"
+
+
+def set_windows_tags_binary(script: str, telegraf_bin: str) -> str:
+    """Point a mandatory_tags.bat at this endpoint's telegraf.exe through its default path line.
+
+    Both the helper's script and the vendor's set TELEGRAF_BIN_PATH on one line and only override
+    it when an argument is passed. The helper runs the script with no argument (issue #62), so the
+    default line carries the quoted binary path.
+    """
+    quoted = '"' + telegraf_bin.replace("/", "\\").strip('"') + '"'
+    new_line = f"set TELEGRAF_BIN_PATH={quoted}"
+    pattern = re.compile(r"^([ \t]*)set[ \t]+TELEGRAF_BIN_PATH=[^\r\n]*", re.IGNORECASE | re.MULTILINE)
+    replaced = False
+
+    def _sub(match: "re.Match[str]") -> str:
+        nonlocal replaced
+        if replaced:
+            return match.group(0)
+        replaced = True
+        return match.group(1) + new_line
+    patched = pattern.sub(_sub, script, count=1)
+    if not replaced:
+        newline = "\r\n" if "\r\n" in script else "\n"
+        lines = script.split(newline)
+        insert_at = 1 if lines and lines[0].strip().lower().startswith("@echo") else 0
+        lines.insert(insert_at, new_line)
+        patched = newline.join(lines)
+    return patched

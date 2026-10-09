@@ -313,7 +313,9 @@ def test_wizard_windows_monitoring_flow():
         _, _, _, sys_toml, vcf_toml, planned = mock_preview.call_args[0]
         assert "[[inputs.win_perf_counters]]" in sys_toml
         assert "[[inputs.win_services]]" in sys_toml
-        assert "[[inputs.cpu]]" not in sys_toml
+        # Windows OS totals are part of the baseline: cpu appears once, with the win. prefix
+        assert sys_toml.count("[[inputs.cpu]]") == 1 and 'name_prefix = "win."' in sys_toml
+        assert "[[inputs.disk]]" not in sys_toml
         assert "Service: telegraf" in planned
 
 

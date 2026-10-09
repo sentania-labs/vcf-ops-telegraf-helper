@@ -40,6 +40,7 @@ from vcf_ops_telegraf_helper.workflow.windows import (
     ManagedInstallation,
     detect_managed_installation,
     detect_windows_telegraf,
+    set_windows_tags_binary,
 )
 from vcf_ops_telegraf_helper.logger import get_logger
 
@@ -523,6 +524,11 @@ class ConfigureEndpointWorkflow:
             vm_mor_val = self.artifacts.vm_mor if self.artifacts else None
             vc_id_val = self.artifacts.vc_id if self.artifacts else None
             mutual_auth = self.artifacts.mutual_auth if self.artifacts else True
+            if is_win and self.artifacts and self.artifacts.mandatory_tags_content:
+                # The exec line runs the script with no argument, so its default must be this endpoint's binary
+                self.artifacts.mandatory_tags_content = set_windows_tags_binary(
+                    self.artifacts.mandatory_tags_content, telegraf_bin
+                )
 
             has_ca = bool(self.artifacts and self.artifacts.ca_cert_content)
             has_cert = bool(self.artifacts and self.artifacts.client_cert_content)
