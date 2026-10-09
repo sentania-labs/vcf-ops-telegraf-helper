@@ -18,7 +18,13 @@ import requests
 
 from vcf_ops_telegraf_helper.adapters.base import IntegrationArtifacts, VCFOpsIntegration
 from vcf_ops_telegraf_helper.logger import get_logger
-from vcf_ops_telegraf_helper.models.vcf import AuthToken, CollectorInfo, VCFEnvironment, VirtualMachineResource
+from vcf_ops_telegraf_helper.models.vcf import (
+    AgentObjectInfo,
+    AuthToken,
+    CollectorInfo,
+    VCFEnvironment,
+    VirtualMachineResource,
+)
 
 logger = get_logger("vcf91")
 
@@ -831,8 +837,17 @@ class VCF91OpenTelegrafIntegration(VCFOpsIntegration):
             mutual_auth=mutual_auth,
         )
 
-    def verify_ingestion(self, target_hostname: str, since: Optional[float] = None) -> str:
+    def verify_ingestion(
+        self,
+        target_hostname: str,
+        since: Optional[float] = None,
+        vc_id: Optional[str] = None,
+        vm_mor: Optional[str] = None,
+    ) -> str:
         """Check whether metrics for target are appearing in VCF Operations.
+
+        With a VM identity the agent object bound to that vCenter id and MOR is checked and the
+        hostname is ignored. Without one the object is found by name under the agent adapter.
 
         Returns:
             'PASS' if object with stats found, 'PENDING' if enrolled but roll-up pending,
@@ -840,6 +855,19 @@ class VCF91OpenTelegrafIntegration(VCFOpsIntegration):
         """
         if not self.env.token:
             return "UNKNOWN"
+
+        cutoff_ms = (since if since is not None else __import__('time').time() - 900) * 1000
+        if vc_id and vm_mor:
+            try:
+                agent = self.get_agent_object(vc_id, vm_mor)
+            except Exception as exc:
+                logger.warning("Agent object lookup for %s/%s failed: %s", vc_id, vm_mor, exc)
+                return "UNKNOWN"
+            if agent is None:
+                return "UNKNOWN"
+            if agent.last_sample_ms is not None and agent.last_sample_ms > cutoff_ms:
+                return "PASS"
+            return "PENDING"
 
         candidates = [target_hostname]
         try:
@@ -868,27 +896,81 @@ class VCF91OpenTelegrafIntegration(VCFOpsIntegration):
                     if resource_list:
                         res_id = resource_list[0].get("identifier")
                         if res_id:
-                            stats_url = f"{self.base_url}/suite-api/api/resources/{res_id}/stats/latest"
-                            try:
-                                s_resp = self.session.get(stats_url, headers=headers, timeout=10)
-                                if s_resp.status_code == 200:
-                                    s_data = s_resp.json()
-                                    stat_values = s_data.get("values", [])
-                                    cutoff = (since if since is not None else __import__('time').time() - 900) * 1000
-                                    for value in stat_values:
-                                        for stat in value.get("stat-list", {}).get("stat", []):
-                                            timestamps = stat.get("timestamps", [])
-                                            samples = stat.get("data", [])
-                                            if any(isinstance(stamp, (int, float)) and stamp > cutoff and sample is not None
-                                                   for stamp, sample in zip(timestamps, samples)):
-                                                return "PASS"
-                            except Exception:
-                                pass
+                            newest = self._newest_sample_ms(res_id)
+                            if newest is not None and newest > cutoff_ms:
+                                return "PASS"
                         # Resource enrolled in VCF Ops APPOSUCP, metrics roll-up pending (5-15 min)
                         return "PENDING"
             return "UNKNOWN"
         except Exception:
             return "UNKNOWN"
+
+    def _newest_sample_ms(self, resource_id: str) -> Optional[int]:
+        """Newest non-null sample timestamp (epoch ms) across the object's latest stats, or None."""
+        stats_url = f"{self.base_url}/suite-api/api/resources/{resource_id}/stats/latest"
+        try:
+            s_resp = self.session.get(stats_url, headers=self._api_headers(), timeout=10)
+        except Exception:
+            return None
+        if s_resp.status_code != 200:
+            return None
+        try:
+            payload = s_resp.json()
+        except Exception:
+            return None
+        newest: Optional[int] = None
+        for value in payload.get("values", []) or []:
+            for stat in (value.get("stat-list") or {}).get("stat", []) or []:
+                for stamp, sample in zip(stat.get("timestamps", []) or [], stat.get("data", []) or []):
+                    if isinstance(stamp, (int, float)) and sample is not None:
+                        if newest is None or stamp > newest:
+                            newest = int(stamp)
+        return newest
+
+    def _stat_key_count(self, resource_id: str) -> Optional[int]:
+        """Number of stat keys the object carries, or None when the query fails."""
+        url = f"{self.base_url}/suite-api/api/resources/{resource_id}/statkeys"
+        try:
+            resp = self.session.get(url, headers=self._api_headers(), timeout=30)
+        except Exception:
+            return None
+        if resp.status_code != 200:
+            return None
+        try:
+            data = resp.json()
+        except Exception:
+            return None
+        keys = data.get("stat-key")
+        if keys is None:
+            keys = data.get("statKeys", data.get("statKey", []))
+        return len(keys or [])
+
+    def get_agent_object(
+        self, vc_id: str, vm_mor: str, include_stat_keys: bool = False
+    ) -> Optional[AgentObjectInfo]:
+        """Return the agent OS object bound to this VM, with its managed type and newest sample.
+
+        The stat-key count is an extra query, only fetched on request (takeover capture and
+        continuity checks). Raises RuntimeError when the inventory cannot be read; returns None
+        when no object exists.
+        """
+        registrations = self._fetch_agent_registrations().get((vc_id, vm_mor), [])
+        if not registrations:
+            return None
+        primary = next((r for r in registrations if r["receiving"]), registrations[0])
+        info = AgentObjectInfo(
+            resource_id=primary["resource_id"],
+            name=primary.get("name"),
+            resource_kind=primary.get("kind"),
+            managed_type=primary.get("managed_type"),
+            receiving=bool(primary.get("receiving")),
+            collector_address=primary.get("collector_address"),
+            collector_group=primary.get("collector_group"),
+        )
+        if include_stat_keys:
+            info.stat_key_count = self._stat_key_count(info.resource_id)
+        info.last_sample_ms = self._newest_sample_ms(info.resource_id)
+        return info
 
     def _api_headers(self) -> Dict[str, str]:
         return {
@@ -1005,11 +1087,21 @@ class VCF91OpenTelegrafIntegration(VCFOpsIntegration):
         }
         collectors, group_of, _ = self._collector_maps()
 
+        agent_objects = [
+            res for res in resources
+            if res.get("resourceKey", {}).get("resourceKindKey") in ("linux", "win") and not self._is_stale(res)
+        ]
+        # AgentManagedType tells an Ops-installed (product managed) agent from an open-source one.
+        managed_types: Dict[str, Optional[str]] = {}
+        try:
+            props = self._fetch_properties([r.get("identifier") for r in agent_objects if r.get("identifier")])
+            managed_types = {rid: p.get("AgentManagedType") for rid, p in props.items()}
+        except Exception as exc:
+            logger.warning("Agent managed-type lookup failed; agent type will be unknown: %s", exc)
+
         registrations: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
-        for res in resources:
+        for res in agent_objects:
             res_key = res.get("resourceKey", {})
-            if res_key.get("resourceKindKey") not in ("linux", "win") or self._is_stale(res):
-                continue
             ids = {i.get("identifierType", {}).get("name"): i.get("value") for i in res_key.get("resourceIdentifiers", [])}
             key = (ids.get("VCID"), ids.get("VMMOR"))
             if not key[0] or not key[1]:
@@ -1020,6 +1112,10 @@ class VCF91OpenTelegrafIntegration(VCFOpsIntegration):
             collector_id = instance_collector.get(status.get("adapterInstanceId"))
             collector = collectors.get(collector_id or "", {})
             registrations.setdefault(key, []).append({
+                "resource_id": res.get("identifier"),
+                "name": res_key.get("name"),
+                "kind": res_key.get("resourceKindKey"),
+                "managed_type": managed_types.get(res.get("identifier")),
                 "receiving": status.get("resourceStatus") == "DATA_RECEIVING",
                 "collector_address": collector.get("hostName"),
                 "collector_group": group_of.get(collector_id or ""),
@@ -1069,6 +1165,12 @@ class VCF91OpenTelegrafIntegration(VCFOpsIntegration):
             else:
                 status = "Reporting" if any(r["receiving"] for r in regs) else "No data"
             primary = next((r for r in regs if r["receiving"]), regs[0] if regs else {})
+            # A product-managed registration anywhere on the VM is what the takeover guard needs to see,
+            # whichever registration supplies the status and collector details.
+            managed_type = next(
+                (r["managed_type"] for r in regs if (r.get("managed_type") or "").strip().lower() == "product managed"),
+                primary.get("managed_type"),
+            )
             vms.append(
                 VirtualMachineResource(
                     resource_id=res.get("identifier") or "",
@@ -1084,6 +1186,7 @@ class VCF91OpenTelegrafIntegration(VCFOpsIntegration):
                     collector_address=primary.get("collector_address"),
                     telegraf_status=status,
                     agent_registrations=len(regs),
+                    managed_type=managed_type,
                 )
             )
         return vms

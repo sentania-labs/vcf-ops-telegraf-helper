@@ -5,7 +5,13 @@ from __future__ import annotations
 from typing import Any, Optional
 
 from vcf_ops_telegraf_helper.adapters.base import IntegrationArtifacts, VCFOpsIntegration
-from vcf_ops_telegraf_helper.models.vcf import AuthToken, CollectorInfo, VCFEnvironment, VirtualMachineResource
+from vcf_ops_telegraf_helper.models.vcf import (
+    AgentObjectInfo,
+    AuthToken,
+    CollectorInfo,
+    VCFEnvironment,
+    VirtualMachineResource,
+)
 
 
 MOCK_CERT_PEM = (
@@ -134,8 +140,34 @@ class MockVCFOpsIntegration(VCFOpsIntegration):
             collector_group="default-collector-group",
         )
 
-    def verify_ingestion(self, target_hostname: str, since: Optional[float] = None) -> str:
+    def verify_ingestion(
+        self,
+        target_hostname: str,
+        since: Optional[float] = None,
+        vc_id: Optional[str] = None,
+        vm_mor: Optional[str] = None,
+    ) -> str:
         return self.ingestion_status
+
+    def get_agent_object(
+        self, vc_id: str, vm_mor: str, include_stat_keys: bool = False
+    ) -> Optional[AgentObjectInfo]:
+        """Simulated agent OS object for VMs that carry a registration in the mock inventory."""
+        vm = next((v for v in self.list_virtual_machines() if v.vm_mor == vm_mor and v.vc_id == vc_id), None)
+        if vm is None or vm.agent_registrations == 0:
+            return None
+        import time as _time
+        return AgentObjectInfo(
+            resource_id=f"agent-{vm_mor}",
+            name=f"{'Windows' if vm.os_family == 'WINDOWS' else 'Linux'} OS on {vm.name}",
+            resource_kind="win" if vm.os_family == "WINDOWS" else "linux",
+            managed_type=vm.managed_type or "Open Source",
+            receiving=vm.telegraf_status == "Reporting",
+            stat_key_count=(137 if vm.os_family == "WINDOWS" else 90) if include_stat_keys else None,
+            last_sample_ms=int(_time.time() * 1000) if vm.telegraf_status == "Reporting" else None,
+            collector_address=vm.collector_address,
+            collector_group=vm.collector_group,
+        )
 
     def list_virtual_machines(self, strict: bool = False) -> list[VirtualMachineResource]:
         """Return simulated virtual machine inventory for tests and offline usage."""
@@ -143,7 +175,8 @@ class MockVCFOpsIntegration(VCFOpsIntegration):
             return self._vms
 
         def _vm(idx: int, name: str, ip: str, mor: str, os_name: str, power: str = "Powered On",
-                status: str = "Not installed", collector: Optional[str] = None) -> VirtualMachineResource:
+                status: str = "Not installed", collector: Optional[str] = None,
+                managed: Optional[str] = None) -> VirtualMachineResource:
             return VirtualMachineResource(
                 resource_id=f"res-vm-{idx:03d}",
                 name=name,
@@ -158,10 +191,12 @@ class MockVCFOpsIntegration(VCFOpsIntegration):
                 collector_address=collector,
                 telegraf_status=status,
                 agent_registrations=0 if status == "Not installed" else 1,
+                managed_type=managed if status != "Not installed" else None,
             )
 
         return [
-            _vm(1, "dbdemo01", "172.17.0.2", "vm-1001", "Microsoft Windows Server 2022 (64-bit)"),
+            _vm(1, "dbdemo01", "172.17.0.2", "vm-1001", "Microsoft Windows Server 2022 (64-bit)",
+                status="Reporting", collector="10.10.10.51", managed="Product Managed"),
             _vm(2, "mssqldemo2", "172.16.3.80", "vm-1042", "Microsoft Windows Server 2025 (64-bit)"),
             _vm(3, "oraclesrv01", "172.18.2.14", "vm-1004", "Red Hat Enterprise Linux 9 (64-bit)"),
             _vm(4, "webapp01", "172.16.10.5", "vm-1020", "Ubuntu Linux (64-bit)", status="Reporting", collector="10.10.10.51"),

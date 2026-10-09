@@ -36,7 +36,11 @@ from vcf_ops_telegraf_helper.renderer.renderer import TelegrafRenderer
 from vcf_ops_telegraf_helper.security.redaction import redact_secrets
 from vcf_ops_telegraf_helper.validation.validator import Validator
 from vcf_ops_telegraf_helper.workflow.progress import ProgressReporter, SilentProgressReporter
-from vcf_ops_telegraf_helper.workflow.windows import detect_windows_telegraf
+from vcf_ops_telegraf_helper.workflow.windows import (
+    ManagedInstallation,
+    detect_managed_installation,
+    detect_windows_telegraf,
+)
 from vcf_ops_telegraf_helper.logger import get_logger
 
 logger = get_logger("workflow.engine")
@@ -68,6 +72,7 @@ class ConfigureEndpointWorkflow:
 
         # State accumulated during the run
         self.discovery: Optional[EndpointDiscoveryResult] = None
+        self.managed_installation: Optional[ManagedInstallation] = None
         self.artifacts: Optional[IntegrationArtifacts] = None
         self.system_conf_content: str = ""
         self.vcf_conf_content: str = ""
@@ -210,8 +215,13 @@ class ConfigureEndpointWorkflow:
                 os_version = ver_res.stdout.strip() if ver_res.success and ver_res.stdout.strip() else "Microsoft Windows"
 
                 win_det = detect_windows_telegraf(self.executor)
-                if (win_det.service_name or "").lower() == "ucp-telegraf" or "ucp-telegraf" in (win_det.binary_path or "").lower():
-                    raise RuntimeError("This agent is managed by VCF Operations (ucp-telegraf). Use VCF Operations to manage it; helper changes are refused.")
+                self.managed_installation = detect_managed_installation(self.executor, win_det, read_config=False)
+                if self.managed_installation.present:
+                    raise RuntimeError(
+                        "This agent is managed by VCF Operations "
+                        f"({', '.join(sorted(self.managed_installation.services))}). "
+                        "Use VCF Operations to manage it; helper changes are refused."
+                    )
                 installed = win_det.installed
                 version_str = win_det.version
                 service_state = win_det.service_state or ("Running" if win_det.running else "Stopped")
@@ -1349,9 +1359,16 @@ class ConfigureEndpointWorkflow:
                     verify_ssl=self.env.agent_verify_ssl,
                 )
                 # 6. Ingestion in VCF Ops
-                ingestion_status = self.adapter.verify_ingestion(short_host, since=self.started_at)
-                if ingestion_status == "UNKNOWN" and short_host != self.target.hostname:
-                    ingestion_status = self.adapter.verify_ingestion(self.target.hostname, since=self.started_at)
+                # With a VM identity the bound agent object is the only acceptable evidence: a hostname can
+                # match an unrelated registration, so there is no hostname fallback after an identity miss.
+                if self.artifacts and self.artifacts.is_managed_vm and self.artifacts.vm_mor and self.artifacts.vc_id:
+                    ingestion_status = self.adapter.verify_ingestion(
+                        short_host, since=self.started_at, vc_id=self.artifacts.vc_id, vm_mor=self.artifacts.vm_mor
+                    )
+                else:
+                    ingestion_status = self.adapter.verify_ingestion(short_host, since=self.started_at)
+                    if ingestion_status == "UNKNOWN" and short_host != self.target.hostname:
+                        ingestion_status = self.adapter.verify_ingestion(self.target.hostname, since=self.started_at)
                 if ingestion_status == "UNKNOWN":
                     self.verifications["VCF Ops ingestion"] = "PENDING (Ops processing typically requires 5 to 15 minutes)"
                 else:

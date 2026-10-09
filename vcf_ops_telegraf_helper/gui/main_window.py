@@ -241,6 +241,7 @@ class MainWindow(QMainWindow):
         self.selected_vm_name: Optional[str] = None
         self.discovered_hostname: Optional[str] = None
         self._vcf_validated = False
+        self.managed_installation = None
         self._validated_url: Optional[str] = None
         self._endpoint_detected = False
         self._current_step = 0
@@ -924,9 +925,12 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def _agent_status_text(vm: VirtualMachineResource) -> str:
+        text = vm.telegraf_status
+        if vm.is_ops_managed:
+            text += ", Ops managed"
         if vm.agent_registrations > 1:
-            return f"{vm.telegraf_status} ({vm.agent_registrations} registrations)"
-        return vm.telegraf_status
+            text += f" ({vm.agent_registrations} registrations)"
+        return text
 
     def _populate_vm_table(self, vms: list[VirtualMachineResource]) -> None:
         self.vm_table.setSortingEnabled(False)
@@ -1513,6 +1517,7 @@ class MainWindow(QMainWindow):
             self._refresh_step_gating()
 
     def _run_endpoint_detection(self) -> None:
+        self.managed_installation = None
         self.ep_status_label.setText("Detecting...")
         self.ep_missing_banner.setVisible(False)
         try:
@@ -1522,6 +1527,12 @@ class MainWindow(QMainWindow):
             executor = self._create_executor(target)
             found = run_busy(self, "Connecting to target and inspecting agent...",
                              lambda: probe_endpoint(target, executor))
+            self.managed_installation = found.get('managed')
+            if self.managed_installation is not None:
+                raise RuntimeError(
+                    f"VCF Operations owns this agent ({', '.join(sorted(self.managed_installation.services))}). "
+                    "Manage it through Ops; takeover is not available yet."
+                )
             self.discovered_hostname = found['hostname']
             self.detected_config_dir = found['config_dir']
             self._default_installation(found['installed'])

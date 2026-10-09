@@ -825,7 +825,8 @@ def test_main_window_vm_inventory_filter_and_binding(qapp, tmp_path, monkeypatch
     window.vm_show_off_check.setChecked(False)
 
     window.vm_status_filter.setCurrentText("Reporting")
-    assert "1 / 6 VMs" in window.vm_count_label.text()
+    # webapp01 (open source) and dbdemo01 (Ops managed) both report
+    assert "2 / 6 VMs" in window.vm_count_label.text()
     window.vm_status_filter.setCurrentText("All Agent States")
 
     window.vm_os_filter.setCurrentText("Windows")
