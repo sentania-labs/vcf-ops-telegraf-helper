@@ -1359,16 +1359,16 @@ class ConfigureEndpointWorkflow:
                     verify_ssl=self.env.agent_verify_ssl,
                 )
                 # 6. Ingestion in VCF Ops
-                # Look the agent object up by VM identity first: a hostname can match an unrelated registration
-                ingestion_status = "UNKNOWN"
+                # With a VM identity the bound agent object is the only acceptable evidence: a hostname can
+                # match an unrelated registration, so there is no hostname fallback after an identity miss.
                 if self.artifacts and self.artifacts.is_managed_vm and self.artifacts.vm_mor and self.artifacts.vc_id:
                     ingestion_status = self.adapter.verify_ingestion(
                         short_host, since=self.started_at, vc_id=self.artifacts.vc_id, vm_mor=self.artifacts.vm_mor
                     )
-                if ingestion_status == "UNKNOWN":
+                else:
                     ingestion_status = self.adapter.verify_ingestion(short_host, since=self.started_at)
-                if ingestion_status == "UNKNOWN" and short_host != self.target.hostname:
-                    ingestion_status = self.adapter.verify_ingestion(self.target.hostname, since=self.started_at)
+                    if ingestion_status == "UNKNOWN" and short_host != self.target.hostname:
+                        ingestion_status = self.adapter.verify_ingestion(self.target.hostname, since=self.started_at)
                 if ingestion_status == "UNKNOWN":
                     self.verifications["VCF Ops ingestion"] = "PENDING (Ops processing typically requires 5 to 15 minutes)"
                 else:

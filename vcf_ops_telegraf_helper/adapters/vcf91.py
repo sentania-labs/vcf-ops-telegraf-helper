@@ -1165,6 +1165,12 @@ class VCF91OpenTelegrafIntegration(VCFOpsIntegration):
             else:
                 status = "Reporting" if any(r["receiving"] for r in regs) else "No data"
             primary = next((r for r in regs if r["receiving"]), regs[0] if regs else {})
+            # A product-managed registration anywhere on the VM is what the takeover guard needs to see,
+            # whichever registration supplies the status and collector details.
+            managed_type = next(
+                (r["managed_type"] for r in regs if (r.get("managed_type") or "").strip().lower() == "product managed"),
+                primary.get("managed_type"),
+            )
             vms.append(
                 VirtualMachineResource(
                     resource_id=res.get("identifier") or "",
@@ -1180,7 +1186,7 @@ class VCF91OpenTelegrafIntegration(VCFOpsIntegration):
                     collector_address=primary.get("collector_address"),
                     telegraf_status=status,
                     agent_registrations=len(regs),
-                    managed_type=primary.get("managed_type"),
+                    managed_type=managed_type,
                 )
             )
         return vms
