@@ -44,6 +44,7 @@ class TakeoverRecord(BaseModel):
     agent_object_before: Optional[AgentObjectInfo] = None
     agent_object_after: Optional[AgentObjectInfo] = None
     cutover_started_at: Optional[str] = None
+    cutover_started_epoch: Optional[float] = None
     uninstall_task_id: Optional[str] = None
     uninstall_task_stage: Optional[str] = None
     backup_dir: Optional[str] = None

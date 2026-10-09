@@ -1,17 +1,16 @@
 """Take over a VCF Operations product-managed Telegraf agent with open-source Telegraf (Windows).
 
 Sequence proven in the lab on October 9, 2026 (issue #61): capture the Ops identity and the
-managed configuration, back it up, retire the agent through the Ops agents API, verify the
-endpoint is clean, install and enroll open-source Telegraf with the ported inputs through the
-ordinary configure workflow, then confirm Ops kept the same OS object and flipped it to
-Open Source. Four results are reported separately: retirement, installation, registration and
-fresh ingestion.
+managed configuration, back it up, prepare and validate the replacement without touching
+anything, retire the agent through the Ops agents API, verify the endpoint is clean, apply the
+prepared open-source install through the ordinary configure workflow, then confirm Ops kept the
+same OS object and flipped it to Open Source. Four results are reported separately: retirement,
+installation, registration and fresh ingestion.
 """
 
 from __future__ import annotations
 
 import time
-from enum import Enum
 from pathlib import Path
 from typing import Callable, Dict, List, Optional
 
@@ -23,7 +22,13 @@ from vcf_ops_telegraf_helper.logger import get_logger
 from vcf_ops_telegraf_helper.models.endpoint import EndpointTarget, OSFamily
 from vcf_ops_telegraf_helper.models.monitoring import MonitoringConfig
 from vcf_ops_telegraf_helper.models.vcf import AgentObjectInfo, VCFEnvironment
-from vcf_ops_telegraf_helper.models.workflow import RunSummary, StageResult, StageStatus, WorkflowOptions
+from vcf_ops_telegraf_helper.models.workflow import (
+    RunSummary,
+    StageResult,
+    StageStatus,
+    TakeoverStage,
+    WorkflowOptions,
+)
 from vcf_ops_telegraf_helper.security.redaction import redact_secrets
 from vcf_ops_telegraf_helper.storage.journal import TakeoverJournal, TakeoverRecord
 from vcf_ops_telegraf_helper.utils import local_now_formatted
@@ -39,15 +44,6 @@ from vcf_ops_telegraf_helper.workflow.windows import (
 )
 
 logger = get_logger("workflow.takeover")
-
-
-class TakeoverStage(str, Enum):
-    CAPTURE = "1/6 Capturing the managed agent and its Ops identity"
-    BACKUP = "2/6 Backing up the managed configuration"
-    RETIRE = "3/6 Retiring the managed agent through VCF Operations"
-    CLEAN = "4/6 Verifying the endpoint is clean"
-    INSTALL = "5/6 Installing and enrolling open-source Telegraf"
-    CONTINUITY = "6/6 Verifying object continuity in VCF Operations"
 
 
 class TakeoverOptions(BaseModel):
@@ -125,7 +121,7 @@ class TakeoverSummary(BaseModel):
         return "\n".join(lines)
 
 
-RESUMABLE_STATES = ("retired", "cleaned", "retire_failed")
+RESUMABLE_STATES = ("retired", "cleaned", "retire_failed", "installed")
 
 RESULT_RETIREMENT = "Managed agent retirement"
 RESULT_INSTALL = "Open-source Telegraf installation"
@@ -134,7 +130,7 @@ RESULT_INGESTION = "Fresh metric ingestion"
 
 
 class TakeoverWorkflow:
-    """Orchestrates the six takeover stages around the ordinary configure workflow."""
+    """Orchestrates the seven takeover stages around the ordinary configure workflow."""
 
     def __init__(
         self,
@@ -159,7 +155,10 @@ class TakeoverWorkflow:
         self.takeover = takeover
         self.options = options or WorkflowOptions()
         self.reporter = reporter or SilentProgressReporter()
-        self.journal = journal or TakeoverJournal(takeover.journal_dir) if takeover.journal_dir else (journal or TakeoverJournal())
+        if journal is not None:
+            self.journal = journal
+        else:
+            self.journal = TakeoverJournal(takeover.journal_dir)
         self._sleep = sleep
         self.preview_callback: Optional[Callable[[], None]] = None
 
@@ -175,6 +174,7 @@ class TakeoverWorkflow:
         self.verifications: Dict[str, str] = {}
         self.cutover_started: Optional[float] = None
         self._resumed = False
+        self._already_installed = False
 
         self._secrets: List[str] = [s for s in (self.env.password, self.env.token, self.target.password) if s]
 
@@ -196,6 +196,17 @@ class TakeoverWorkflow:
     def _is_windows(self) -> bool:
         return self.target.os_family == OSFamily.WINDOWS or type(self.executor).__name__ == "WinRMExecutor"
 
+    def _install_options(self) -> WorkflowOptions:
+        return self.options.model_copy(update={
+            "install_telegraf": True,
+            "force_new_cert": True,
+            "replace_inputs": True,
+            "dry_run": False,
+            "preview_only": False,
+            "restart_service": True,
+            "allow_managed_agent": True,
+        })
+
     # ------------------------------------------------------------------ stages
     def capture(self) -> StageResult:
         start = time.monotonic()
@@ -213,6 +224,11 @@ class TakeoverWorkflow:
 
             win_det = detect_windows_telegraf(self.executor)
             self.managed = detect_managed_installation(self.executor, win_det, read_config=True)
+            if not self.managed.query_ok:
+                raise RuntimeError(
+                    "Could not query Windows services for the Ops-managed agent; refusing to continue without that answer: "
+                    + self.managed.query_error
+                )
 
             previous = self.journal.load(self.target.vc_id, self.target.vm_mor) if self.takeover.resume else None
             if not self.managed.present:
@@ -224,6 +240,23 @@ class TakeoverWorkflow:
                         "the managed agent is gone. Enroll the endpoint with the ordinary workflow."
                     )
                 raise RuntimeError("No Ops-managed agent found on this endpoint; nothing to take over.")
+
+            prior_note = None
+            if previous and previous.state == "retire_failed" and previous.uninstall_task_id:
+                # Never submit a second uninstall while the journaled one is unresolved
+                status = self.adapter.get_agent_task_status(previous.uninstall_task_id)
+                if status.finished:
+                    raise RuntimeError(
+                        f"VCF Operations reports uninstall task {previous.uninstall_task_id} finished, but the managed "
+                        f"services are still present ({', '.join(sorted(self.managed.services))}). Reconcile in VCF Operations first."
+                    )
+                if not status.terminal:
+                    raise RuntimeError(
+                        f"VCF Operations uninstall task {previous.uninstall_task_id} is still {status.stage}; "
+                        "wait for it or check it in VCF Operations before retrying."
+                    )
+                prior_note = (f"Previous uninstall task {previous.uninstall_task_id} ended {status.stage}"
+                              + (f" ({'; '.join(status.messages)})" if status.messages else "") + "; starting over")
 
             grains = self.managed.grain_values
             g_mor, g_vc = grains.get("vm_id"), grains.get("vc_id")
@@ -271,6 +304,8 @@ class TakeoverWorkflow:
                 managed_telegraf_version=self.managed.telegraf_version,
                 agent_object_before=self.agent_before,
             )
+            if prior_note:
+                self.record.notes.append(prior_note)
             self.journal.save(self.record)
             keys = self.agent_before.stat_key_count
             msg = (f"Managed agent {self.managed.summary()}; Ops object {self.agent_before.resource_id} "
@@ -308,8 +343,12 @@ class TakeoverWorkflow:
                 )
             previous.state = "retired"
             self.results[RESULT_RETIREMENT] = "PASS (task finished after the interruption)"
+        if previous.state == "installed":
+            self._already_installed = True
+            self.results[RESULT_INSTALL] = "PASS (before the interruption)"
         self.record = previous
         self.agent_before = previous.agent_object_before
+        self.cutover_started = previous.cutover_started_epoch
         self._resumed = True
         self.record.notes.append(f"Resumed at {local_now_formatted()} from state {previous.state} on {self.target.hostname}")
         self.journal.save(self.record)
@@ -354,16 +393,61 @@ class TakeoverWorkflow:
             logger.exception("Takeover backup failed")
             return self._result(TakeoverStage.BACKUP, StageStatus.FAIL, f"Backup failed: {exc}", start)
 
+    def preflight(self) -> StageResult:
+        """Run the configure workflow's non-destructive stages before anything is retired.
+
+        Connectivity, the Ops integration (token, collector, client certificate), the rendered
+        configuration, collector reachability and disk space are all checked while the managed
+        agent is still running, so a replacement that cannot work never costs an outage.
+        """
+        start = time.monotonic()
+        self.reporter.on_stage_start(TakeoverStage.PREFLIGHT)
+        if self._already_installed:
+            return self._result(TakeoverStage.PREFLIGHT, StageStatus.SKIPPED, "Open-source Telegraf was installed before the interruption", start)
+        try:
+            assert self.record is not None and self.monitoring is not None
+            target = self.target.model_copy(update={"install_telegraf": True})
+            self.install_workflow = ConfigureEndpointWorkflow(
+                environment=self.env, target=target, monitoring=self.monitoring, executor=self.executor,
+                adapter=self.adapter, options=self._install_options(), reporter=self.reporter,
+            )
+            self.install_workflow.preview_callback = self.preview_callback
+            ok = self.install_workflow.run_stages(ConfigureEndpointWorkflow.PREPARE_STAGES)
+            if not ok:
+                failed = next((s for s in self.install_workflow.stage_results if s.status == StageStatus.FAIL), None)
+                raise RuntimeError(failed.message if failed else "preparation failed")
+            free_mb = None
+            if hasattr(self.executor, "get_free_disk_space_mb"):
+                try:
+                    free_mb = self.executor.get_free_disk_space_mb("C:")
+                except Exception:
+                    free_mb = None
+            if isinstance(free_mb, (int, float)) and free_mb < 500:
+                raise RuntimeError(f"Only {free_mb} MB free on C:; the open-source install needs 500 MB")
+            self.record.state = "preflight_ok" if not self._resumed else self.record.state
+            self.journal.save(self.record)
+            artifacts = self.install_workflow.artifacts
+            msg = (f"Replacement validated: collector {artifacts.collector_address if artifacts else '?'} reachable, "
+                   "client certificate issued, configuration rendered. Nothing changed on the endpoint yet.")
+            return self._result(TakeoverStage.PREFLIGHT, StageStatus.PASS, msg, start)
+        except Exception as exc:
+            logger.exception("Takeover preflight failed")
+            return self._result(
+                TakeoverStage.PREFLIGHT, StageStatus.FAIL,
+                f"Replacement cannot be prepared: {exc}. The managed agent was not touched.", start,
+            )
+
     def retire(self) -> StageResult:
         start = time.monotonic()
         self.reporter.on_stage_start(TakeoverStage.RETIRE)
         if self._resumed:
-            self.results[RESULT_RETIREMENT] = "PASS (before the interruption)"
+            self.results.setdefault(RESULT_RETIREMENT, "PASS (before the interruption)")
             return self._result(TakeoverStage.RETIRE, StageStatus.SKIPPED, "Managed agent was already retired", start)
         try:
             assert self.record is not None
             self.cutover_started = time.time()
             self.record.cutover_started_at = local_now_formatted()
+            self.record.cutover_started_epoch = self.cutover_started
             task_id = self.adapter.uninstall_managed_agent(
                 self.record.vm_resource_id or "", self.target.username or "", self.target.password or "", retain_config=False
             )
@@ -406,9 +490,16 @@ class TakeoverWorkflow:
     def clean(self) -> StageResult:
         start = time.monotonic()
         self.reporter.on_stage_start(TakeoverStage.CLEAN)
+        if self._already_installed:
+            return self._result(TakeoverStage.CLEAN, StageStatus.SKIPPED, "Endpoint was cleaned before the interruption", start)
         try:
             assert self.record is not None
             after = detect_managed_installation(self.executor, read_config=True)
+            if not after.query_ok:
+                raise RuntimeError(
+                    "Could not query Windows services after the Ops uninstall; not installing on an endpoint whose state is unknown: "
+                    + after.query_error
+                )
             if after.present:
                 running = after.running_services
                 raise RuntimeError(
@@ -466,28 +557,18 @@ class TakeoverWorkflow:
     def install(self) -> StageResult:
         start = time.monotonic()
         self.reporter.on_stage_start(TakeoverStage.INSTALL)
+        if self._already_installed:
+            self.results.setdefault(RESULT_INSTALL, "PASS (before the interruption)")
+            return self._result(TakeoverStage.INSTALL, StageStatus.SKIPPED, "Open-source Telegraf was installed before the interruption", start)
         try:
-            assert self.record is not None and self.monitoring is not None
-            opts = self.options.model_copy(update={
-                "install_telegraf": True,
-                "force_new_cert": True,
-                "replace_inputs": True,
-                "dry_run": False,
-                "preview_only": False,
-                "restart_service": True,
-            })
-            target = self.target.model_copy(update={"install_telegraf": True})
-            self.install_workflow = ConfigureEndpointWorkflow(
-                environment=self.env, target=target, monitoring=self.monitoring, executor=self.executor,
-                adapter=self.adapter, options=opts, reporter=self.reporter,
-            )
-            self.install_workflow.preview_callback = self.preview_callback
-            self.install_summary = self.install_workflow.run()
+            assert self.record is not None and self.install_workflow is not None
+            ok = self.install_workflow.run_stages(ConfigureEndpointWorkflow.CHANGE_STAGES)
+            self.install_summary = self.install_workflow.summary(ok)
             self.verifications.update(self.install_summary.verifications)
             installed = self.install_summary.verifications.get("Telegraf installed", "FAIL").startswith("PASS")
             service = self.install_summary.verifications.get("Service running", "FAIL").startswith("PASS")
-            self.results[RESULT_INSTALL] = "PASS" if (self.install_summary.success or (installed and service)) else "FAIL"
-            if not self.install_summary.success:
+            self.results[RESULT_INSTALL] = "PASS" if (ok or (installed and service)) else "FAIL"
+            if not ok:
                 failed = next((s for s in self.install_summary.stages if s.status == StageStatus.FAIL), None)
                 raise RuntimeError(failed.message if failed else "configure workflow failed")
             self.record.state = "installed"
@@ -569,7 +650,7 @@ class TakeoverWorkflow:
 
     # ------------------------------------------------------------------ run
     def run(self) -> TakeoverSummary:
-        stages = [self.capture, self.backup, self.retire, self.clean, self.install, self.continuity]
+        stages = [self.capture, self.backup, self.preflight, self.retire, self.clean, self.install, self.continuity]
         success = True
         for fn in stages:
             res = fn()
@@ -577,13 +658,15 @@ class TakeoverWorkflow:
             if res.status == StageStatus.FAIL:
                 success = False
                 if self.record is not None:
-                    if self.record.state in ("captured", "backed_up"):
+                    if self.record.state in ("captured", "backed_up", "preflight_ok"):
                         self.record.state = "failed"
                     self.record.results = dict(self.results)
                     self.journal.save(self.record)
                 break
         for name in (RESULT_RETIREMENT, RESULT_INSTALL, RESULT_REGISTRATION, RESULT_INGESTION):
             self.results.setdefault(name, "NOT RUN")
+        if self.install_summary is None and self.install_workflow is not None and self.install_workflow.stage_results:
+            self.install_summary = self.install_workflow.summary(all(s.status != StageStatus.FAIL for s in self.install_workflow.stage_results))
         return TakeoverSummary(
             target_hostname=self.target.hostname,
             vm_name=self.target.registered_hostname,

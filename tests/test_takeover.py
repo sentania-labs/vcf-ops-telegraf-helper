@@ -45,6 +45,8 @@ class ManagedWindowsEndpoint(MockExecutor):
         self.managed = True
         self.remnant_root = False
         self.remnant_files = 0
+        self.install_fails = False
+        self.service_query_fails = False
         self.files = {MANAGED_TELEGRAF_CONF: FIXTURE.read_text(), MANAGED_GRAINS: grains,
                       "C:\\VMware\\UCP\\ucp-telegraf\\mandatory_tags.bat": "@echo off\r\n"}
         self.removed: list[str] = []
@@ -58,11 +60,15 @@ class ManagedWindowsEndpoint(MockExecutor):
     def execute(self, command, timeout=30):
         self.executed_commands.append(command)
         if "Invoke-WebRequest" in command and "telegraf" in command:
+            if self.install_fails:
+                return CommandResult(exit_code=1, stderr="download failed: 404", command=command)
             # the auto-install puts the open-source agent and its service in place
             self.telegraf_installed = True
             self.service_active = True
             return CommandResult(exit_code=0, stdout="", command=command)
         if "Win32_Service" in command and "-in @(" in command:
+            if self.service_query_fails:
+                return CommandResult(exit_code=1, stderr="Access denied", command=command)
             return CommandResult(exit_code=0, stdout=MANAGED_SERVICES if self.managed else "", command=command)
         if "Win32_Service" in command and "PathName -like '*\\VMware\\UCP\\*'" in command and "ExpandProperty Name" in command:
             return CommandResult(exit_code=0, stdout="", command=command)
@@ -170,7 +176,7 @@ def test_full_takeover_reports_four_results_and_keeps_the_object(tmp_path):
     wf = _workflow(tmp_path)
     summary = wf.run()
     assert summary.success, [(s.stage, s.message) for s in summary.stages]
-    assert [s.status for s in summary.stages] == [StageStatus.PASS] * 6
+    assert [s.status for s in summary.stages] == [StageStatus.PASS] * 7
     assert summary.results == {
         RESULT_RETIREMENT: "PASS", RESULT_INSTALL: "PASS", RESULT_REGISTRATION: "PASS", RESULT_INGESTION: "PASS",
     }
@@ -257,7 +263,7 @@ def test_failed_uninstall_task_blocks_replacement(tmp_path):
     wf = _workflow(tmp_path, endpoint=endpoint, adapter=adapter)
     summary = wf.run()
     assert not summary.success
-    assert summary.stages[2].stage == TakeoverStage.RETIRE and "Guest credentials rejected" in summary.stages[2].message
+    assert summary.stages[3].stage == TakeoverStage.RETIRE and "Guest credentials rejected" in summary.stages[3].message
     assert summary.results[RESULT_RETIREMENT] == "FAIL" and summary.results[RESULT_INSTALL] == "NOT RUN"
     assert not endpoint.uploaded_files and endpoint.managed
 
@@ -267,7 +273,7 @@ def test_uninstall_timeout_does_not_retry_blindly(tmp_path):
     adapter = OpsWithUninstall(_env(), endpoint, polls_to_finish=99)
     wf = _workflow(tmp_path, endpoint=endpoint, adapter=adapter, uninstall_timeout_seconds=0)
     summary = wf.run()
-    assert not summary.success and "still SUBMITTING" in summary.stages[2].message
+    assert not summary.success and "still SUBMITTING" in summary.stages[3].message
     assert len(adapter.uninstall_calls) == 1
     record = TakeoverJournal(tmp_path / "journal").load(VC_ID, VM_MOR)
     assert record.uninstall_task_id == "task-1" and record.uninstall_task_stage == "SUBMITTING"
@@ -283,7 +289,7 @@ def test_services_left_behind_stop_before_install(tmp_path):
     wf = _workflow(tmp_path, endpoint=endpoint, adapter=StickyOps(_env(), endpoint))
     summary = wf.run()
     assert not summary.success
-    assert summary.stages[3].stage == TakeoverStage.CLEAN and "still present" in summary.stages[3].message
+    assert summary.stages[4].stage == TakeoverStage.CLEAN and "still present" in summary.stages[4].message
     assert not endpoint.uploaded_files and not endpoint.removed
 
 
@@ -298,7 +304,8 @@ def test_resume_after_interruption_skips_retire_and_installs(tmp_path):
     summary = second.run()
     assert summary.success, [(s.stage, s.message) for s in summary.stages]
     assert summary.stages[0].status == StageStatus.WARNING and "resuming" in summary.stages[0].message
-    assert summary.stages[1].status == StageStatus.SKIPPED and summary.stages[2].status == StageStatus.SKIPPED
+    assert summary.stages[1].status == StageStatus.SKIPPED and summary.stages[3].status == StageStatus.SKIPPED
+    assert summary.stages[2].stage == TakeoverStage.PREFLIGHT and summary.stages[2].status == StageStatus.PASS
     assert summary.results[RESULT_RETIREMENT].startswith("PASS")
     assert summary.results[RESULT_INSTALL] == "PASS"
     assert len(first.adapter.uninstall_calls) == 1
@@ -310,11 +317,11 @@ def test_resume_after_interruption_skips_retire_and_installs(tmp_path):
 
 def test_install_failure_reports_interruption_and_keeps_backup(tmp_path):
     endpoint = ManagedWindowsEndpoint()
-    endpoint.collector_reachable = False
+    endpoint.install_fails = True
     wf = _workflow(tmp_path, endpoint=endpoint)
     summary = wf.run()
     assert not summary.success
-    assert summary.stages[4].stage == TakeoverStage.INSTALL and "Monitoring is interrupted" in summary.stages[4].message
+    assert summary.stages[5].stage == TakeoverStage.INSTALL and "Monitoring is interrupted" in summary.stages[5].message
     assert summary.results[RESULT_RETIREMENT] == "PASS" and summary.results[RESULT_INSTALL] == "FAIL"
     record = TakeoverJournal(tmp_path / "journal").load(VC_ID, VM_MOR)
     assert record.state == "cleaned" and Path(record.backup_dir, "telegraf.conf").exists()
@@ -326,7 +333,7 @@ def test_slow_ops_reports_pending_not_failure(tmp_path):
     wf = _workflow(tmp_path, endpoint=endpoint, adapter=adapter, continuity_wait_seconds=0)
     summary = wf.run()
     assert summary.success
-    assert summary.stages[5].status == StageStatus.WARNING
+    assert summary.stages[6].status == StageStatus.WARNING
     assert summary.results[RESULT_REGISTRATION] == "PENDING"
     assert summary.results[RESULT_INGESTION].startswith("PENDING")
     assert summary.verifications["Same Ops object"] == "PASS"
@@ -337,7 +344,7 @@ def test_new_object_is_reported_as_changed(tmp_path):
     adapter = OpsWithUninstall(_env(), endpoint, new_object=True)
     wf = _workflow(tmp_path, endpoint=endpoint, adapter=adapter)
     summary = wf.run()
-    assert summary.success and summary.stages[5].status == StageStatus.WARNING
+    assert summary.success and summary.stages[6].status == StageStatus.WARNING
     assert summary.results[RESULT_REGISTRATION] == "CHANGED OBJECT"
     assert summary.verifications["Same Ops object"].startswith("CHANGED")
 
@@ -446,7 +453,7 @@ def test_retire_timeout_then_ops_finishes_is_resumable(tmp_path):
     adapter = OpsWithUninstall(_env(), endpoint, polls_to_finish=3)
     first = _workflow(tmp_path, endpoint=endpoint, adapter=adapter, uninstall_timeout_seconds=0)
     summary = first.run()
-    assert not summary.success and summary.stages[2].status == StageStatus.FAIL
+    assert not summary.success and summary.stages[3].status == StageStatus.FAIL
     record = TakeoverJournal(tmp_path / "journal").load(VC_ID, VM_MOR)
     assert record.state == "retire_failed" and record.uninstall_task_id == "task-1"
 
@@ -514,7 +521,7 @@ def test_non_empty_remnant_root_is_left_in_place(tmp_path):
     wf = _workflow(tmp_path, endpoint=endpoint)
     summary = wf.run()
     assert summary.success
-    assert summary.stages[3].status == StageStatus.WARNING and "left in place" in summary.stages[3].message
+    assert summary.stages[4].status == StageStatus.WARNING and "left in place" in summary.stages[4].message
     assert summary.verifications["Managed files removed"].startswith("LEFT IN PLACE")
     assert endpoint.removed == []
 
@@ -544,3 +551,104 @@ def test_backup_directory_is_fresh_per_takeover(tmp_path):
     journal.write_backup(record, {"telegraf.conf": "b"})
     assert not (Path(record.backup_dir) / "telegraf.d" / "old.conf").exists()
     assert (Path(record.backup_dir) / "telegraf.conf").read_text() == "b"
+
+
+def test_unreachable_collector_fails_preflight_and_leaves_the_agent(tmp_path):
+    """Codex review: everything the replacement needs is checked before the Ops uninstall."""
+    endpoint = ManagedWindowsEndpoint()
+    endpoint.collector_reachable = False
+    wf = _workflow(tmp_path, endpoint=endpoint)
+    summary = wf.run()
+    assert not summary.success
+    assert summary.stages[2].stage == TakeoverStage.PREFLIGHT and summary.stages[2].status == StageStatus.FAIL
+    assert "managed agent was not touched" in summary.stages[2].message
+    assert wf.adapter.uninstall_calls == [] and endpoint.managed and not endpoint.uploaded_files
+    assert summary.results[RESULT_RETIREMENT] == "NOT RUN"
+    assert TakeoverJournal(tmp_path / "journal").load(VC_ID, VM_MOR).state == "failed"
+
+
+def test_preflight_plans_a_fresh_install_not_the_managed_paths(tmp_path):
+    wf = _workflow(tmp_path)
+    wf.capture()
+    wf.backup()
+    res = wf.preflight()
+    assert res.status == StageStatus.PASS
+    disc = wf.install_workflow.discovery
+    assert disc.telegraf_installed is False and disc.config_dir == "C:\\telegraf\\telegraf.d"
+    assert "C:\\VMware\\UCP" not in wf.install_workflow.vcf_conf_content
+    assert wf.install_workflow.artifacts.client_cert_content
+    assert wf.adapter.uninstall_calls == [] and wf.executor.managed
+
+
+def test_service_query_failure_fails_closed_before_and_after_retire(tmp_path):
+    """Codex review: a failed service query is not an empty service set."""
+    endpoint = ManagedWindowsEndpoint()
+    endpoint.service_query_fails = True
+    wf = _workflow(tmp_path, endpoint=endpoint)
+    summary = wf.run()
+    assert not summary.success and "Could not query Windows services" in summary.stages[0].message
+    assert wf.adapter.uninstall_calls == []
+
+    endpoint = ManagedWindowsEndpoint()
+
+    class OpsBreakingTheQuery(OpsWithUninstall):
+        def get_agent_task_status(self, task_id):
+            status = super().get_agent_task_status(task_id)
+            if status.finished:
+                self.endpoint.service_query_fails = True
+            return status
+
+    wf = _workflow(tmp_path, endpoint=endpoint, adapter=OpsBreakingTheQuery(_env(), endpoint))
+    summary = wf.run()
+    assert not summary.success
+    assert summary.stages[4].stage == TakeoverStage.CLEAN and "state is unknown" in summary.stages[4].message
+    assert not endpoint.uploaded_files
+
+
+def test_retire_failed_with_services_present_repolls_instead_of_resubmitting(tmp_path):
+    """Codex review: a journaled uninstall task is reconciled before any second uninstall."""
+    endpoint = ManagedWindowsEndpoint()
+    adapter = OpsWithUninstall(_env(), endpoint, polls_to_finish=99)
+    first = _workflow(tmp_path, endpoint=endpoint, adapter=adapter, uninstall_timeout_seconds=0)
+    first.run()
+    assert endpoint.managed and TakeoverJournal(tmp_path / "journal").load(VC_ID, VM_MOR).state == "retire_failed"
+
+    # still running in Ops: refuse, do not resubmit
+    second = _workflow(tmp_path, endpoint=endpoint, adapter=adapter)
+    summary = second.run()
+    assert not summary.success and "still SUBMITTING" in summary.stages[0].message
+    assert len(adapter.uninstall_calls) == 1
+
+    # Ops says finished but the services are still there: refuse, reconcile
+    adapter.polls_to_finish = adapter._task_polls + 1
+    adapter.get_agent_task_status("task-1")
+    endpoint.managed = True  # the fake retire ran; pretend the services survived
+    endpoint.files[MANAGED_TELEGRAF_CONF] = FIXTURE.read_text()
+    endpoint.files[MANAGED_GRAINS] = GRAINS
+    third = _workflow(tmp_path, endpoint=endpoint, adapter=adapter)
+    summary = third.run()
+    assert not summary.success and "services are still present" in summary.stages[0].message
+    assert len(adapter.uninstall_calls) == 1
+
+    # the task ended in failure: a fresh takeover may start, and the journal says why
+    adapter.fail_task = True
+    adapter.retired = False  # the fake flips the object once "retired"; the real one is still Product Managed
+    fourth = _workflow(tmp_path, endpoint=endpoint, adapter=adapter)
+    fourth.capture()
+    assert fourth.record is not None and any("starting over" in n for n in fourth.record.notes)
+
+
+def test_resume_after_install_only_verifies_continuity(tmp_path):
+    """Codex review: an interruption during continuity must not report 'nothing to take over'."""
+    first = _workflow(tmp_path)
+    for stage in (first.capture, first.backup, first.preflight, first.retire, first.clean, first.install):
+        assert stage().status in (StageStatus.PASS, StageStatus.WARNING)
+    assert first.record.state == "installed"
+
+    second = _workflow(tmp_path, endpoint=first.executor, adapter=first.adapter)
+    summary = second.run()
+    assert summary.success, [(s.stage, s.message) for s in summary.stages]
+    assert [s.status for s in summary.stages[1:6]] == [StageStatus.SKIPPED] * 5
+    assert summary.results[RESULT_INSTALL].startswith("PASS") and summary.results[RESULT_INGESTION] == "PASS"
+    assert len(first.adapter.uninstall_calls) == 1
+    assert TakeoverJournal(tmp_path / "journal").load(VC_ID, VM_MOR).state == "verified"

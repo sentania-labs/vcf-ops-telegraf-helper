@@ -39,6 +39,18 @@ class UninstallStage(str, Enum):
     VERIFY = "5/5 Verifying clean endpoint state"
 
 
+class TakeoverStage(str, Enum):
+    """Explicit sequential stages for taking over an Ops product-managed agent."""
+
+    CAPTURE = "1/7 Capturing the managed agent and its Ops identity"
+    BACKUP = "2/7 Backing up the managed configuration"
+    PREFLIGHT = "3/7 Preparing and validating the replacement (nothing changed yet)"
+    RETIRE = "4/7 Retiring the managed agent through VCF Operations"
+    CLEAN = "5/7 Verifying the endpoint is clean"
+    INSTALL = "6/7 Installing and enrolling open-source Telegraf"
+    CONTINUITY = "7/7 Verifying object continuity in VCF Operations"
+
+
 class StageStatus(str, Enum):
     """Status outcome for a workflow stage."""
 
@@ -51,7 +63,7 @@ class StageStatus(str, Enum):
 class StageResult(BaseModel):
     """Result of a single workflow stage."""
 
-    stage: Union[WorkflowStage, UninstallStage, str]
+    stage: Union[WorkflowStage, UninstallStage, TakeoverStage, str]
     status: StageStatus
     message: str
     details: Optional[str] = None
@@ -88,6 +100,7 @@ class WorkflowOptions(BaseModel):
     telegraf_version: Optional[str] = None
     force_new_cert: bool = False
     replace_inputs: bool = False
+    allow_managed_agent: bool = False  # takeover preflight: plan the install as if the Ops agent were already gone
 
 
 class RunSummary(BaseModel):
