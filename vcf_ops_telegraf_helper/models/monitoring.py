@@ -90,6 +90,19 @@ class WinPerfCountersInputConfig(BaseModel):
     process_instances: List[str] = Field(default_factory=lambda: ["_Total", "telegraf"])
 
 
+class WindowsOsInputConfig(BaseModel):
+    """Windows OS totals: inputs.cpu, inputs.mem and inputs.swap with name_prefix "win.".
+
+    The Ops product-managed agent ships these next to the perf counters; they add the
+    cpu|usage.*, mem|total/used/used.percent and swap|* stat keys the counters alone lack.
+    """
+
+    enabled: bool = False
+    cpu: bool = True
+    mem: bool = True
+    swap: bool = True
+
+
 class WinServicesInputConfig(BaseModel):
     """Configuration for Windows Services status plugin."""
 
@@ -163,6 +176,7 @@ class MonitoringConfig(BaseModel):
     diskio: DiskIoInputConfig = Field(default_factory=DiskIoInputConfig)
     processes: ProcessesInputConfig = Field(default_factory=ProcessesInputConfig)
     win_perf_counters: WinPerfCountersInputConfig = Field(default_factory=WinPerfCountersInputConfig)
+    win_os: WindowsOsInputConfig = Field(default_factory=WindowsOsInputConfig)
     win_services: WinServicesInputConfig = Field(default_factory=WinServicesInputConfig)
     nginx: NginxInputConfig = Field(default_factory=NginxInputConfig)
     apache: ApacheInputConfig = Field(default_factory=ApacheInputConfig)
@@ -185,6 +199,7 @@ class MonitoringConfig(BaseModel):
                 system=SystemInputConfig(enabled=False),
                 swap=SwapInputConfig(enabled=False),
                 win_perf_counters=WinPerfCountersInputConfig(enabled=True),
+                win_os=WindowsOsInputConfig(enabled=True),
                 win_services=WinServicesInputConfig(enabled=True, service_names=["telegraf"]),
             )
         return cls(

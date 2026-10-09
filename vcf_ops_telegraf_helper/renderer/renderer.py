@@ -238,6 +238,24 @@ class TelegrafRenderer:
                         lines.append(f'    {key} = {formatted}')
                     lines.append('')
 
+        # Windows OS totals (same three inputs the Ops product-managed agent ships)
+        if config.win_os.enabled:
+            if config.win_os.cpu:
+                lines.extend([
+                    "# Windows CPU totals, prefixed to land on the Windows OS object in VCF Operations",
+                    "[[inputs.cpu]]",
+                    "  percpu = true",
+                    "  totalcpu = true",
+                    "  collect_cpu_time = true",
+                    "  report_active = true",
+                    '  name_prefix = "win."',
+                    "",
+                ])
+            if config.win_os.mem:
+                lines.extend(["# Windows memory totals", "[[inputs.mem]]", '  name_prefix = "win."', ""])
+            if config.win_os.swap:
+                lines.extend(["# Windows swap totals", "[[inputs.swap]]", '  name_prefix = "win."', ""])
+
         # Windows Services
         if config.win_services.enabled:
             lines.extend([
@@ -440,14 +458,12 @@ class TelegrafRenderer:
 
         if mandatory_tags_path:
             if is_windows:
+                # Always quote both paths: Telegraf splits the command on spaces, and an unquoted
+                # path under C:\Program Files runs C:\Program and the Guest Info tags never arrive.
                 cmd_pfx = "cmd.exe /c"
                 norm_script = mandatory_tags_path.replace("\\", "/")
                 norm_bin = (telegraf_bin_path or "C:/telegraf/telegraf.exe").replace("\\", "/")
-                if " " in norm_script:
-                    norm_script = f'"{norm_script}"'
-                if " " in norm_bin:
-                    norm_bin = f'"{norm_bin}"'
-                cmd_str = f"{cmd_pfx} {norm_script} {norm_bin}"
+                cmd_str = f'{cmd_pfx} "{norm_script}" "{norm_bin}"'
             else:
                 cmd_pfx = "/bin/bash"
                 bin_path = telegraf_bin_path or "/usr/bin/telegraf"

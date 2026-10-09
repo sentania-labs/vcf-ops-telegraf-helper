@@ -167,8 +167,9 @@ def test_cli_opt_in_plugin_baseline_windows():
         assert result.exit_code == 0
         assert "[[inputs.win_perf_counters]]" in result.output
         assert "[[inputs.win_services]]" in result.output
-        assert "[[inputs.cpu]]" not in result.output
-        assert "[[inputs.mem]]" not in result.output
+        # Windows OS totals ride along with the win. prefix; Linux-style disk and net do not
+        assert "[[inputs.cpu]]" in result.output
+        assert 'name_prefix = "win."' in result.output
         assert "[[inputs.disk]]" not in result.output
         assert "[[inputs.net]]" not in result.output
 
@@ -179,10 +180,17 @@ def test_cli_opt_in_single_flag_win_perf():
     result = runner.invoke(cli, ["render", "--win-perf"])
     assert result.exit_code == 0
     assert "[[inputs.win_perf_counters]]" in result.output
-    assert "[[inputs.cpu]]" not in result.output
-    assert "[[inputs.mem]]" not in result.output
     assert "[[inputs.disk]]" not in result.output
     assert "[[inputs.net]]" not in result.output
+    assert "[[inputs.system]]" not in result.output
+    # cpu, mem and swap appear only as the win.-prefixed Windows OS totals
+    assert result.output.count("[[inputs.cpu]]") == 1 and result.output.count('name_prefix = "win."') == 3
+
+    without_totals = runner.invoke(cli, ["render", "--win-perf", "--no-win-os"])
+    assert without_totals.exit_code == 0
+    assert "[[inputs.cpu]]" not in without_totals.output
+    assert "[[inputs.mem]]" not in without_totals.output
+    assert "[[inputs.swap]]" not in without_totals.output
 
 
 def test_cli_explicit_hostname_override():
@@ -232,10 +240,10 @@ def test_cli_render_os_windows_baseline():
     assert result.exit_code == 0
     assert "[[inputs.win_perf_counters]]" in result.output
     assert "[[inputs.win_services]]" in result.output
-    assert "[[inputs.cpu]]" not in result.output
-    assert "[[inputs.mem]]" not in result.output
+    assert result.output.count('name_prefix = "win."') == 3
     assert "[[inputs.disk]]" not in result.output
     assert "[[inputs.net]]" not in result.output
+    assert "[[inputs.system]]" not in result.output
 
 
 def test_cli_workload_flag_supplements_os_baseline():

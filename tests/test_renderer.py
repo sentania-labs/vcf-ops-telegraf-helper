@@ -225,7 +225,7 @@ def test_render_vcf_output_windows_cmd_quoting():
     )
     parsed = tomllib.loads(rendered)
     exec_cmd = parsed["inputs"]["exec"][0]["commands"][0]
-    assert exec_cmd == "cmd.exe /c C:/telegraf/telegraf.d/mandatory_tags.bat C:/telegraf/telegraf.exe"
+    assert exec_cmd == 'cmd.exe /c "C:/telegraf/telegraf.d/mandatory_tags.bat" "C:/telegraf/telegraf.exe"'
 
 
 def test_render_vcf_output_windows_cmd_quoting_with_spaces():
