@@ -65,8 +65,39 @@ class VirtualMachineResource(BaseModel):
     )
     agent_registrations: int = Field(default=0, description="Number of agent OS objects bound to this VM")
     telegraf_version: Optional[str] = Field(default=None, description="Installed telegraf version if known")
+    managed_type: Optional[str] = Field(
+        default=None,
+        description="AgentManagedType of the agent OS object: 'Product Managed' (Ops-installed) or 'Open Source'",
+    )
 
     @property
     def is_powered_on(self) -> bool:
         return (self.power_state or "").lower() == "powered on"
+
+    @property
+    def is_ops_managed(self) -> bool:
+        """True when the registered agent was installed and is controlled by VCF Operations."""
+        return (self.managed_type or "").strip().lower() == "product managed"
+
+
+class AgentObjectInfo(BaseModel):
+    """The agent OS object ('Linux OS on x' / 'Windows OS on x') VCF Operations keeps for one VM.
+
+    The object is keyed by the VM's vCenter id and MOR only, so it survives a change of
+    agent type. Captured before a takeover and compared after it to prove continuity.
+    """
+
+    resource_id: str = Field(description="VCF Operations resource identifier of the OS object")
+    name: Optional[str] = Field(default=None, description="Object name, e.g. 'Windows OS on tg-w22-01'")
+    resource_kind: Optional[str] = Field(default=None, description="Resource kind key: 'win' or 'linux'")
+    managed_type: Optional[str] = Field(default=None, description="'Product Managed' or 'Open Source'")
+    receiving: bool = Field(default=False, description="Adapter reports DATA_RECEIVING")
+    stat_key_count: Optional[int] = Field(default=None, description="Number of stat keys the object carries")
+    last_sample_ms: Optional[int] = Field(default=None, description="Newest sample timestamp (epoch ms)")
+    collector_address: Optional[str] = Field(default=None, description="Cloud proxy address of the registration")
+    collector_group: Optional[str] = Field(default=None, description="Collector group of the registration")
+
+    @property
+    def is_ops_managed(self) -> bool:
+        return (self.managed_type or "").strip().lower() == "product managed"
 

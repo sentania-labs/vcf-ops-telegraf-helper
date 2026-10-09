@@ -641,6 +641,8 @@ def vms_cmd(
     for vm in filtered:
         st_color = {"Reporting": "green", "No data": "yellow"}.get(vm.telegraf_status, "dim")
         status = vm.telegraf_status
+        if vm.is_ops_managed:
+            status = f"{status}, Ops managed"
         if vm.agent_registrations > 1:
             status = f"{status} ({vm.agent_registrations} registrations)"
         table.add_row(

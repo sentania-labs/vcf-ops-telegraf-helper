@@ -709,7 +709,9 @@ def test_cli_vms_command_listing_and_filtering(wide_console):
     assert res_rep.exit_code == 0
     assert "webapp01" in res_rep.output
     assert "Reporting" in res_rep.output
-    assert "dbdemo01" not in res_rep.output
+    # dbdemo01 reports through an Ops-managed agent and is listed as such
+    assert "dbdemo01" in res_rep.output
+    assert "mssqldemo2" not in res_rep.output
 
     res_nd = runner.invoke(
         cli,

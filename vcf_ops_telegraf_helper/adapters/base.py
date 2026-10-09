@@ -6,7 +6,12 @@ from abc import ABC, abstractmethod
 from typing import Any, Optional
 from pydantic import BaseModel, Field
 
-from vcf_ops_telegraf_helper.models.vcf import AuthToken, CollectorInfo, VirtualMachineResource
+from vcf_ops_telegraf_helper.models.vcf import (
+    AgentObjectInfo,
+    AuthToken,
+    CollectorInfo,
+    VirtualMachineResource,
+)
 
 
 class IntegrationArtifacts(BaseModel):
@@ -78,13 +83,32 @@ class VCFOpsIntegration(ABC):
         pass
 
     @abstractmethod
-    def verify_ingestion(self, target_hostname: str, since: Optional[float] = None) -> str:
+    def verify_ingestion(
+        self,
+        target_hostname: str,
+        since: Optional[float] = None,
+        vc_id: Optional[str] = None,
+        vm_mor: Optional[str] = None,
+    ) -> str:
         """Check whether telemetry from the target is visible in VCF Operations.
 
+        When vc_id and vm_mor are given the agent object bound to that VM is checked first;
+        the hostname lookup is only a fallback, since a name can match an unrelated registration.
+
         Returns:
-            One of: 'PASS', 'UNKNOWN', 'FAIL'.
+            One of: 'PASS', 'PENDING', 'UNKNOWN', 'FAIL'.
         """
         pass
+
+    def get_agent_object(
+        self, vc_id: str, vm_mor: str, include_stat_keys: bool = False
+    ) -> Optional[AgentObjectInfo]:
+        """Return the agent OS object bound to the VM with this vCenter id and MOR, or None.
+
+        include_stat_keys also counts the object's stat keys (an extra query). Adapters that
+        cannot read agent objects return None; callers treat that as unknown.
+        """
+        return None
 
     @abstractmethod
     def list_virtual_machines(self, strict: bool = False) -> list[VirtualMachineResource]:

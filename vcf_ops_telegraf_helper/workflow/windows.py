@@ -266,3 +266,165 @@ def detect_windows_telegraf(executor: EndpointExecutor) -> WindowsTelegrafDetect
         service_state="Stopped",
         running=False,
     )
+
+
+# ---------------------------------------------------------------------------
+# Ops product-managed agent (VCF Operations 9.1 footprint, verified in the lab on 2026-10-09)
+# ---------------------------------------------------------------------------
+
+MANAGED_SERVICE_NAMES = ("salt-minion", "ucp-minion", "ucp-telegraf")
+MANAGED_ROOT = r"C:\VMware\UCP"
+MANAGED_CERT_DIR = r"C:\ProgramData\VMware\UCP\certkeys"
+MANAGED_TELEGRAF_DIR = MANAGED_ROOT + r"\ucp-telegraf"
+MANAGED_TELEGRAF_CONF = MANAGED_TELEGRAF_DIR + r"\telegraf.conf"
+MANAGED_TELEGRAF_D = MANAGED_TELEGRAF_DIR + r"\telegraf.d"
+MANAGED_TAGS_SCRIPT = MANAGED_TELEGRAF_DIR + r"\mandatory_tags.bat"
+MANAGED_GRAINS = MANAGED_ROOT + r"\salt\conf\grains"
+
+
+class ManagedInstallation:
+    """What an Ops product-managed agent looks like on one Windows endpoint.
+
+    `present` is decided by the control services (salt-minion, ucp-minion, ucp-telegraf) or a
+    telegraf service running from under C:\\VMware\\UCP. Directories alone are only cleanup scope:
+    the Ops uninstall leaves an empty C:\\VMware\\UCP behind.
+    """
+
+    def __init__(self) -> None:
+        self.services: dict[str, tuple[str, str]] = {}  # name -> (state, path)
+        self.root_present: bool = False
+        self.cert_dir_present: bool = False
+        self.telegraf_conf: Optional[str] = None
+        self.telegraf_d: dict[str, str] = {}
+        self.mandatory_tags: Optional[str] = None
+        self.grains: Optional[str] = None
+        self.telegraf_version: Optional[str] = None
+        self.read_errors: list[str] = []
+
+    @property
+    def present(self) -> bool:
+        return bool(self.services)
+
+    @property
+    def running_services(self) -> list[str]:
+        return [n for n, (state, _) in self.services.items() if "running" in state.lower()]
+
+    @property
+    def grain_values(self) -> dict[str, str]:
+        """Flat key: value pairs from the salt grains file (vm_id, vc_id, arc_virtual_ip, ...)."""
+        values: dict[str, str] = {}
+        for line in (self.grains or "").splitlines():
+            if ":" not in line or line.lstrip().startswith("#"):
+                continue
+            key, _, val = line.partition(":")
+            key, val = key.strip(), val.strip().strip("'\"")
+            if key and val and not key.startswith("-"):
+                values[key] = val
+        return values
+
+    @property
+    def cleanup_paths(self) -> list[str]:
+        paths = []
+        if self.root_present:
+            paths.append(MANAGED_ROOT)
+        if self.cert_dir_present:
+            paths.append(MANAGED_CERT_DIR)
+        return paths
+
+    def summary(self) -> str:
+        if not self.present:
+            return "No Ops-managed agent"
+        svc = ", ".join(f"{n} ({st})" for n, (st, _) in sorted(self.services.items()))
+        ver = f", {self.telegraf_version}" if self.telegraf_version else ""
+        return f"Ops-managed agent: services {svc}{ver}"
+
+    def __repr__(self) -> str:
+        return f"ManagedInstallation(services={sorted(self.services)}, root={self.root_present}, certs={self.cert_dir_present})"
+
+
+def is_managed_detection(found: WindowsTelegrafDetection) -> bool:
+    """True when the telegraf found by detect_windows_telegraf is the Ops-managed ucp-telegraf."""
+    if (found.service_name or "").lower() == "ucp-telegraf":
+        return True
+    return "\\vmware\\ucp\\" in (found.binary_path or "").lower().replace("/", "\\")
+
+
+def detect_managed_installation(
+    executor: EndpointExecutor,
+    telegraf: Optional[WindowsTelegrafDetection] = None,
+    read_config: bool = True,
+) -> ManagedInstallation:
+    """Inspect a Windows endpoint for the Ops product-managed agent.
+
+    Services are read from the service control manager by name and by binary path. With
+    read_config the managed telegraf.conf, telegraf.d fragments, mandatory_tags.bat and the salt
+    grains are downloaded (text only, never the key files) so they can be ported and backed up.
+    """
+    found = ManagedInstallation()
+    names = "', '".join(MANAGED_SERVICE_NAMES)
+    svc_cmd = (
+        f"Get-CimInstance Win32_Service | Where-Object {{ ($_.Name -in @('{names}')) -or ($_.PathName -like '*\\VMware\\UCP\\*') }} "
+        "| ForEach-Object { '{0}|{1}|{2}' -f $_.Name, $_.State, $_.PathName }"
+    )
+    res = executor.execute(svc_cmd, timeout=15)
+    if _is_valid_stdout(res):
+        for line in res.stdout.strip().splitlines():
+            parts = line.strip().split("|", 2)
+            if len(parts) != 3 or not parts[0].strip():
+                continue
+            name, state, path = (part.strip() for part in parts)
+            under_ucp = "\\vmware\\ucp\\" in path.lower().replace("/", "\\")
+            # ucp-* names belong to Ops. salt-minion is also what a stock SaltStack install is called,
+            # so it only counts when it runs from the managed root (C:\VMware\UCP\salt\nssm.exe).
+            if under_ucp or name.lower().startswith("ucp-"):
+                found.services[name] = (state, path)
+    if telegraf is not None and is_managed_detection(telegraf):
+        found.services.setdefault(telegraf.service_name or "ucp-telegraf", (telegraf.service_state or "Unknown", telegraf.binary_path or ""))
+        found.telegraf_version = telegraf.version
+
+    if not read_config:
+        # Presence is all the caller wants; skip the extra round trips.
+        return found
+
+    # Remnant directories are cleanup scope: the Ops uninstall leaves an empty C:\VMware\UCP behind.
+    found.root_present = _managed_path_exists(executor, MANAGED_ROOT)
+    found.cert_dir_present = _managed_path_exists(executor, MANAGED_CERT_DIR)
+    if not found.present:
+        return found
+    if found.telegraf_version is None:
+        ver = executor.execute(f"& '{MANAGED_TELEGRAF_DIR}\\telegraf.exe' version", timeout=10)
+        if _is_valid_stdout(ver):
+            found.telegraf_version = ver.stdout.strip().splitlines()[0].strip()
+
+    def _read(path: str) -> Optional[str]:
+        try:
+            if not executor.file_exists(path):
+                return None
+            return executor.download(path)
+        except Exception as exc:
+            found.read_errors.append(f"{path}: {exc}")
+            return None
+
+    found.telegraf_conf = _read(MANAGED_TELEGRAF_CONF)
+    found.mandatory_tags = _read(MANAGED_TAGS_SCRIPT)
+    found.grains = _read(MANAGED_GRAINS)
+    listing = executor.execute(
+        f"Get-ChildItem -Path '{MANAGED_TELEGRAF_D}' -File -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Name",
+        timeout=10,
+    )
+    if _is_valid_stdout(listing):
+        for name in listing.stdout.strip().splitlines():
+            name = name.strip()
+            if name:
+                content = _read(f"{MANAGED_TELEGRAF_D}\\{name}")
+                if content is not None:
+                    found.telegraf_d[name] = content
+    logger.info("Managed agent inspection: %r, %d telegraf.d fragments", found, len(found.telegraf_d))
+    return found
+
+
+def _managed_path_exists(executor: EndpointExecutor, path: str) -> bool:
+    # The managed directories are only ever consulted by exact path, so avoid the generic
+    # file_exists shortcut and ask the endpoint directly.
+    res = executor.execute(f"Test-Path -Path '{path}'", timeout=10)
+    return _is_valid_stdout(res) and res.stdout.strip().splitlines()[-1].strip().lower() == "true"
