@@ -727,7 +727,7 @@ def render_cmd(
     if target_os:
         is_win = target_os.lower() == "windows"
     else:
-        is_win = bool(win_perf_object or win_perf or win_services or no_win_services or (win_perf is False))
+        is_win = bool(win_perf_object or win_perf or win_services or no_win_services or (win_perf is False) or (win_os is not None))
 
     cfg = resolve_monitoring_config(
         is_win=is_win,

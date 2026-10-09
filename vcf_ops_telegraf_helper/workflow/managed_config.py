@@ -305,10 +305,9 @@ def _map_input(plugin: str, inst: Dict[str, Any], result: ImportedConfig, retain
             for k in ("percpu", "totalcpu", "collect_cpu_time", "report_active"):
                 setattr(mon.cpu, k, bool(inst.get(k, True)))
         if plugin == "disk":
-            if "mount_points" in inst:
-                mon.disk.mount_points = [str(m) for m in inst["mount_points"]]
-            if "ignore_fs" in inst:
-                mon.disk.ignore_fs = [str(f) for f in inst["ignore_fs"]]
+            # Lossless: the managed stanza's filters, or none at all, never the catalog defaults
+            mon.disk.mount_points = [str(m) for m in inst["mount_points"]] if "mount_points" in inst else None
+            mon.disk.ignore_fs = [str(f) for f in inst["ignore_fs"]] if "ignore_fs" in inst else []
         if plugin == "net" and "interfaces" in inst:
             mon.net.interfaces = [str(i) for i in inst["interfaces"]]
         if plugin == "diskio" and "devices" in inst:
@@ -382,8 +381,18 @@ def _map_perf_objects(objects: List[Dict[str, Any]], result: ImportedConfig) -> 
             continue
         if name == "Process":
             config.process_instances = list(dict.fromkeys(instances)) or config.process_instances
+        base_instances = base.get("Instances", [])
         extra_counters = [c for c in counters if c not in base.get("Counters", [])]
-        extra_instances = [i for i in instances if i not in base.get("Instances", [])] if name != "Process" else []
+        extra_instances: List[str] = []
+        if name != "Process":
+            if "*" in base_instances:
+                # The helper collects every instance; a narrower managed selection widens, say so
+                if instances and "*" not in instances:
+                    result.changed.append(
+                        f"win_perf_counters {name}: instances {', '.join(instances)} become * (helper baseline collects all)"
+                    )
+            else:
+                extra_instances = [i for i in instances if i not in base_instances]
         missing = [c for c in base.get("Counters", []) if c not in counters]
         if measurement and _measurement_key(measurement) != _measurement_key(base.get("Measurement", "")):
             result.changed.append(

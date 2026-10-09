@@ -326,3 +326,26 @@ def test_windows_exec_line_is_quoted_and_passes_no_argument():
     cmd = tomllib.loads(out)["inputs"]["exec"][0]["commands"][0]
     assert cmd == 'cmd.exe /c "C:/Program Files/Telegraf/telegraf.d/mandatory_tags.bat"'
     assert cmd.count('"') == 2
+
+
+def test_codex_review_disk_filters_and_narrow_instances():
+    """Codex review on #65: absent disk filters stay absent; a narrower instance set is reported, not widened silently."""
+    conf = MANAGED_CONF.replace('Instances = ["*"]\n  Counters = ["% Idle Time"', 'Instances = ["_Total"]\n  Counters = ["% Idle Time"') + '''
+[[inputs.disk]]
+  mount_points = ["C:"]
+'''
+    imported = import_managed_config(conf)
+    assert imported.monitoring.disk.enabled and imported.monitoring.disk.mount_points == ["C:"]
+    assert imported.monitoring.disk.ignore_fs == []
+    assert any("Processor: instances _Total become *" in c for c in imported.changed)
+    assert not any(o.object_name == "Processor" for o in imported.monitoring.win_perf_counters.additional_objects)
+    rendered = tomllib.loads(TelegrafRenderer.render_system_inputs(imported.monitoring))
+    assert "ignore_fs" not in rendered["inputs"]["disk"][0]
+
+
+def test_render_win_os_flag_alone_implies_windows():
+    from click.testing import CliRunner
+    from vcf_ops_telegraf_helper.cli.main import cli
+
+    out = CliRunner().invoke(cli, ["render", "--win-os"]).output
+    assert out.count("[[inputs.cpu]]") == 1 and "[[inputs.disk]]" not in out and "[[inputs.win_perf_counters]]" in out
