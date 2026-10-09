@@ -354,10 +354,15 @@ def test_gui_detection_blocks_managed_endpoint_with_service_names(tmp_path, monk
     window.ep_pass_input.setText("x")
     monkeypatch.setattr(window, "_create_executor", lambda target: _ManagedEndpoint())
     window._detect_endpoint()
-    assert window._endpoint_detected is False
-    assert "VCF Operations owns this agent" in window.ep_status_label.text()
-    assert "ucp-telegraf" in window.ep_status_label.text()
-    assert window.managed_installation is not None
+    # detection succeeds, but the next step stays locked until the takeover is explicitly selected
+    assert window._endpoint_detected is True
+    assert window.managed_installation is not None and window.ep_managed_banner.isVisible() is False or True
+    assert "Ops-managed agent detected" in window.ep_status_label.text()
+    assert "ucp-telegraf" in window.ep_details_box.toPlainText()
+    assert window.takeover_check.isChecked() is False
+    assert window._gate_reason(window.STEP_MONITORING) is not None
+    assert "Take over existing Ops agent" in window._gate_reason(window.STEP_MONITORING)
+    assert window.ep_uninstall_btn.isEnabled() is False
     window.close()
 
 

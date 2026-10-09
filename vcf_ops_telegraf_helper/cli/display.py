@@ -129,3 +129,58 @@ def display_summary(console: Console, summary: RunSummary) -> None:
         console.print("\n[bold]Managed Files:[/bold]")
         for mf in summary.managed_files:
             console.print(f"  * [cyan]{mf}[/cyan]")
+
+
+def display_takeover_summary(console: Console, summary) -> None:
+    """Print the takeover's four results, then the stage and verification tables."""
+    status_style = "bold green" if summary.success else "bold red"
+    status_label = "COMPLETED" if summary.success else "FAILED"
+    console.print(f"\n[{status_style}]Agent Takeover: {status_label}[/{status_style}]")
+    console.print(f"Target: [cyan]{summary.target_hostname}[/cyan] (VM {summary.vm_name or '?'}, {summary.vm_mor}) | Local Time: [dim]{summary.timestamp}[/dim]\n")
+
+    results = Table(title="Takeover Results", show_header=True, header_style="bold magenta")
+    results.add_column("Result", style="white")
+    results.add_column("Status", justify="center")
+    for name, status in summary.results.items():
+        if status.startswith("PASS"):
+            fmt = f"[bold green]{status}[/bold green]"
+        elif status.startswith("FAIL"):
+            fmt = f"[bold red]{status}[/bold red]"
+        elif status.startswith(("PENDING", "CHANGED")):
+            fmt = f"[bold yellow]{status}[/bold yellow]"
+        else:
+            fmt = f"[dim]{status}[/dim]"
+        results.add_row(name, fmt)
+    console.print(results)
+
+    stage_table = Table(title="Takeover Stages", show_header=True, header_style="bold magenta")
+    stage_table.add_column("Stage", style="cyan")
+    stage_table.add_column("Status", justify="center")
+    stage_table.add_column("Message")
+    for s in summary.stages:
+        if s.status == StageStatus.PASS:
+            status_text = "[bold green]PASS[/bold green]"
+        elif s.status == StageStatus.FAIL:
+            status_text = "[bold red]FAIL[/bold red]"
+        elif s.status == StageStatus.WARNING:
+            status_text = "[bold yellow]WARN[/bold yellow]"
+        else:
+            status_text = "[dim]SKIP[/dim]"
+        stage_table.add_row(s.stage.value if hasattr(s.stage, "value") else str(s.stage), status_text, s.message)
+    console.print(stage_table)
+
+    if summary.import_summary:
+        console.print("\n[bold]Imported monitoring configuration:[/bold]")
+        for line in summary.import_summary:
+            console.print(f"  {line}")
+    if summary.verifications:
+        ver_table = Table(title="Verification Checklist", show_header=True, header_style="bold green")
+        ver_table.add_column("Check", style="white")
+        ver_table.add_column("Result", justify="center")
+        for item, res in summary.verifications.items():
+            ver_table.add_row(item, f"[bold green]{res}[/bold green]" if res.startswith("PASS") else (f"[bold red]{res}[/bold red]" if res.startswith("FAIL") else f"[dim]{res}[/dim]"))
+        console.print(ver_table)
+    if summary.journal_path:
+        console.print(f"\nJournal: [cyan]{summary.journal_path}[/cyan]")
+    if summary.backup_dir:
+        console.print(f"Backup:  [cyan]{summary.backup_dir}[/cyan]")
