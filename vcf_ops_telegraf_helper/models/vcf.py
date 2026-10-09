@@ -117,6 +117,8 @@ class AgentTaskStatus(BaseModel):
 
     @property
     def failed(self) -> bool:
+        if self.finished:
+            return False  # an informational message on a finished task is not a failure
         return bool(self.messages) or (self.stage or "").upper() in ("FAILED", "ERROR")
 
     @property

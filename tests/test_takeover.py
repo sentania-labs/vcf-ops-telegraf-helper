@@ -44,6 +44,7 @@ class ManagedWindowsEndpoint(MockExecutor):
         super().__init__(telegraf_installed=True, telegraf_version="Telegraf 1.39.0 (git: vmware-latest-telegraf-arc-fips@abc)")
         self.managed = True
         self.remnant_root = False
+        self.remnant_files = 0
         self.files = {MANAGED_TELEGRAF_CONF: FIXTURE.read_text(), MANAGED_GRAINS: grains,
                       "C:\\VMware\\UCP\\ucp-telegraf\\mandatory_tags.bat": "@echo off\r\n"}
         self.removed: list[str] = []
@@ -74,9 +75,11 @@ class ManagedWindowsEndpoint(MockExecutor):
         if command.startswith("Test-Path -Path 'C:\\ProgramData\\VMware\\UCP\\certkeys'"):
             return CommandResult(exit_code=0, stdout="True\n" if self.managed else "False\n", command=command)
         if "Remove-Item -Path 'C:\\VMware\\UCP'" in command:
+            if self.remnant_files:
+                return CommandResult(exit_code=0, stdout=f"LEFT {self.remnant_files}\n", command=command)
             self.removed.append("C:\\VMware\\UCP")
             self.remnant_root = False
-            return CommandResult(exit_code=0, stdout="", command=command)
+            return CommandResult(exit_code=0, stdout="REMOVED\n", command=command)
         if "Get-ChildItem" in command and "telegraf.d" in command:
             return CommandResult(exit_code=0, stdout="", command=command)
         return super().execute(command, timeout)
@@ -188,8 +191,12 @@ def test_full_takeover_reports_four_results_and_keeps_the_object(tmp_path):
     record = TakeoverJournal(tmp_path / "journal").load(VC_ID, VM_MOR)
     assert record.state == "verified" and record.confirmation_text == "take over dbdemo01"
     assert record.uninstall_task_id == "task-1" and record.managed_services == ["salt-minion", "ucp-minion", "ucp-telegraf"]
-    journal_text = Path(summary.journal_path).read_text()
-    assert "pw" not in journal_text.split('"target_hostname"')[0] and '"password"' not in journal_text
+    everything = summary.to_markdown() + summary.to_json() + "".join(
+        p.read_text(errors="ignore") for p in Path(summary.journal_path).parent.rglob("*") if p.is_file()
+    )
+    for secret in ("pw", "tok"):
+        assert f'"{secret}"' not in everything and f"={secret}" not in everything and f" {secret}\n" not in everything
+    assert '"password"' not in everything and "token" not in Path(summary.journal_path).read_text()
     assert (Path(record.backup_dir) / "telegraf.conf").read_text() == FIXTURE.read_text()
     assert (Path(record.backup_dir) / "grains").exists()
     assert "Preserved:" in summary.to_markdown()
@@ -405,3 +412,135 @@ def test_vcf91_resolve_vm_resource_id():
     assert adapter.resolve_vm_resource_id("vc-1", "vm-201") == "r-win"
     assert adapter.resolve_vm_resource_id("vc-1", "vm-204") is None  # deleted in vCenter
     assert adapter.resolve_vm_resource_id("vc-1", "vm-999") is None
+
+
+def test_blocked_import_stops_before_retire(tmp_path):
+    """Review finding: a fragment that cannot be parsed must stop the takeover before the Ops uninstall."""
+    endpoint = ManagedWindowsEndpoint()
+    endpoint.files["C:\\VMware\\UCP\\ucp-telegraf\\telegraf.d\\app.conf"] = "[[inputs.x]\nnot toml"
+    original_execute = endpoint.execute
+
+    def execute(command, timeout=30):
+        if "Get-ChildItem" in command and "telegraf.d" in command and "Invoke-WebRequest" not in command:
+            endpoint.executed_commands.append(command)
+            return CommandResult(exit_code=0, stdout="app.conf\n", command=command)
+        return original_execute(command, timeout)
+
+    endpoint.execute = execute
+    wf = _workflow(tmp_path, endpoint=endpoint)
+    summary = wf.run()
+    assert not summary.success
+    assert summary.stages[0].status == StageStatus.FAIL and "cannot be ported safely" in summary.stages[0].message
+    assert wf.adapter.uninstall_calls == [] and endpoint.managed
+
+
+def test_finished_task_with_informational_message_is_success():
+    assert AgentTaskStatus(task_id="t", stage="FINISHED", messages=["Agent uninstalled"]).failed is False
+    assert AgentTaskStatus(task_id="t", stage="SUBMITTING", messages=["Connection refused"]).failed is True
+    assert AgentTaskStatus(task_id="t", stage="FAILED").failed is True
+
+
+def test_retire_timeout_then_ops_finishes_is_resumable(tmp_path):
+    """Review finding: Ops may finish the uninstall after the app gave up; the re-run re-polls the task."""
+    endpoint = ManagedWindowsEndpoint()
+    adapter = OpsWithUninstall(_env(), endpoint, polls_to_finish=3)
+    first = _workflow(tmp_path, endpoint=endpoint, adapter=adapter, uninstall_timeout_seconds=0)
+    summary = first.run()
+    assert not summary.success and summary.stages[2].status == StageStatus.FAIL
+    record = TakeoverJournal(tmp_path / "journal").load(VC_ID, VM_MOR)
+    assert record.state == "retire_failed" and record.uninstall_task_id == "task-1"
+
+    # Ops finishes the task in the background and removes the agent
+    adapter.get_agent_task_status("task-1")
+    adapter.get_agent_task_status("task-1")
+    assert endpoint.managed is False
+
+    second = _workflow(tmp_path, endpoint=endpoint, adapter=adapter)
+    summary = second.run()
+    assert summary.success, [(s.stage, s.message) for s in summary.stages]
+    assert summary.results[RESULT_RETIREMENT].startswith("PASS")
+    assert len(adapter.uninstall_calls) == 1
+    assert TakeoverJournal(tmp_path / "journal").load(VC_ID, VM_MOR).state == "verified"
+
+
+def test_retire_failed_with_task_still_running_is_refused(tmp_path):
+    endpoint = ManagedWindowsEndpoint()
+    adapter = OpsWithUninstall(_env(), endpoint, polls_to_finish=99)
+    first = _workflow(tmp_path, endpoint=endpoint, adapter=adapter, uninstall_timeout_seconds=0)
+    first.run()
+    endpoint.retire()  # the agent disappears while Ops still reports SUBMITTING
+    second = _workflow(tmp_path, endpoint=endpoint, adapter=adapter)
+    summary = second.run()
+    assert not summary.success and "Reconcile in VCF Operations" in summary.stages[0].message
+    assert len(adapter.uninstall_calls) == 1
+
+
+def test_resume_refuses_a_different_endpoint(tmp_path):
+    first = _workflow(tmp_path)
+    first.capture()
+    first.backup()
+    first.retire()
+    other = _workflow(tmp_path, endpoint=first.executor, adapter=first.adapter, target=_target(hostname="172.17.0.99"))
+    summary = other.run()
+    assert not summary.success and "different endpoint" in summary.stages[0].message
+    assert other.install_summary is None
+
+
+def test_resume_refuses_when_the_backup_is_gone(tmp_path):
+    import shutil
+
+    first = _workflow(tmp_path)
+    first.capture()
+    first.backup()
+    first.retire()
+    shutil.rmtree(first.record.backup_dir)
+    second = _workflow(tmp_path, endpoint=first.executor, adapter=first.adapter)
+    summary = second.run()
+    assert not summary.success and "no longer holds telegraf.conf" in summary.stages[0].message
+    assert second.install_summary is None
+
+
+def test_missing_grains_identity_is_refused(tmp_path):
+    endpoint = ManagedWindowsEndpoint(grains="arc_virtual_ip: 10.10.10.50\n")
+    wf = _workflow(tmp_path, endpoint=endpoint)
+    summary = wf.run()
+    assert not summary.success and "grains do not name" in summary.stages[0].message
+    assert wf.adapter.uninstall_calls == []
+
+
+def test_non_empty_remnant_root_is_left_in_place(tmp_path):
+    endpoint = ManagedWindowsEndpoint()
+    endpoint.remnant_files = 7
+    wf = _workflow(tmp_path, endpoint=endpoint)
+    summary = wf.run()
+    assert summary.success
+    assert summary.stages[3].status == StageStatus.WARNING and "left in place" in summary.stages[3].message
+    assert summary.verifications["Managed files removed"].startswith("LEFT IN PLACE")
+    assert endpoint.removed == []
+
+
+def test_fresh_sample_without_type_flip_is_not_ingestion(tmp_path):
+    endpoint = ManagedWindowsEndpoint()
+
+    class OpsStillManaged(OpsWithUninstall):
+        def get_agent_object(self, vc_id, vm_mor, include_stat_keys=False):
+            obj = super().get_agent_object(vc_id, vm_mor, include_stat_keys)
+            if obj is not None and self.retired:
+                import time
+                obj.managed_type = "Product Managed"
+                obj.last_sample_ms = int(time.time() * 1000) + 5_000  # Ops-computed stat, not the new agent
+            return obj
+
+    wf = _workflow(tmp_path, endpoint=endpoint, adapter=OpsStillManaged(_env(), endpoint), continuity_wait_seconds=0)
+    summary = wf.run()
+    assert summary.results[RESULT_INGESTION].startswith("PENDING")
+    assert summary.results[RESULT_REGISTRATION] == "PENDING"
+
+
+def test_backup_directory_is_fresh_per_takeover(tmp_path):
+    journal = TakeoverJournal(tmp_path / "j")
+    record = TakeoverRecord(vm_mor="vm-1", vc_id="vc-1", target_hostname="h", ops_url="u")
+    journal.write_backup(record, {"telegraf.conf": "a", "telegraf.d/old.conf": "x"})
+    journal.write_backup(record, {"telegraf.conf": "b"})
+    assert not (Path(record.backup_dir) / "telegraf.d" / "old.conf").exists()
+    assert (Path(record.backup_dir) / "telegraf.conf").read_text() == "b"

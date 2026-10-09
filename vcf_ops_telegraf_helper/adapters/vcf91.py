@@ -1276,6 +1276,7 @@ class VCF91OpenTelegrafIntegration(VCFOpsIntegration):
         raise RuntimeError("VCF Operations accepted the uninstall but returned no task id")
 
     def get_agent_task_status(self, task_id: str) -> AgentTaskStatus:
+        self._ensure_token()
         url = f"{self.base_url}/suite-api/api/applications/agents/{task_id}/status"
         resp = self.session.get(url, headers=self._api_headers(), timeout=30)
         if resp.status_code != 200:

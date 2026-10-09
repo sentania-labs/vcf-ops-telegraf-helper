@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -105,6 +106,9 @@ class TakeoverJournal:
         """Store configuration text under the VM's backup directory. Keys are relative names."""
         self._ensure()
         target = self.backup_dir(record.vc_id, record.vm_mor)
+        if target.exists():
+            # A fresh takeover starts a fresh backup; stale fragments from an earlier attempt must not resurface on resume
+            shutil.rmtree(target)
         target.mkdir(parents=True, exist_ok=True)
         written: List[str] = []
         for name, content in files.items():

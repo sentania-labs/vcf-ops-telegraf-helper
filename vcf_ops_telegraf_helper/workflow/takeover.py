@@ -28,7 +28,7 @@ from vcf_ops_telegraf_helper.security.redaction import redact_secrets
 from vcf_ops_telegraf_helper.storage.journal import TakeoverJournal, TakeoverRecord
 from vcf_ops_telegraf_helper.utils import local_now_formatted
 from vcf_ops_telegraf_helper.workflow.engine import ConfigureEndpointWorkflow
-from vcf_ops_telegraf_helper.workflow.managed_config import ImportedConfig, import_managed_config
+from vcf_ops_telegraf_helper.workflow.managed_config import ImportedConfig, import_managed_config, merge_additions
 from vcf_ops_telegraf_helper.workflow.progress import ProgressReporter, SilentProgressReporter
 from vcf_ops_telegraf_helper.workflow.windows import (
     MANAGED_CERT_DIR,
@@ -81,6 +81,9 @@ class TakeoverSummary(BaseModel):
     install_summary: Optional[RunSummary] = None
     import_summary: List[str] = Field(default_factory=list)
 
+    def to_json(self, indent: int = 2) -> str:
+        return self.model_dump_json(indent=indent)
+
     def to_markdown(self) -> str:
         lines = [
             "# VCF Operations Open Telegraf Helper: Agent Takeover Summary",
@@ -122,6 +125,8 @@ class TakeoverSummary(BaseModel):
         return "\n".join(lines)
 
 
+RESUMABLE_STATES = ("retired", "cleaned", "retire_failed")
+
 RESULT_RETIREMENT = "Managed agent retirement"
 RESULT_INSTALL = "Open-source Telegraf installation"
 RESULT_REGISTRATION = "Registration on the same Ops object"
@@ -143,10 +148,12 @@ class TakeoverWorkflow:
         reporter: Optional[ProgressReporter] = None,
         journal: Optional[TakeoverJournal] = None,
         sleep: Callable[[float], None] = time.sleep,
+        additions: Optional[MonitoringConfig] = None,
     ):
         self.env = environment
         self.target = target
         self.monitoring = monitoring
+        self.additions = additions
         self.executor = executor
         self.adapter = adapter
         self.takeover = takeover
@@ -209,29 +216,23 @@ class TakeoverWorkflow:
 
             previous = self.journal.load(self.target.vc_id, self.target.vm_mor) if self.takeover.resume else None
             if not self.managed.present:
-                if previous and previous.state in ("retired", "cleaned") and previous.agent_object_before:
-                    # The managed agent is already gone and we know why: resume from the journal.
-                    self.record = previous
-                    self.agent_before = previous.agent_object_before
-                    self._resumed = True
-                    self.record.notes.append(f"Resumed at {local_now_formatted()} from state {previous.state}")
-                    self.journal.save(self.record)
-                    if self.monitoring is None:
-                        backup = Path(previous.backup_dir) if previous.backup_dir else None
-                        conf = (backup / "telegraf.conf").read_text(encoding="utf-8") if backup and (backup / "telegraf.conf").exists() else None
-                        fragments = {}
-                        if backup and (backup / "telegraf.d").is_dir():
-                            fragments = {p.name: p.read_text(encoding="utf-8") for p in (backup / "telegraf.d").iterdir() if p.is_file()}
-                        self.imported = import_managed_config(conf, fragments, is_windows=True)
-                        self.monitoring = self.imported.monitoring
-                    return self._result(TakeoverStage.CAPTURE, StageStatus.WARNING,
-                                        f"Managed agent already retired (journal state {previous.state}); resuming the takeover",
-                                        start)
+                if previous and previous.state in RESUMABLE_STATES and previous.agent_object_before:
+                    return self._resume_from(previous, start)
+                if previous and previous.state in RESUMABLE_STATES:
+                    raise RuntimeError(
+                        f"A journaled takeover for this VM is in state {previous.state} but its record is incomplete; "
+                        "the managed agent is gone. Enroll the endpoint with the ordinary workflow."
+                    )
                 raise RuntimeError("No Ops-managed agent found on this endpoint; nothing to take over.")
 
             grains = self.managed.grain_values
             g_mor, g_vc = grains.get("vm_id"), grains.get("vc_id")
-            if (g_mor and g_mor != self.target.vm_mor) or (g_vc and g_vc != self.target.vc_id):
+            if not g_mor or not g_vc:
+                raise RuntimeError(
+                    "The managed agent's grains do not name its vCenter id and VM id, so the endpoint cannot be matched "
+                    "to the selected VM. Refusing an ambiguous takeover."
+                )
+            if g_mor != self.target.vm_mor or g_vc != self.target.vc_id:
                 raise RuntimeError(
                     f"The managed agent on this endpoint is bound to {g_vc}/{g_mor}, not the selected VM "
                     f"{self.target.vc_id}/{self.target.vm_mor}. Refusing an ambiguous takeover."
@@ -249,8 +250,12 @@ class TakeoverWorkflow:
                     "Refusing to retire it."
                 )
 
+            self.imported = merge_additions(
+                import_managed_config(self.managed.telegraf_conf, self.managed.telegraf_d, is_windows=True), self.additions
+            )
+            if not self.imported.ok:
+                raise RuntimeError("The managed configuration cannot be ported safely: " + "; ".join(self.imported.blocked))
             if self.monitoring is None:
-                self.imported = import_managed_config(self.managed.telegraf_conf, self.managed.telegraf_d, is_windows=True)
                 self.monitoring = self.imported.monitoring
 
             self.record = TakeoverRecord(
@@ -275,6 +280,50 @@ class TakeoverWorkflow:
         except Exception as exc:
             logger.exception("Takeover capture failed")
             return self._result(TakeoverStage.CAPTURE, StageStatus.FAIL, f"Capture failed: {exc}", start)
+
+    def _resume_from(self, previous: TakeoverRecord, start: float) -> StageResult:
+        """Continue a takeover whose managed agent is already gone, from the journal and the backup."""
+        if previous.target_hostname != self.target.hostname:
+            raise RuntimeError(
+                f"The journaled takeover for this VM was run against {previous.target_hostname}, not {self.target.hostname}. "
+                "Refusing to resume on a different endpoint."
+            )
+        backup = Path(previous.backup_dir) if previous.backup_dir else None
+        if backup is None or not (backup / "telegraf.conf").exists():
+            raise RuntimeError(
+                f"The journaled backup under {backup or 'the journal'} no longer holds telegraf.conf; "
+                "the managed inputs cannot be ported. Enroll the endpoint with the ordinary workflow instead."
+            )
+        if previous.state == "retire_failed":
+            # Ops may have finished the uninstall after the app gave up on it; ask before trusting the endpoint
+            if not previous.uninstall_task_id:
+                raise RuntimeError("The journaled retirement failed without a task id; reconcile in VCF Operations first.")
+            status = self.adapter.get_agent_task_status(previous.uninstall_task_id)
+            previous.uninstall_task_stage = status.stage
+            if not status.finished:
+                raise RuntimeError(
+                    f"Ops uninstall task {previous.uninstall_task_id} is {status.stage}"
+                    + (f" ({'; '.join(status.messages)})" if status.messages else "")
+                    + "; the managed agent is gone from the endpoint but Ops has not finished. Reconcile in VCF Operations first."
+                )
+            previous.state = "retired"
+            self.results[RESULT_RETIREMENT] = "PASS (task finished after the interruption)"
+        self.record = previous
+        self.agent_before = previous.agent_object_before
+        self._resumed = True
+        self.record.notes.append(f"Resumed at {local_now_formatted()} from state {previous.state} on {self.target.hostname}")
+        self.journal.save(self.record)
+        conf = (backup / "telegraf.conf").read_text(encoding="utf-8")
+        fragments = {}
+        if (backup / "telegraf.d").is_dir():
+            fragments = {p.name: p.read_text(encoding="utf-8") for p in (backup / "telegraf.d").iterdir() if p.is_file()}
+        self.imported = merge_additions(import_managed_config(conf, fragments, is_windows=True), self.additions)
+        if not self.imported.ok:
+            raise RuntimeError("The backed-up configuration cannot be ported safely: " + "; ".join(self.imported.blocked))
+        if self.monitoring is None:
+            self.monitoring = self.imported.monitoring
+        return self._result(TakeoverStage.CAPTURE, StageStatus.WARNING,
+                            f"Managed agent already retired (journal state {previous.state}); resuming the takeover", start)
 
     def backup(self) -> StageResult:
         start = time.monotonic()
@@ -329,6 +378,7 @@ class TakeoverWorkflow:
                 if status.terminal:
                     break
                 if time.monotonic() >= deadline:
+                    self.record.state = "retire_failed"
                     self.journal.save(self.record)
                     raise RuntimeError(
                         f"Uninstall task {task_id} still {status.stage} after {self.takeover.uninstall_timeout_seconds}s. "
@@ -337,6 +387,7 @@ class TakeoverWorkflow:
                 self._sleep(self.takeover.uninstall_poll_seconds)
             if status.failed:
                 self.results[RESULT_RETIREMENT] = "FAIL"
+                self.record.state = "retire_failed"
                 self.journal.save(self.record)
                 raise RuntimeError(f"Uninstall task {task_id} reported: {'; '.join(status.messages) or status.stage}")
             self.record.state = "retired"
@@ -346,6 +397,10 @@ class TakeoverWorkflow:
         except Exception as exc:
             logger.exception("Takeover retire failed")
             self.results.setdefault(RESULT_RETIREMENT, "FAIL")
+            if self.record is not None and self.record.uninstall_task_id and self.record.state != "retired":
+                # Ops may still finish the task; a re-run re-polls it instead of refusing
+                self.record.state = "retire_failed"
+                self.journal.save(self.record)
             return self._result(TakeoverStage.RETIRE, StageStatus.FAIL, f"Retirement failed: {exc}", start)
 
     def clean(self) -> StageResult:
@@ -362,32 +417,47 @@ class TakeoverWorkflow:
                     + ". Not touching the endpoint; reconcile in VCF Operations first."
                 )
             removed: List[str] = []
+            left: List[str] = []
             if after.root_present:
                 busy = self.executor.execute(
                     "Get-CimInstance Win32_Service | Where-Object { $_.PathName -like '*\\VMware\\UCP\\*' } | Select-Object -ExpandProperty Name",
                     timeout=15,
                 )
-                if busy.success and busy.stdout.strip():
+                if not busy.success:
+                    raise RuntimeError(f"Could not check for services under {MANAGED_ROOT}: {busy.stderr or busy.stdout}")
+                if busy.stdout.strip():
                     raise RuntimeError(f"A service still runs from under {MANAGED_ROOT}: {busy.stdout.strip()}")
+                # The Ops uninstall leaves an empty root behind; only an empty one is removed. Anything left in it
+                # is the product's own files, outside the backup, and stays for the operator to look at.
                 res = self.executor.execute(
-                    f"Remove-Item -Path '{MANAGED_ROOT}' -Recurse -Force -ErrorAction Stop; "
-                    "if (Test-Path 'C:\\VMware') { if (-not (Get-ChildItem 'C:\\VMware' -Force)) { Remove-Item 'C:\\VMware' -Force } }",
+                    f"$left = Get-ChildItem -Path '{MANAGED_ROOT}' -Recurse -File -Force -ErrorAction SilentlyContinue | Measure-Object | Select-Object -ExpandProperty Count; "
+                    f"if ($left -eq 0) {{ Remove-Item -Path '{MANAGED_ROOT}' -Recurse -Force -ErrorAction Stop; "
+                    "if (Test-Path 'C:\\VMware') { if (-not (Get-ChildItem 'C:\\VMware' -Force)) { Remove-Item 'C:\\VMware' -Force } }; "
+                    "Write-Output 'REMOVED' } else { Write-Output \"LEFT $left\" }",
                     timeout=60,
                 )
                 if not res.success:
                     raise RuntimeError(f"Could not remove {MANAGED_ROOT}: {res.stderr or res.stdout}")
-                removed.append(MANAGED_ROOT)
+                if "REMOVED" in res.stdout:
+                    removed.append(MANAGED_ROOT)
+                else:
+                    left.append(f"{MANAGED_ROOT} ({res.stdout.strip().replace('LEFT ', '') or '?'} files left by the uninstall)")
             if after.cert_dir_present:
                 res = self.executor.execute(f"Remove-Item -Path '{MANAGED_CERT_DIR}' -Recurse -Force -ErrorAction Stop", timeout=30)
                 if not res.success:
                     raise RuntimeError(f"Could not remove {MANAGED_CERT_DIR}: {res.stderr or res.stdout}")
                 removed.append(MANAGED_CERT_DIR)
             self.verifications["Managed services absent"] = "PASS"
-            self.verifications["Managed files removed"] = "PASS" if removed else "PASS (nothing left behind)"
+            if left:
+                self.verifications["Managed files removed"] = "LEFT IN PLACE (" + "; ".join(left) + ")"
+            else:
+                self.verifications["Managed files removed"] = "PASS" if removed else "PASS (nothing left behind)"
             self.record.state = "cleaned"
             self.journal.save(self.record)
             msg = "Endpoint clean: no managed services" + (f"; removed {', '.join(removed)}" if removed else "")
-            return self._result(TakeoverStage.CLEAN, StageStatus.PASS, msg, start)
+            if left:
+                msg += "; left in place: " + "; ".join(left)
+            return self._result(TakeoverStage.CLEAN, StageStatus.WARNING if left else StageStatus.PASS, msg, start)
         except Exception as exc:
             logger.exception("Takeover cleanup failed")
             self.verifications["Managed services absent"] = "FAIL"
@@ -476,7 +546,11 @@ class TakeoverWorkflow:
                         else f"PENDING ({after.stat_key_count} of {self.agent_before.stat_key_count}; the win. inputs need a second interval)"
                     )
                 self.results[RESULT_REGISTRATION] = ("PASS" if same and flipped else ("CHANGED OBJECT" if not same and flipped else "PENDING"))
-                self.results[RESULT_INGESTION] = "PASS" if fresh else "PENDING (first open-source sample takes up to two 300s intervals)"
+                # Ops computes some stats itself every cycle, so a fresh timestamp alone proves nothing;
+                # the type only flips to Open Source once the new agent's own samples arrive.
+                self.results[RESULT_INGESTION] = (
+                    "PASS" if (fresh and flipped) else "PENDING (first open-source sample takes up to two 300s intervals)"
+                )
                 if same and flipped and fresh:
                     status, msg = StageStatus.PASS, f"Same object {after.resource_id}, now Open Source, samples newer than the cutover"
                 elif not same:
@@ -503,7 +577,8 @@ class TakeoverWorkflow:
             if res.status == StageStatus.FAIL:
                 success = False
                 if self.record is not None:
-                    self.record.state = "failed" if self.record.state in ("captured", "backed_up") else self.record.state
+                    if self.record.state in ("captured", "backed_up"):
+                        self.record.state = "failed"
                     self.record.results = dict(self.results)
                     self.journal.save(self.record)
                 break
