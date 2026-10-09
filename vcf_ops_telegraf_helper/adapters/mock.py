@@ -7,6 +7,7 @@ from typing import Any, Optional
 from vcf_ops_telegraf_helper.adapters.base import IntegrationArtifacts, VCFOpsIntegration
 from vcf_ops_telegraf_helper.models.vcf import (
     AgentObjectInfo,
+    AgentTaskStatus,
     AuthToken,
     CollectorInfo,
     VCFEnvironment,
@@ -212,3 +213,19 @@ class MockVCFOpsIntegration(VCFOpsIntegration):
             CollectorInfo(address="10.10.10.52", name="Simulated CP Group", display_name="cloudproxy02"),
         ]
 
+    def resolve_vm_resource_id(self, vc_id: str, vm_mor: str) -> Optional[str]:
+        vm = next((v for v in self.list_virtual_machines() if v.vm_mor == vm_mor and v.vc_id == vc_id), None)
+        return vm.resource_id if vm else None
+
+    def uninstall_managed_agent(self, vm_resource_id, guest_username, guest_password, retain_config=False) -> str:
+        if not guest_username or not guest_password:
+            raise RuntimeError("VCF Operations refused the agent uninstall (HTTP 400): guest credential required")
+        self._uninstall_polls = 0
+        self._retired = getattr(self, "_retired", set())
+        self._retired.add(vm_resource_id)
+        return "c22ca66a-mock-task"
+
+    def get_agent_task_status(self, task_id: str) -> AgentTaskStatus:
+        self._uninstall_polls = getattr(self, "_uninstall_polls", 0) + 1
+        stage = "FINISHED" if self._uninstall_polls >= 2 else "SUBMITTING"
+        return AgentTaskStatus(task_id=task_id, name="Bootstrap virtual machines", stage=stage)
