@@ -123,8 +123,9 @@ class OpsWithUninstall(MockVCFOpsIntegration):
         if self.fail_task:
             return AgentTaskStatus(task_id=task_id, stage="SUBMITTING", messages=["Guest credentials rejected"])
         if self._task_polls >= self.polls_to_finish:
-            self.retired = True
-            self.endpoint.retire()
+            if not self.retired:
+                self.retired = True
+                self.endpoint.retire()
             return AgentTaskStatus(task_id=task_id, stage="FINISHED")
         return AgentTaskStatus(task_id=task_id, stage="SUBMITTING")
 
