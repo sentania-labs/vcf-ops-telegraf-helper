@@ -1803,6 +1803,8 @@ class MainWindow(QMainWindow):
             if mon.ping.urls:
                 self.ping_url_input.setText(mon.ping.urls[0])
             self._additional_perfmon = list(mon.win_perf_counters.additional_objects)
+            self._win_process_instances = list(mon.win_perf_counters.process_instances)
+            self._win_perf_print_valid = mon.win_perf_counters.print_valid
             self._refresh_perfmon_list()
             self.custom_toml_input.setPlainText(mon.custom_toml)
             self.custom_toml_check.setChecked(bool(mon.custom_toml.strip()))
@@ -1882,6 +1884,7 @@ class MainWindow(QMainWindow):
         env = self._get_vcf_env()
         mon = self._get_monitoring_config()
         opts = WorkflowOptions(install_telegraf=True, telegraf_version=target.telegraf_version, force_new_cert=True, replace_inputs=True)
+        self._running_preview_key = self._preview_key()
         executor = self._create_executor(target)
         adapter = get_adapter(env)
         self.takeover_worker_thread = QThread(self)
@@ -2497,6 +2500,8 @@ class MainWindow(QMainWindow):
             self.vcf_ca_input.setText(selected_file)
 
     def _apply_baseline_preset(self) -> None:
+        self._win_process_instances = None
+        self._win_perf_print_valid = True
         if hasattr(self, 'perfmon_metrics_box'):
             self._additional_perfmon = []
             self._refresh_perfmon_list()
@@ -3315,7 +3320,8 @@ class MainWindow(QMainWindow):
         self.preview_output_box.setPlainText(output)
 
     def _on_worker_stage(self, result: StageResult) -> None:
-        line = f"[{result.stage.value}] {result.status.value:<7} {result.message}"
+        stage = result.stage.value if hasattr(result.stage, "value") else str(result.stage)
+        line = f"[{stage}] {result.status.value:<7} {result.message}"
         self.stage_list_box.appendPlainText(line)
         if result.details:
             self.stage_list_box.appendPlainText(result.details)
@@ -3515,6 +3521,8 @@ class MainWindow(QMainWindow):
             win_perf_counters=WinPerfCountersInputConfig(
                 enabled=bool(is_win and getattr(self, "win_perf_check", None) and self.win_perf_check.isChecked()),
                 additional_objects=getattr(self, "_additional_perfmon", []),
+                process_instances=getattr(self, "_win_process_instances", None) or ["_Total", "telegraf"],
+                print_valid=getattr(self, "_win_perf_print_valid", True),
             ),
             win_os=WindowsOsInputConfig(
                 enabled=bool(is_win and getattr(self, "win_os_check", None) and self.win_os_check.isChecked()),

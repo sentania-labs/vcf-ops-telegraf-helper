@@ -50,7 +50,7 @@ A small **New version available** link beneath the app name opens the newer rele
 
 The app shows progress while connecting and querying. Dry-run leaves endpoint files unchanged, but preparation may request a client certificate from Ops. Fresh agent data can take a collection cycle to appear; a running service alone does not establish ingestion.
 
-**Already running an Ops-managed agent?** Takeover is not supported yet. Manage that installation through Ops; detecting a Windows `ucp-telegraf` service stops onboarding.
+**Already running an Ops-managed agent?** The VM list marks it as "Reporting, Ops managed", and detecting the endpoint shows the managed services instead of letting ordinary onboarding continue. On Windows you can check **Take over existing Ops agent**: the helper captures the managed configuration and the Ops object, backs the configuration up on your workstation, asks VCF Operations to uninstall its agent (with the guest credential you entered, as typed), verifies the endpoint is clean, installs and enrolls open-source Telegraf with the same inputs, and then confirms that the same Ops object flipped to Open Source and is receiving samples. The Monitoring Inputs step starts from the imported configuration; the Baseline preset discards it. Executing asks you to type the VM name. Expect a monitoring gap of about 15 minutes between the Ops uninstall and the first open-source sample. If the app closes mid-way, detect the endpoint again and the helper offers to resume from its journal (under the app's config directory, never holding passwords or keys). Linux takeover is not supported yet. From the CLI: `run ... --vm-id <mor> --take-over-managed-agent --confirm-takeover <vm name>`.
 
 ## Verify downloads (optional)
 

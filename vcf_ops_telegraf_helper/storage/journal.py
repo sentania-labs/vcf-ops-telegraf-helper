@@ -65,8 +65,8 @@ def journal_key(vc_id: str, vm_mor: str) -> str:
 class TakeoverJournal:
     """Reads and writes takeover records and their configuration backups."""
 
-    def __init__(self, directory: Path = DEFAULT_JOURNAL_DIR):
-        self.directory = Path(directory)
+    def __init__(self, directory: Optional[Path] = None):
+        self.directory = Path(directory) if directory else DEFAULT_JOURNAL_DIR
 
     def _ensure(self) -> None:
         self.directory.mkdir(parents=True, exist_ok=True)

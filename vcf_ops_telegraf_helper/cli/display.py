@@ -6,6 +6,7 @@ from typing import List, Optional
 from rich.console import Console
 from rich.panel import Panel
 from rich.syntax import Syntax
+from rich.markup import escape
 from rich.table import Table
 
 from vcf_ops_telegraf_helper.models.workflow import RunSummary, StageResult, StageStatus, WorkflowStage
@@ -166,13 +167,13 @@ def display_takeover_summary(console: Console, summary) -> None:
             status_text = "[bold yellow]WARN[/bold yellow]"
         else:
             status_text = "[dim]SKIP[/dim]"
-        stage_table.add_row(s.stage.value if hasattr(s.stage, "value") else str(s.stage), status_text, s.message)
+        stage_table.add_row(s.stage.value if hasattr(s.stage, "value") else str(s.stage), status_text, escape(s.message))
     console.print(stage_table)
 
     if summary.import_summary:
         console.print("\n[bold]Imported monitoring configuration:[/bold]")
         for line in summary.import_summary:
-            console.print(f"  {line}")
+            console.print(f"  {line}", markup=False, highlight=False)
     if summary.verifications:
         ver_table = Table(title="Verification Checklist", show_header=True, header_style="bold green")
         ver_table.add_column("Check", style="white")
