@@ -205,8 +205,8 @@ def test_main_window_step3_plugins_and_preview(qapp, tmp_path):
     store = StateStore(state_file=state_file)
     window = MainWindow(state_store=store)
 
-    assert window.plugin_catalog_list.count() == 18
-    assert window.plugin_config_stack.count() == 18
+    assert window.plugin_catalog_list.count() == 19
+    assert window.plugin_config_stack.count() == 19
 
     # Test catalog item selection switches stack
     window.plugin_catalog_list.setCurrentRow(10)  # NGINX
@@ -321,6 +321,7 @@ def test_main_window_plugin_catalog_two_pane_and_presets(qapp, tmp_path):
     window.ep_os_combo.setCurrentText("Windows")
     window._select_all_plugins()
     assert window.win_perf_check.isChecked() is True
+    assert window.win_os_check.isChecked() is True
     assert window.win_svc_check.isChecked() is True
     assert window.sys_check.isChecked() is False
     assert window.swap_check.isChecked() is False
@@ -341,13 +342,14 @@ def test_main_window_plugin_catalog_two_pane_and_presets(qapp, tmp_path):
     window.ep_os_combo.setCurrentText("Windows")
     window._apply_baseline_preset()
     assert window.win_perf_check.isChecked() is True
+    assert window.win_os_check.isChecked() is True
     assert window.win_svc_check.isChecked() is True
     assert window.sys_check.isChecked() is False
     assert window.swap_check.isChecked() is False
 
     # 5. List check state syncs to checkbox
-    # Index 10 is NGINX
-    nginx_item = window.plugin_catalog_list.item(10)
+    nginx_row = next(i for i, (key, *_) in enumerate(window.catalog_items) if key == "nginx")
+    nginx_item = window.plugin_catalog_list.item(nginx_row)
     assert nginx_item is not None
     nginx_item.setCheckState(Qt.Checked)
     assert window.nginx_check.isChecked() is True
@@ -529,6 +531,8 @@ def test_main_window_cli_command_cleared_windows_baseline(qapp, tmp_path):
     window.ep_os_combo.setCurrentText("Windows")
     window.win_perf_check.setChecked(False)
     window.win_svc_check.setChecked(False)
+    assert "--no-win-os" not in window._build_cli_command()
+    window.win_os_check.setChecked(False)
 
     cmd = window._build_cli_command()
     assert "--no-baseline" in cmd

@@ -547,7 +547,7 @@ class VCF91OpenTelegrafIntegration(VCFOpsIntegration):
                     # If Cloud Proxy script uses deprecated wmic without reg query fallback,
                     # use the modernized script compatible with Windows Server 2025.
                     if "reg query" in content:
-                        return content
+                        return self._patch_vendor_tag_script(content)
                     return self._get_windows_mandatory_tag_script()
                 return content
         except Exception:
@@ -576,6 +576,17 @@ class VCF91OpenTelegrafIntegration(VCFOpsIntegration):
             "IP_VAL=\"${IP_VAL:-unknown}\"\n"
             "echo \"mandatory.tag,OS_NAME=${OS_NAME},OS_VERSION=${OS_VER},TELEGRAF_VERSION=${TVER},HOSTNAME=${HNAME},IP=${IP_VAL} value=1i\"\n"
         )
+
+    @staticmethod
+    def _patch_vendor_tag_script(content: str) -> str:
+        """Quote the telegraf path the vendor mandatory_tags.bat runs unquoted (issue #62).
+
+        The 9.1 script expands %TELEGRAF_BIN_PATH% bare, so a path with a space exits 1 and
+        Telegraf drops the Guest Info line. The helper's own script already quotes it.
+        """
+        patched = re.sub(r"(?<!\")%TELEGRAF_BIN_PATH%(?!\")", '"%TELEGRAF_BIN_PATH%"', content)
+        # The helper passes the path quoted; %~1 strips those quotes so the line above adds exactly one pair
+        return re.sub(r"(set\s+TELEGRAF_BIN_PATH=)%1\b", r"\1%~1", patched)
 
     @staticmethod
     def _get_windows_mandatory_tag_script() -> str:

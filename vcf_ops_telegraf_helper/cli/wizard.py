@@ -33,6 +33,7 @@ from vcf_ops_telegraf_helper.models.monitoring import (
     SwapInputConfig,
     SystemInputConfig,
     WinPerfCountersInputConfig,
+    WindowsOsInputConfig,
     WinServicesInputConfig,
 )
 from vcf_ops_telegraf_helper.models.vcf import CollectorInfo, VCFEnvironment
@@ -182,10 +183,12 @@ def run_wizard(console: Optional[Console] = None) -> None:
     if is_win:
         if apply_baseline:
             enable_win_perf = True
+            enable_win_os = True
             enable_win_svc = True
             svc_names = ["telegraf"]
         else:
             enable_win_perf = Confirm.ask("Enable Windows Performance Counters (Broadcom template)?", default=True, console=con)
+            enable_win_os = Confirm.ask("Enable Windows OS totals (cpu, mem, swap with the win. prefix)?", default=True, console=con)
             enable_win_svc = Confirm.ask("Enable Windows Services monitoring?", default=True, console=con)
             svc_input = Prompt.ask("Service names to monitor (comma-separated)", default="telegraf", console=con)
             svc_names = [s.strip() for s in svc_input.split(",") if s.strip()] or ["telegraf"]
@@ -198,6 +201,7 @@ def run_wizard(console: Optional[Console] = None) -> None:
             system=SystemInputConfig(enabled=False),
             swap=SwapInputConfig(enabled=False),
             win_perf_counters=WinPerfCountersInputConfig(enabled=enable_win_perf),
+            win_os=WindowsOsInputConfig(enabled=enable_win_os),
             win_services=WinServicesInputConfig(enabled=enable_win_svc, service_names=svc_names),
         )
     else:

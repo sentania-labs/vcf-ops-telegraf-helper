@@ -55,6 +55,7 @@ class Validator:
             or config.diskio.enabled
             or config.processes.enabled
             or config.win_perf_counters.enabled
+            or config.win_os.enabled
             or config.win_services.enabled
             or config.nginx.enabled
             or config.apache.enabled

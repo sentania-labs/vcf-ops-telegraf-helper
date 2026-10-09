@@ -47,6 +47,7 @@ from vcf_ops_telegraf_helper.models.monitoring import (
     SwapInputConfig,
     SystemInputConfig,
     WinPerfCountersInputConfig,
+    WindowsOsInputConfig,
     PerfmonObject,
     WinServicesInputConfig,
 )
@@ -152,6 +153,7 @@ def resolve_monitoring_config(
     processes: Optional[bool] = None,
     win_perf: Optional[bool] = None,
     win_perf_object: tuple[str, ...] = (),
+    win_os: Optional[bool] = None,
     win_services: Optional[str] = None,
     no_win_services: bool = False,
     nginx: Optional[str] = None,
@@ -173,6 +175,7 @@ def resolve_monitoring_config(
         effective_diskio = False
         effective_proc = False
         effective_win_perf = False
+        effective_win_os = False
         effective_win_svc = False
     else:
         effective_cpu = not is_win
@@ -184,6 +187,7 @@ def resolve_monitoring_config(
         effective_diskio = False
         effective_proc = False
         effective_win_perf = is_win
+        effective_win_os = is_win
         effective_win_svc = is_win
 
     if cpu is not None:
@@ -204,6 +208,8 @@ def resolve_monitoring_config(
         effective_proc = processes
     if win_perf is not None:
         effective_win_perf = win_perf
+    if win_os is not None:
+        effective_win_os = win_os
     if win_services is not None:
         effective_win_svc = True
     if no_win_services:
@@ -232,6 +238,7 @@ def resolve_monitoring_config(
         diskio=DiskIoInputConfig(enabled=effective_diskio),
         processes=ProcessesInputConfig(enabled=effective_proc),
         win_perf_counters=WinPerfCountersInputConfig(enabled=effective_win_perf, additional_objects=additional_objects),
+        win_os=WindowsOsInputConfig(enabled=effective_win_os),
         win_services=WinServicesInputConfig(enabled=effective_win_svc, service_names=svc_list),
         nginx=NginxInputConfig(enabled=bool(nginx), urls=[nginx] if nginx else ["http://localhost/status"]),
         apache=ApacheInputConfig(enabled=bool(apache), urls=[apache] if apache else ["http://localhost/server-status?auto"]),
@@ -286,6 +293,7 @@ def resolve_monitoring_config(
 @click.option("--processes/--no-processes", default=None, help="Enable or disable process count monitoring")
 @click.option("--win-perf/--no-win-perf", default=None, help="Enable or disable Windows performance counters")
 @click.option("--win-perf-object", multiple=True, help="Additional Perfmon object as JSON (repeatable)")
+@click.option("--win-os/--no-win-os", default=None, help="Enable or disable Windows OS totals (cpu, mem, swap with the win. prefix)")
 @click.option("--win-services", default=None, help="Comma-separated Windows services to monitor")
 @click.option("--no-win-services", is_flag=True, default=False, help="Disable Windows services monitoring")
 @click.option("--nginx", default=None, help="NGINX status URL (e.g. http://localhost/status)")
@@ -343,6 +351,7 @@ def run_cmd(
     processes: Optional[bool],
     win_perf: Optional[bool],
     win_perf_object: tuple[str, ...],
+    win_os: Optional[bool],
     win_services: Optional[str],
     no_win_services: bool,
     nginx: Optional[str],
@@ -435,6 +444,7 @@ def run_cmd(
         processes=processes,
         win_perf=win_perf,
         win_perf_object=win_perf_object,
+        win_os=win_os,
         win_services=win_services,
         no_win_services=no_win_services,
         nginx=nginx,
@@ -671,6 +681,7 @@ def vms_cmd(
 @click.option("--processes/--no-processes", default=None, help="Enable or disable process count monitoring")
 @click.option("--win-perf/--no-win-perf", default=None, help="Enable or disable Windows performance counters")
 @click.option("--win-perf-object", multiple=True, help="Additional Perfmon object as JSON (repeatable)")
+@click.option("--win-os/--no-win-os", default=None, help="Enable or disable Windows OS totals (cpu, mem, swap with the win. prefix)")
 @click.option("--win-services", default=None, help="Comma-separated Windows services to monitor")
 @click.option("--no-win-services", is_flag=True, default=False, help="Disable Windows services monitoring")
 @click.option("--nginx", default=None, help="NGINX status URL (e.g. http://localhost/status)")
@@ -697,6 +708,7 @@ def render_cmd(
     processes: Optional[bool],
     win_perf: Optional[bool],
     win_perf_object: tuple[str, ...],
+    win_os: Optional[bool],
     win_services: Optional[str],
     no_win_services: bool,
     nginx: Optional[str],
@@ -715,7 +727,7 @@ def render_cmd(
     if target_os:
         is_win = target_os.lower() == "windows"
     else:
-        is_win = bool(win_perf_object or win_perf or win_services or no_win_services or (win_perf is False))
+        is_win = bool(win_perf_object or win_perf or win_services or no_win_services or (win_perf is False) or (win_os is not None))
 
     cfg = resolve_monitoring_config(
         is_win=is_win,
@@ -730,6 +742,7 @@ def render_cmd(
         processes=processes,
         win_perf=win_perf,
         win_perf_object=win_perf_object,
+        win_os=win_os,
         win_services=win_services,
         no_win_services=no_win_services,
         nginx=nginx,

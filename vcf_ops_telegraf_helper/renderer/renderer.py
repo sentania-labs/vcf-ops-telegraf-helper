@@ -224,7 +224,8 @@ class TelegrafRenderer:
                             existing[key] = ['*'] if '*' in combined else combined
                     else:
                         objects.append(dict(ObjectName=extra.object_name, Counters=extra.counters,
-                                            Instances=extra.instances, Measurement=extra.measurement))
+                                            Instances=extra.instances, Measurement=extra.measurement,
+                                            **{k: v for k, v in extra.options.items() if k not in ("ObjectName", "Counters", "Instances", "Measurement")}))
                 lines[perf_start:] = ['[[inputs.win_perf_counters]]', f'  PrintValid = {print_valid_str}', '']
                 for item in objects:
                     lines.append('  [[inputs.win_perf_counters.object]]')
@@ -237,6 +238,24 @@ class TelegrafRenderer:
                             formatted = _escape_toml_str(value)
                         lines.append(f'    {key} = {formatted}')
                     lines.append('')
+
+        # Windows OS totals (same three inputs the Ops product-managed agent ships)
+        if config.win_os.enabled:
+            if config.win_os.cpu:
+                lines.extend([
+                    "# Windows CPU totals, prefixed to land on the Windows OS object in VCF Operations",
+                    "[[inputs.cpu]]",
+                    "  percpu = true",
+                    "  totalcpu = true",
+                    "  collect_cpu_time = true",
+                    "  report_active = true",
+                    '  name_prefix = "win."',
+                    "",
+                ])
+            if config.win_os.mem:
+                lines.extend(["# Windows memory totals", "[[inputs.mem]]", '  name_prefix = "win."', ""])
+            if config.win_os.swap:
+                lines.extend(["# Windows swap totals", "[[inputs.swap]]", '  name_prefix = "win."', ""])
 
         # Windows Services
         if config.win_services.enabled:
@@ -440,14 +459,12 @@ class TelegrafRenderer:
 
         if mandatory_tags_path:
             if is_windows:
-                cmd_pfx = "cmd.exe /c"
+                # Run the script with no argument (issue #62): the binary path is written into the
+                # script's own default line instead. Two quoted arguments would give cmd.exe four quote
+                # characters, and it strips the outer pair, so a path under C:\Program Files would run
+                # C:\Program and the Guest Info tags would never arrive.
                 norm_script = mandatory_tags_path.replace("\\", "/")
-                norm_bin = (telegraf_bin_path or "C:/telegraf/telegraf.exe").replace("\\", "/")
-                if " " in norm_script:
-                    norm_script = f'"{norm_script}"'
-                if " " in norm_bin:
-                    norm_bin = f'"{norm_bin}"'
-                cmd_str = f"{cmd_pfx} {norm_script} {norm_bin}"
+                cmd_str = f'cmd.exe /c "{norm_script}"'
             else:
                 cmd_pfx = "/bin/bash"
                 bin_path = telegraf_bin_path or "/usr/bin/telegraf"

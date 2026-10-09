@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, Field
 
 
@@ -79,6 +79,10 @@ class PerfmonObject(BaseModel):
     counters: List[str] = Field(default_factory=lambda: ["*"])
     instances: List[str] = Field(default_factory=lambda: ["*"])
     measurement: str
+    options: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="Other object keys carried as-is (IncludeTotal, UseRawValues, WarnOnMissing, FailOnMissing)",
+    )
 
 
 class WinPerfCountersInputConfig(BaseModel):
@@ -88,6 +92,19 @@ class WinPerfCountersInputConfig(BaseModel):
     print_valid: bool = True
     additional_objects: List[PerfmonObject] = Field(default_factory=list)
     process_instances: List[str] = Field(default_factory=lambda: ["_Total", "telegraf"])
+
+
+class WindowsOsInputConfig(BaseModel):
+    """Windows OS totals: inputs.cpu, inputs.mem and inputs.swap with name_prefix "win.".
+
+    The Ops product-managed agent ships these next to the perf counters; they add the
+    cpu|usage.*, mem|total/used/used.percent and swap|* stat keys the counters alone lack.
+    """
+
+    enabled: bool = False
+    cpu: bool = True
+    mem: bool = True
+    swap: bool = True
 
 
 class WinServicesInputConfig(BaseModel):
@@ -163,6 +180,7 @@ class MonitoringConfig(BaseModel):
     diskio: DiskIoInputConfig = Field(default_factory=DiskIoInputConfig)
     processes: ProcessesInputConfig = Field(default_factory=ProcessesInputConfig)
     win_perf_counters: WinPerfCountersInputConfig = Field(default_factory=WinPerfCountersInputConfig)
+    win_os: WindowsOsInputConfig = Field(default_factory=WindowsOsInputConfig)
     win_services: WinServicesInputConfig = Field(default_factory=WinServicesInputConfig)
     nginx: NginxInputConfig = Field(default_factory=NginxInputConfig)
     apache: ApacheInputConfig = Field(default_factory=ApacheInputConfig)
@@ -185,6 +203,7 @@ class MonitoringConfig(BaseModel):
                 system=SystemInputConfig(enabled=False),
                 swap=SwapInputConfig(enabled=False),
                 win_perf_counters=WinPerfCountersInputConfig(enabled=True),
+                win_os=WindowsOsInputConfig(enabled=True),
                 win_services=WinServicesInputConfig(enabled=True, service_names=["telegraf"]),
             )
         return cls(

@@ -84,6 +84,7 @@ from vcf_ops_telegraf_helper.models.monitoring import (
     SystemInputConfig,
     WinPerfCountersInputConfig,
     WinServicesInputConfig,
+    WindowsOsInputConfig,
 )
 from vcf_ops_telegraf_helper.models.vcf import (
     CollectorInfo,
@@ -1647,6 +1648,9 @@ class MainWindow(QMainWindow):
         self.win_perf_check = QCheckBox("Enable Windows Performance Counters")
         self.win_perf_check.setChecked(False)
 
+        self.win_os_check = QCheckBox("Enable Windows OS Totals")
+        self.win_os_check.setChecked(False)
+
         self.win_svc_check = QCheckBox("Enable Windows Services")
         self.win_svc_check.setChecked(False)
         self.win_svc_names_input = QLineEdit("telegraf")
@@ -1700,6 +1704,7 @@ class MainWindow(QMainWindow):
             ("diskio", "Disk I/O", "Core OS", self.diskio_check),
             ("processes", "Process Counts", "Core OS", self.proc_check),
             ("win_perf", "Windows Performance Counters", "Windows", self.win_perf_check),
+            ("win_os", "Windows OS Totals", "Windows", self.win_os_check),
             ("win_svc", "Windows Services", "Windows", self.win_svc_check),
             ("nginx", "NGINX Web Server", "Workloads", self.nginx_check),
             ("apache", "Apache HTTP Server", "Workloads", self.apache_check),
@@ -1811,6 +1816,14 @@ class MainWindow(QMainWindow):
             self.win_perf_check,
             inputs_widget=win_perf_widget,
             notes="Captures Processor (*), Memory, LogicalDisk (*), Network Interface (*), and System objects."
+        ))
+
+        # Windows OS Totals Card
+        self.plugin_config_stack.addWidget(self._create_plugin_card(
+            "Windows OS Totals (inputs.cpu, inputs.mem, inputs.swap)", "Windows",
+            "Adds the CPU usage, memory and swap totals the Ops product-managed agent also collects, so the Windows OS object carries the same stat keys.",
+            self.win_os_check,
+            notes='Rendered with name_prefix = "win." so the metrics land on the Windows OS object instead of a Linux-style one. Adds cpu|usage.*, mem|total/used/used.percent and swap|* next to the performance counters.'
         ))
 
         # Windows Services Card
@@ -2121,7 +2134,7 @@ class MainWindow(QMainWindow):
             and self.ep_os_combo.currentText().strip().lower().startswith("win")
         )
         baseline_keys = (
-            {"win_perf", "win_svc"}
+            {"win_perf", "win_os", "win_svc"}
             if is_win
             else {"cpu", "mem", "disk", "net", "system", "swap"}
         )
@@ -2144,7 +2157,7 @@ class MainWindow(QMainWindow):
                 incompatible = False
                 if is_win and key in ("cpu", "mem", "disk", "net", "system", "swap", "processes"):
                     incompatible = True
-                elif not is_win and key in ("win_perf", "win_svc"):
+                elif not is_win and key in ("win_perf", "win_os", "win_svc"):
                     incompatible = True
 
                 if incompatible:
@@ -2175,7 +2188,7 @@ class MainWindow(QMainWindow):
                     want = False
                 elif is_win and key in ("cpu", "mem", "disk", "net", "system", "swap", "processes"):
                     want = False
-                elif not is_win and key in ("win_perf", "win_svc"):
+                elif not is_win and key in ("win_perf", "win_os", "win_svc"):
                     want = False
                 else:
                     want = True
@@ -2539,6 +2552,8 @@ class MainWindow(QMainWindow):
             active_plugins.append("processes")
         if mon.win_perf_counters.enabled:
             active_plugins.append("win_perf_counters")
+        if mon.win_os.enabled:
+            active_plugins.append("win_os (cpu, mem, swap with the win. prefix)")
         if mon.win_services.enabled:
             active_plugins.append("win_services")
         if mon.nginx.enabled:
@@ -2779,12 +2794,14 @@ class MainWindow(QMainWindow):
             parts.append(f"--vm-name {quote(self.selected_vm_name)}")
 
         if target.os_family == OSFamily.WINDOWS:
-            has_win_core = mon.win_perf_counters.enabled or (mon.win_services.enabled and bool(mon.win_services.service_names))
+            has_win_core = mon.win_perf_counters.enabled or mon.win_os.enabled or (mon.win_services.enabled and bool(mon.win_services.service_names))
             if not has_win_core:
                 parts.append("--no-baseline")
             else:
                 if not mon.win_perf_counters.enabled:
                     parts.append("--no-win-perf")
+                if not mon.win_os.enabled:
+                    parts.append("--no-win-os")
                 if not mon.win_services.enabled:
                     parts.append("--no-win-services")
                 elif mon.win_services.service_names != ["telegraf"]:
@@ -3117,6 +3134,9 @@ class MainWindow(QMainWindow):
             win_perf_counters=WinPerfCountersInputConfig(
                 enabled=bool(is_win and getattr(self, "win_perf_check", None) and self.win_perf_check.isChecked()),
                 additional_objects=getattr(self, "_additional_perfmon", []),
+            ),
+            win_os=WindowsOsInputConfig(
+                enabled=bool(is_win and getattr(self, "win_os_check", None) and self.win_os_check.isChecked()),
             ),
             win_services=WinServicesInputConfig(
                 enabled=bool(is_win and getattr(self, "win_svc_check", None) and self.win_svc_check.isChecked()),
