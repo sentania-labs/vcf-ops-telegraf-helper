@@ -242,6 +242,13 @@ class TakeoverWorkflow:
                 raise RuntimeError("No Ops-managed agent found on this endpoint; nothing to take over.")
 
             prior_note = None
+            if previous and previous.state in ("retired", "cleaned", "installed"):
+                raise RuntimeError(
+                    f"The journal says this VM's managed agent was already retired (state {previous.state}, task "
+                    f"{previous.uninstall_task_id}), yet the managed services are present again "
+                    f"({', '.join(sorted(self.managed.services))}). Not submitting a second uninstall; reconcile in VCF Operations, "
+                    "then remove the journal record under the app's config directory to start over."
+                )
             if previous and previous.state == "retire_failed" and previous.uninstall_task_id:
                 # Never submit a second uninstall while the journaled one is unresolved
                 status = self.adapter.get_agent_task_status(previous.uninstall_task_id)

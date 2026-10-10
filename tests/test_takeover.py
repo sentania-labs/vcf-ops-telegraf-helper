@@ -653,3 +653,20 @@ def test_resume_after_install_only_verifies_continuity(tmp_path):
     assert summary.results[RESULT_INSTALL].startswith("PASS") and summary.results[RESULT_INGESTION] == "PASS"
     assert len(first.adapter.uninstall_calls) == 1
     assert TakeoverJournal(tmp_path / "journal").load(VC_ID, VM_MOR).state == "verified"
+
+
+def test_retired_journal_with_services_back_refuses_a_second_uninstall(tmp_path):
+    """Fact-check finding: a journal that says retired must not lead to a second uninstall when services reappear."""
+    first = _workflow(tmp_path)
+    first.capture()
+    first.backup()
+    first.preflight()
+    first.retire()
+    endpoint = first.executor
+    endpoint.managed = True  # e.g. the managed agent was reinstalled through Ops in between
+    endpoint.files[MANAGED_TELEGRAF_CONF] = FIXTURE.read_text()
+    endpoint.files[MANAGED_GRAINS] = GRAINS
+    second = _workflow(tmp_path, endpoint=endpoint, adapter=first.adapter)
+    summary = second.run()
+    assert not summary.success and "second uninstall" in summary.stages[0].message
+    assert len(first.adapter.uninstall_calls) == 1
