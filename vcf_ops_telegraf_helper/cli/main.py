@@ -397,6 +397,21 @@ def run_cmd(
             )
         if dry_run or preview:
             raise click.UsageError("--dry-run and --preview are not available with --take-over-managed-agent")
+        ignored = [flag for flag, given in (
+            ("--no-baseline", no_baseline), ("--cpu/--no-cpu", cpu is not None), ("--mem/--no-mem", mem is not None),
+            ("--disk/--no-disk", disk is not None), ("--net/--no-net", net is not None), ("--system/--no-system", system is not None),
+            ("--swap/--no-swap", swap is not None), ("--diskio/--no-diskio", diskio is not None),
+            ("--processes/--no-processes", processes is not None), ("--win-perf/--no-win-perf", win_perf is not None),
+            ("--win-os/--no-win-os", win_os is not None), ("--win-services", win_services is not None),
+            ("--no-win-services", no_win_services), ("--replace-inputs", replace_inputs),
+            ("--install-telegraf", install_telegraf), ("--force-new-cert", force_new_cert),
+        ) if given]
+        if ignored:
+            raise click.UsageError(
+                "With --take-over-managed-agent the imported managed configuration is the starting point and the install, "
+                "certificate and input replacement are forced on; these flags do not apply: " + ", ".join(ignored)
+                + ". Workload additions (--nginx, --apache, --mysql, --postgres, --mssql, --docker, --ping, --win-perf-object) are merged on top."
+            )
     elif confirm_takeover:
         raise click.UsageError("--confirm-takeover only applies with --take-over-managed-agent")
 
@@ -515,6 +530,15 @@ def run_cmd(
 
     vcf_env.agent_verify_ssl = agent_verify_ssl
     if take_over_managed_agent:
+        if not target.vc_id:
+            # The takeover addresses the VM by vCenter id and MOR; resolve the id from inventory when only the MOR was given
+            matches = [vm for vm in adapter.list_virtual_machines(strict=True) if vm.vm_mor == vm_id and vm.vc_id]
+            if len(matches) != 1:
+                raise click.UsageError(
+                    f"--vm-id {vm_id} matches {len(matches)} VMs in VCF Operations inventory; pass --vc-id to choose one"
+                )
+            target.vc_id = matches[0].vc_id
+            console.print(f"Resolved vCenter id [cyan]{target.vc_id}[/cyan] for {vm_id} ({matches[0].name})")
         # The imported managed configuration is the starting point; only workload additions are merged
         additions = resolve_monitoring_config(
             is_win=is_win, no_baseline=True, win_perf_object=win_perf_object, nginx=nginx, apache=apache,
@@ -544,6 +568,8 @@ def run_cmd(
             console.print(f"[bold green]✓[/bold green] JSON report written to [cyan]{export_json}[/cyan]")
         if not summary.success:
             sys.exit(1)
+        if any(str(v).startswith("CHANGED") for v in summary.results.values()):
+            sys.exit(3)  # applied, but Ops created a different object: history did not follow
         return
 
     workflow = ConfigureEndpointWorkflow(

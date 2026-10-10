@@ -107,7 +107,7 @@ from vcf_ops_telegraf_helper.workflow.engine import ConfigureEndpointWorkflow
 from vcf_ops_telegraf_helper.workflow.uninstall import UninstallEndpointWorkflow
 from vcf_ops_telegraf_helper.storage.journal import TakeoverJournal
 from vcf_ops_telegraf_helper.workflow.managed_config import import_managed_config
-from vcf_ops_telegraf_helper.workflow.takeover import TakeoverOptions, TakeoverSummary, TakeoverWorkflow
+from vcf_ops_telegraf_helper.workflow.takeover import RESUMABLE_STATES, TakeoverOptions, TakeoverSummary, TakeoverWorkflow
 from vcf_ops_telegraf_helper.gui.busy import run_busy
 from vcf_ops_telegraf_helper.gui.probes import probe_endpoint
 from vcf_ops_telegraf_helper.gui.discovery_dialogs import (
@@ -293,6 +293,7 @@ class MainWindow(QMainWindow):
         self.managed_installation = None
         self.takeover_resume_record = None
         self.imported_config = None
+        self._imported_base = None
         self.takeover_worker = None
         self.takeover_worker_thread = None
         self._validated_url: Optional[str] = None
@@ -312,6 +313,25 @@ class MainWindow(QMainWindow):
         self._release_notice = None
         self._update_check_started = False
         self.logger.info("MainWindow initialized")
+
+    def closeEvent(self, event) -> None:  # noqa: N802 (Qt override)
+        thread = getattr(self, "takeover_worker_thread", None)
+        if thread is not None and self._takeover_running():
+            QMessageBox.warning(
+                self, "Takeover in progress",
+                "A takeover is running and cannot be interrupted safely: the managed agent may already be retired. "
+                "Wait for it to finish. If the app is killed anyway, detect the endpoint again afterwards to resume from the journal.",
+            )
+            event.ignore()
+            return
+        super().closeEvent(event)
+
+    def _takeover_running(self) -> bool:
+        thread = getattr(self, "takeover_worker_thread", None)
+        try:
+            return bool(thread is not None and thread.isRunning())
+        except RuntimeError:  # the QThread was already deleted
+            return False
 
     def _apply_theme(self) -> None:
         self.setStyleSheet(build_stylesheet(self.current_theme))
@@ -589,6 +609,12 @@ class MainWindow(QMainWindow):
             self.ep_details_box.setPlainText("Endpoint details will appear here after detection.")
         if hasattr(self, "ep_missing_banner"):
             self.ep_missing_banner.setVisible(False)
+        if hasattr(self, "ep_managed_banner"):
+            # A different endpoint or credential: whatever was learned about a managed agent no longer applies
+            self.managed_installation = None
+            self.takeover_resume_record = None
+            self._hide_managed_banner()
+            self._update_execute_mode()
         self._refresh_step_gating()
 
     def _build_nav(self, step: int, back_label: Optional[str], next_label: Optional[str]) -> tuple[QFrame, Optional[QHBoxLayout]]:
@@ -1664,7 +1690,7 @@ class MainWindow(QMainWindow):
             record = TakeoverJournal().load(self.selected_vc_id, self.selected_vm_mor)
         except Exception:
             return None
-        if record is not None and record.state in ("retired", "cleaned") and record.backup_dir:
+        if record is not None and record.state in RESUMABLE_STATES and record.backup_dir:
             return record
         return None
 
@@ -1697,16 +1723,39 @@ class MainWindow(QMainWindow):
                    f"Cleanup Scope After Retirement: {', '.join(managed.cleanup_paths) or 'none'}"]
         if managed.read_errors:
             details.append("Config Read Errors: " + "; ".join(managed.read_errors))
+        vm = self.bound_vm
+        mismatch = bool(vm and grains.get("vm_id") and grains.get("vc_id")
+                        and (grains.get("vm_id") != vm.vm_mor or grains.get("vc_id") != vm.vc_id))
+        if mismatch:
+            details.append(f"WARNING: the agent is bound to another VM than the selected {vm.name} ({vm.vc_id} / {vm.vm_mor}); takeover is refused.")
+            self.ep_managed_desc.setText(
+                f"This endpoint's Ops agent is bound to vCenter {grains.get('vc_id')}, VM {grains.get('vm_id')}, "
+                f"not the selected VM {vm.name} ({vm.vm_mor}). Check the address or the VM selection; takeover is not offered."
+            )
+            self.takeover_check.setEnabled(False)
+        else:
+            self.takeover_check.setEnabled(True)
         self.ep_details_box.setPlainText("\n".join(details))
-        if self.takeover_check.isChecked():
-            self._on_takeover_toggled(True)
+        self.state_store.record_endpoint(self.ep_host_input.text().strip())
+        self._update_catalog_os_compatibility(True)
+        self._last_detected_os = "windows"
+        if self.takeover_check.isChecked() and (mismatch or self.imported_config is None):
+            if mismatch:
+                self.takeover_check.setChecked(False)
+            else:
+                self._on_takeover_toggled(True)
         self._refresh_step_gating()
+        self._update_execute_mode()
 
     def _show_resume_banner(self, record) -> None:
         self.ep_managed_title.setText("Interrupted Takeover Found")
+        what = {
+            "retire_failed": "the Ops uninstall did not finish while the app was watching; it will be re-checked in VCF Operations",
+            "installed": "open-source Telegraf was installed but continuity in VCF Operations was not verified",
+        }.get(record.state, "the managed agent was retired and open-source Telegraf was not installed")
         self.ep_managed_desc.setText(
-            f"A takeover of this VM was journaled at {record.updated_at} and stopped after the managed agent was retired "
-            f"(state: {record.state}). No agent is reporting right now. Check the box to resume from the backup under {record.backup_dir}."
+            f"A takeover of this VM was journaled at {record.updated_at} (state: {record.state}): {what}. "
+            f"Check the box to resume from the backup under {record.backup_dir}."
         )
         self.takeover_check.setText("Resume the interrupted takeover from the journaled backup")
         self.ep_managed_banner.setVisible(True)
@@ -1728,11 +1777,16 @@ class MainWindow(QMainWindow):
         self.ep_managed_banner.setVisible(False)
         self.ep_uninstall_btn.setEnabled(True)
         self.ep_uninstall_btn.setToolTip("")
-        if self.takeover_check.isChecked():
+        self.takeover_check.setEnabled(True)
+        if self.takeover_check.isChecked() or self.imported_config is not None:
+            # Imported inputs belong to the managed VM they came from; never carry them to another endpoint
             self.takeover_check.blockSignals(True)
             self.takeover_check.setChecked(False)
             self.takeover_check.blockSignals(False)
             self.imported_config = None
+            self._imported_base = None
+            if hasattr(self, "catalog_items"):
+                self._apply_baseline_preset()
 
     def _on_takeover_toggled(self, checked: bool) -> None:
         if checked and self.managed_installation is not None:
@@ -1774,7 +1828,13 @@ class MainWindow(QMainWindow):
         self._update_execute_mode()
 
     def _apply_monitoring_config(self, mon: MonitoringConfig) -> None:
-        """Load a monitoring configuration into the catalog widgets (imported takeover inputs)."""
+        """Load a monitoring configuration into the catalog widgets (imported takeover inputs).
+
+        The widgets hold one value per workload plugin; the full imported plugin settings (several
+        URLs or servers, disk filters, interface lists) are kept as the base that
+        _get_monitoring_config overlays as long as the widget value was not edited.
+        """
+        self._imported_base = mon.model_copy(deep=True)
         self._updating_catalog = True
         try:
             pairs = [
@@ -1916,15 +1976,18 @@ class MainWindow(QMainWindow):
 
     def _on_takeover_finished(self, summary: TakeoverSummary) -> None:
         self._finish_running_ui()
-        pending = any(str(v).startswith(("PENDING", "CHANGED")) for v in summary.results.values())
+        changed = any(str(v).startswith("CHANGED") for v in summary.results.values())
+        pending = any(str(v).startswith("PENDING") for v in summary.results.values())
         if not summary.success:
             outcome = "TAKEOVER FAILED: review the stage details below"
+        elif changed:
+            outcome = "TAKEOVER APPLIED, BUT VCF OPERATIONS CREATED A DIFFERENT OBJECT: history stayed on the old one"
         elif pending:
             outcome = "TAKEOVER APPLIED: VCF Operations confirmation pending"
         else:
             outcome = "TAKEOVER COMPLETE: same Ops object, open-source agent reporting"
         self.result_banner.setText(outcome)
-        self.result_banner.setStyleSheet("font-weight: 700; color: " + ("#d95926" if not summary.success or pending else "#199e70") + ";")
+        self.result_banner.setStyleSheet("font-weight: 700; color: " + ("#d95926" if not summary.success or pending or changed else "#199e70") + ";")
         self.last_summary = summary
         self.execute_btn.setEnabled(not summary.success)
         self.export_md_btn.setEnabled(True)
@@ -1945,6 +2008,13 @@ class MainWindow(QMainWindow):
         if summary.success:
             self.managed_installation = None
             self.takeover_resume_record = None
+            self.ep_managed_banner.setVisible(False)
+            self.ep_uninstall_btn.setEnabled(True)
+            self.ep_uninstall_btn.setToolTip("")
+            self.takeover_check.blockSignals(True)
+            self.takeover_check.setChecked(False)
+            self.takeover_check.blockSignals(False)
+            self._update_execute_mode()
         self._update_cli_command()
 
     # --------------------------------------------------------------------------
@@ -3488,6 +3558,32 @@ class MainWindow(QMainWindow):
         return target
 
     def _get_monitoring_config(self) -> MonitoringConfig:
+        config = self._monitoring_config_from_widgets()
+        base = getattr(self, "_imported_base", None)
+        if base is None or not self._takeover_active():
+            return config
+        # Overlay the imported settings the widgets cannot hold, unless the operator edited the widget value
+        for name, widget_value, first in (
+            ("nginx", self.nginx_url_input.text().strip(), base.nginx.urls[:1]),
+            ("apache", self.apache_url_input.text().strip(), base.apache.urls[:1]),
+            ("mysql", self.mysql_server_input.text().strip(), base.mysql.servers[:1]),
+            ("mssql", self.mssql_server_input.text().strip(), base.mssql.servers[:1]),
+            ("ping", self.ping_url_input.text().strip(), base.ping.urls[:1]),
+        ):
+            plugin = getattr(config, name)
+            if plugin.enabled and first and widget_value == first[0]:
+                merged = getattr(base, name).model_copy(update={"enabled": True})
+                setattr(config, name, merged)
+        if config.postgresql.enabled and self.postgres_addr_input.text().strip() == base.postgresql.address:
+            config.postgresql = base.postgresql.model_copy(update={"enabled": True})
+        if config.docker.enabled and self.docker_endpoint_input.text().strip() == base.docker.endpoint:
+            config.docker = base.docker.model_copy(update={"enabled": True})
+        for name in ("cpu", "disk", "net", "diskio"):
+            if getattr(config, name).enabled:
+                setattr(config, name, getattr(base, name).model_copy(update={"enabled": True}))
+        return config
+
+    def _monitoring_config_from_widgets(self) -> MonitoringConfig:
         svc_names_raw = self.win_svc_names_input.text().strip() if hasattr(self, "win_svc_names_input") else "*"
         svc_list = [s.strip() for s in svc_names_raw.split(",") if s.strip()] or ["*"]
 

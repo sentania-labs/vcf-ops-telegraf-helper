@@ -564,7 +564,10 @@ class TakeoverWorkflow:
             assert self.record is not None and self.install_workflow is not None
             ok = self.install_workflow.run_stages(ConfigureEndpointWorkflow.CHANGE_STAGES)
             self.install_summary = self.install_workflow.summary(ok)
-            self.verifications.update(self.install_summary.verifications)
+            # The continuity stage is the authority on ingestion; the inner checks would show a misleading PASS
+            self.verifications.update({
+                k: v for k, v in self.install_summary.verifications.items() if k not in ("VCF Ops ingestion", "Metrics transmission")
+            })
             installed = self.install_summary.verifications.get("Telegraf installed", "FAIL").startswith("PASS")
             service = self.install_summary.verifications.get("Service running", "FAIL").startswith("PASS")
             self.results[RESULT_INSTALL] = "PASS" if (ok or (installed and service)) else "FAIL"

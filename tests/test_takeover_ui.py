@@ -23,6 +23,15 @@ def journal_dir(tmp_path, monkeypatch):
     return tmp_path / "journal"
 
 
+class _RecordingEndpoint(ManagedWindowsEndpoint):
+    last_system_conf = ""
+
+    def upload(self, source_content, destination_path, mode=0o644):
+        if destination_path.endswith("vcf-helper-system.conf"):
+            self.last_system_conf = source_content if isinstance(source_content, str) else source_content.decode()
+        super().upload(source_content, destination_path, mode)
+
+
 def _managed_vm():
     return VirtualMachineResource(
         resource_id="res-vm-001", name="dbdemo01", ip_address="172.17.0.2", vm_mor=VM_MOR, vc_id=VC_ID,
@@ -157,12 +166,15 @@ def test_gui_takeover_runs_and_reports_four_results(tmp_path, monkeypatch, journ
     assert window.preview_system_box.toPlainText().count("[[inputs.win_perf_counters]]") == 1
     for name in ("Managed agent retirement", "Open-source Telegraf installation", "Registration on the same Ops object", "Fresh metric ingestion"):
         assert f"{name:<40}: PASS" in log
-    assert "pw" not in log.replace("pw\n", "") or True  # the password never appears in a stage line
-    assert '"pw"' not in log and "password" not in log.lower()
+    assert "pw" not in log.split("administrator@lab.local")[-1] and "password" not in log.lower()
     record = TakeoverJournal().load(VC_ID, VM_MOR)
     assert record.state == "verified" and "Typed 'dbdemo01'" in record.confirmation_text
-    assert "dbdemo01" in Path(record.backup_dir).parent.name or Path(record.backup_dir).exists()
+    assert (Path(record.backup_dir) / "telegraf.conf").exists()
     assert window.managed_installation is None and window.execute_btn.isEnabled() is False
+    # the UI leaves takeover mode once it succeeded
+    assert window.ep_managed_banner.isHidden() and window.takeover_check.isChecked() is False
+    assert window.execute_btn.text().startswith("Execute Guided") and window.dry_run_check.isEnabled()
+    assert window.ep_uninstall_btn.isEnabled()
     assert "Agent Takeover Summary" in window.last_summary.to_markdown()
     window.close()
 
@@ -192,7 +204,7 @@ def test_cli_takeover_requires_confirmation_and_runs(monkeypatch, journal_dir):
     from click.testing import CliRunner
     from vcf_ops_telegraf_helper.cli.main import cli
 
-    endpoint = ManagedWindowsEndpoint()
+    endpoint = _RecordingEndpoint()
     adapters = []
 
     def make_adapter(env):
@@ -231,7 +243,172 @@ def test_cli_takeover_requires_confirmation_and_runs(monkeypatch, journal_dir):
         assert "pw" not in result.output.replace("--ssh-pass", "")
         # the requested addition rides on top of the imported inputs
         assert "[[inputs.nginx]] (requested addition)" in result.output
-        assert "[[inputs.nginx]]" in adapters[-1].endpoint.uploaded_files.get("C:\\telegraf\\telegraf.d\\vcf-helper-system.conf", "") or True
+        assert "[[inputs.nginx]]" in endpoint.last_system_conf
         report = (journal_dir.parent / "takeover.md").read_text()
         assert "Agent Takeover Summary" in report and "requested addition" in report
         assert TakeoverJournal().load(VC_ID, VM_MOR).confirmation_text == "--confirm-takeover dbdemo01"
+
+
+def test_gui_round_trip_keeps_imported_settings_the_widgets_cannot_hold(tmp_path, monkeypatch, journal_dir):
+    """Review finding: the install must use the imported multi-valued settings, not a widget rebuild."""
+    from test_takeover import FIXTURE
+
+    endpoint = ManagedWindowsEndpoint()
+    endpoint.files["C:\\VMware\\UCP\\ucp-telegraf\\telegraf.conf"] = FIXTURE.read_text() + '''
+[[inputs.ping]]
+  urls = ["10.0.0.1", "10.0.0.2"]
+  count = 5
+
+[[inputs.nginx]]
+  urls = ["http://a/status", "http://b/status"]
+
+[[inputs.disk]]
+  ignore_fs = ["tmpfs", "xfs"]
+'''
+    window = _window(tmp_path, monkeypatch, endpoint)
+    window._detect_endpoint()
+    window.takeover_check.setChecked(True)
+    mon = window._get_monitoring_config()
+    assert mon.ping.urls == ["10.0.0.1", "10.0.0.2"] and mon.ping.count == 5
+    assert mon.nginx.urls == ["http://a/status", "http://b/status"]
+    assert mon.disk.enabled and mon.disk.ignore_fs == ["tmpfs", "xfs"] and mon.disk.mount_points is None
+    # an edited widget value wins over the import for that plugin only
+    window.ping_url_input.setText("10.9.9.9")
+    mon = window._get_monitoring_config()
+    assert mon.ping.urls == ["10.9.9.9"] and mon.nginx.urls == ["http://a/status", "http://b/status"]
+    # unchecking a plugin removes it
+    window.nginx_check.setChecked(False)
+    assert window._get_monitoring_config().nginx.enabled is False
+    window.close()
+
+
+def test_gui_imported_inputs_do_not_leak_to_another_vm(tmp_path, monkeypatch, journal_dir):
+    """Review finding: one VM's imported inputs must never reach the onboarding of another."""
+    from test_takeover import FIXTURE
+    from vcf_ops_telegraf_helper.executors.mock import MockExecutor
+
+    managed = ManagedWindowsEndpoint()
+    managed.files["C:\\VMware\\UCP\\ucp-telegraf\\telegraf.conf"] = FIXTURE.read_text() + '''
+[[inputs.sqlserver]]
+  servers = ["Server=db;Password=hunter2;"]
+[[inputs.procstat]]
+  pattern = "w3wp"
+'''
+    plain = MockExecutor(telegraf_installed=True)
+    endpoints = {"172.17.0.2": managed, "172.16.3.80": plain}
+    window = _window(tmp_path, monkeypatch, managed)
+    monkeypatch.setattr(window, "_create_executor", lambda target: endpoints[target.hostname])
+    window._detect_endpoint()
+    window.takeover_check.setChecked(True)
+    assert window.mssql_check.isChecked() and "procstat" in window.custom_toml_input.toPlainText()
+    assert "--take-over-managed-agent" in window._build_cli_command()
+
+    other = VirtualMachineResource(resource_id="res-vm-002", name="mssqldemo2", ip_address="172.16.3.80", vm_mor="vm-1042",
+                                   vc_id="423b-81f0-91a2-0002", os_name="Microsoft Windows Server 2025 (64-bit)",
+                                   os_family="WINDOWS", power_state="Powered On")
+    window._bind_vm(other)
+    # switching the VM invalidates everything learned about the managed agent
+    assert window.managed_installation is None and window.takeover_check.isChecked() is False
+    assert window._takeover_active() is False and "--take-over-managed-agent" not in window._build_cli_command()
+    assert window.execute_btn.text().startswith("Execute Guided") if hasattr(window, "execute_btn") else True
+    window._vcf_validated = True
+    window._detect_endpoint()
+    assert window.managed_installation is None and window.ep_managed_banner.isHidden()
+    mon = window._get_monitoring_config()
+    assert mon.mssql.enabled is False and "procstat" not in mon.custom_toml and "hunter2" not in mon.custom_toml
+    assert mon.win_perf_counters.process_instances == ["_Total", "telegraf"]
+    assert window.ep_uninstall_btn.isEnabled()
+    window.close()
+
+
+def test_gui_binding_mismatch_disables_the_option(tmp_path, monkeypatch, journal_dir):
+    from test_takeover import GRAINS
+
+    endpoint = ManagedWindowsEndpoint(grains=GRAINS.replace(VM_MOR, "vm-9999"))
+    window = _window(tmp_path, monkeypatch, endpoint)
+    window._detect_endpoint()
+    assert window.takeover_check.isEnabled() is False
+    assert "not the selected VM" in window.ep_managed_desc.text()
+    window.close()
+
+
+def test_gui_blocks_closing_during_a_takeover(tmp_path, monkeypatch, journal_dir):
+    from PySide6.QtGui import QCloseEvent
+
+    window = _window(tmp_path, monkeypatch, ManagedWindowsEndpoint())
+    warned = []
+    monkeypatch.setattr("vcf_ops_telegraf_helper.gui.main_window.QMessageBox.warning", lambda *a, **k: warned.append(a[1]))
+
+    class Running:
+        def isRunning(self):
+            return True
+
+    window.takeover_worker_thread = Running()
+    event = QCloseEvent()
+    window.closeEvent(event)
+    assert warned == ["Takeover in progress"] and event.isAccepted() is False
+    window.takeover_worker_thread = None
+    event = QCloseEvent()
+    window.closeEvent(event)
+    assert event.isAccepted()
+
+
+def test_gui_changed_object_is_labelled_not_pending(tmp_path, monkeypatch, journal_dir):
+    endpoint = ManagedWindowsEndpoint()
+    window = _window(tmp_path, monkeypatch, endpoint)
+    window._detect_endpoint()
+    window.takeover_check.setChecked(True)
+    adapter = OpsWithUninstall(_env(), endpoint, flip_after_polls=0, new_object=True)
+    monkeypatch.setattr("vcf_ops_telegraf_helper.gui.main_window.get_adapter", lambda env: adapter)
+    monkeypatch.setattr("vcf_ops_telegraf_helper.gui.main_window.QInputDialog.getText", lambda *a, **k: ("dbdemo01", True))
+    window._run_workflow()
+    summary = _wait_for_summary(window)
+    assert summary is not None and summary.success
+    assert "DIFFERENT OBJECT" in window.result_banner.text()
+    window.close()
+
+
+def test_cli_takeover_refuses_ignored_flags_resolves_vc_id_and_exit_codes(monkeypatch, journal_dir):
+    from click.testing import CliRunner
+    from vcf_ops_telegraf_helper.cli.main import cli
+
+    endpoint = ManagedWindowsEndpoint()
+    adapters = []
+
+    def make_adapter(env, **kw):
+        adapter = OpsWithUninstall(env, endpoint, flip_after_polls=0, **kw)
+        adapters.append(adapter)
+        return adapter
+
+    base = ["run", "--vcf-url", "https://ops.local", "--vcf-token", "tok", "--mock-vcf", "--collector", "10.10.10.50",
+            "--target-host", "172.17.0.2", "--connection", "winrm", "--ssh-user", "administrator@lab.local", "--ssh-pass", "pw",
+            "--vm-id", VM_MOR, "--vm-name", "dbdemo01", "--continuity-wait", "0",
+            "--take-over-managed-agent", "--confirm-takeover", "dbdemo01"]
+    with patch("vcf_ops_telegraf_helper.cli.main.WinRMExecutor", return_value=endpoint), \
+         patch("vcf_ops_telegraf_helper.cli.main.MockVCFOpsIntegration", side_effect=lambda env: make_adapter(env)):
+        runner = CliRunner()
+        for flag in (["--no-win-perf"], ["--replace-inputs"], ["--no-baseline"], ["--force-new-cert"], ["--win-services", "x"]):
+            res = runner.invoke(cli, base + flag)
+            assert res.exit_code != 0 and "do not apply" in res.output, flag
+        assert endpoint.managed and not adapters
+
+        # no --vc-id: resolved from inventory (dbdemo01 is vm-1001 in the mock inventory)
+        res = runner.invoke(cli, base)
+        assert res.exit_code == 0, res.output
+        assert "Resolved vCenter id" in res.output and adapters[-1].uninstall_calls[0][0] == "res-vm-001"
+        assert TakeoverJournal().load(VC_ID, VM_MOR).vc_id == VC_ID
+
+    # a different object: applied, labelled, exit code 3
+    endpoint = ManagedWindowsEndpoint()
+    with patch("vcf_ops_telegraf_helper.cli.main.WinRMExecutor", return_value=endpoint), \
+         patch("vcf_ops_telegraf_helper.cli.main.MockVCFOpsIntegration", side_effect=lambda env: make_adapter(env, new_object=True)):
+        res = CliRunner().invoke(cli, base + ["--vc-id", VC_ID])
+        assert res.exit_code == 3 and "DIFFERENT OBJECT" in res.output and "CHANGED OBJECT" in res.output
+
+    # Ops slow: applied, pending, exit 0 but not called COMPLETED
+    endpoint = ManagedWindowsEndpoint()
+    with patch("vcf_ops_telegraf_helper.cli.main.WinRMExecutor", return_value=endpoint), \
+         patch("vcf_ops_telegraf_helper.cli.main.MockVCFOpsIntegration", side_effect=lambda env: OpsWithUninstall(env, endpoint, flip_after_polls=99)):
+        res = CliRunner().invoke(cli, base + ["--vc-id", VC_ID])
+        assert res.exit_code == 0 and "CONFIRMATION PENDING" in res.output and "Takeover: COMPLETED" not in res.output
+        assert "VCF Ops ingestion" not in res.output

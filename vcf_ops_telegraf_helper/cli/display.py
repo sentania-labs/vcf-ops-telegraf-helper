@@ -134,8 +134,15 @@ def display_summary(console: Console, summary: RunSummary) -> None:
 
 def display_takeover_summary(console: Console, summary) -> None:
     """Print the takeover's four results, then the stage and verification tables."""
-    status_style = "bold green" if summary.success else "bold red"
-    status_label = "COMPLETED" if summary.success else "FAILED"
+    values = [str(v) for v in summary.results.values()]
+    if not summary.success:
+        status_style, status_label = "bold red", "FAILED"
+    elif any(v.startswith("CHANGED") for v in values):
+        status_style, status_label = "bold yellow", "APPLIED, BUT VCF OPERATIONS CREATED A DIFFERENT OBJECT (history stayed on the old one)"
+    elif any(v.startswith("PENDING") for v in values):
+        status_style, status_label = "bold yellow", "APPLIED, VCF OPERATIONS CONFIRMATION PENDING"
+    else:
+        status_style, status_label = "bold green", "COMPLETED"
     console.print(f"\n[{status_style}]Agent Takeover: {status_label}[/{status_style}]")
     console.print(f"Target: [cyan]{summary.target_hostname}[/cyan] (VM {summary.vm_name or '?'}, {summary.vm_mor}) | Local Time: [dim]{summary.timestamp}[/dim]\n")
 
