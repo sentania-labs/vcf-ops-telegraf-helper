@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, Field
 
 
@@ -101,3 +101,26 @@ class AgentObjectInfo(BaseModel):
     def is_ops_managed(self) -> bool:
         return (self.managed_type or "").strip().lower() == "product managed"
 
+
+class AgentTaskStatus(BaseModel):
+    """One VM's progress inside an Ops agent lifecycle task (install or uninstall)."""
+
+    task_id: str
+    name: Optional[str] = None
+    stage: Optional[str] = Field(default=None, description="SUBMITTING, FINISHED, or an error stage")
+    messages: List[str] = Field(default_factory=list)
+    raw: Dict[str, Any] = Field(default_factory=dict)
+
+    @property
+    def finished(self) -> bool:
+        return (self.stage or "").upper() == "FINISHED"
+
+    @property
+    def failed(self) -> bool:
+        if self.finished:
+            return False  # an informational message on a finished task is not a failure
+        return bool(self.messages) or (self.stage or "").upper() in ("FAILED", "ERROR")
+
+    @property
+    def terminal(self) -> bool:
+        return self.finished or self.failed

@@ -300,6 +300,8 @@ class ManagedInstallation:
         self.grains: Optional[str] = None
         self.telegraf_version: Optional[str] = None
         self.read_errors: list[str] = []
+        self.query_ok: bool = False  # the service query itself succeeded (an empty result is only trusted then)
+        self.query_error: str = ""
 
     @property
     def present(self) -> bool:
@@ -367,6 +369,9 @@ def detect_managed_installation(
         "| ForEach-Object { '{0}|{1}|{2}' -f $_.Name, $_.State, $_.PathName }"
     )
     res = executor.execute(svc_cmd, timeout=15)
+    found.query_ok = bool(getattr(res, "success", False)) and isinstance(getattr(res, "stdout", None), str)
+    if not found.query_ok:
+        found.query_error = (getattr(res, "stderr", "") or getattr(res, "stdout", "") or "no response").strip()
     if _is_valid_stdout(res):
         for line in res.stdout.strip().splitlines():
             parts = line.strip().split("|", 2)

@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field
 
 from vcf_ops_telegraf_helper.models.vcf import (
     AgentObjectInfo,
+    AgentTaskStatus,
     AuthToken,
     CollectorInfo,
     VirtualMachineResource,
@@ -132,3 +133,20 @@ class VCFOpsIntegration(ABC):
         """List collector groups with cloud proxies, and the individual cloud proxies, an agent can report to."""
         pass
 
+    def resolve_vm_resource_id(self, vc_id: str, vm_mor: str) -> Optional[str]:
+        """VCF Operations resource id of the vCenter VM with this vCenter id and MOR, or None."""
+        return None
+
+    def uninstall_managed_agent(
+        self, vm_resource_id: str, guest_username: str, guest_password: str, retain_config: bool = False
+    ) -> str:
+        """Ask VCF Operations to uninstall its product-managed agent from the VM; returns the task id.
+
+        The guest credential is passed through as typed (UPN for a domain account, bare name for
+        a local one). Raises RuntimeError when Ops rejects the request.
+        """
+        raise NotImplementedError("This adapter cannot retire managed agents")
+
+    def get_agent_task_status(self, task_id: str) -> AgentTaskStatus:
+        """Status of an agent install/uninstall task."""
+        raise NotImplementedError("This adapter cannot read agent tasks")

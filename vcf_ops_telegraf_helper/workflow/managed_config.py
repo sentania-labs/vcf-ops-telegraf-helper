@@ -242,6 +242,35 @@ def import_managed_config(
     return result
 
 
+def merge_additions(imported: ImportedConfig, additions: Optional[MonitoringConfig]) -> ImportedConfig:
+    """Enable requested workload plugins on top of an imported configuration, each at most once."""
+    if additions is None:
+        return imported
+    mon = imported.monitoring
+    for name in ("nginx", "apache", "mysql", "postgresql", "mssql", "docker", "ping"):
+        extra = getattr(additions, name)
+        if not extra.enabled:
+            continue
+        if getattr(mon, name).enabled:
+            imported.warnings.append(f"[[inputs.{name}]] already collected by the managed agent; the addition was not applied twice")
+            continue
+        setattr(mon, name, extra.model_copy())
+        imported.added.append(f"[[inputs.{name}]] (requested addition)")
+    if additions.win_perf_counters.additional_objects:
+        known = {o.object_name for o in mon.win_perf_counters.additional_objects}
+        for obj in additions.win_perf_counters.additional_objects:
+            if obj.object_name in known:
+                imported.warnings.append(f"perf object {obj.object_name} already carried from the managed agent; addition skipped")
+                continue
+            mon.win_perf_counters.enabled = True
+            mon.win_perf_counters.additional_objects.append(obj)
+            imported.added.append(f"win_perf_counters object {obj.object_name} (requested addition)")
+    if additions.custom_toml.strip():
+        mon.custom_toml = (mon.custom_toml.rstrip() + "\n\n" if mon.custom_toml.strip() else "") + additions.custom_toml.strip() + "\n"
+        imported.added.append("custom TOML fragment (requested addition)")
+    return imported
+
+
 def _retain(plugin: str, inst: Dict[str, Any], reason: str, result: ImportedConfig, retained: Dict[str, Any],
             source: str) -> None:
     prefix = str(inst.get("name_prefix", ""))

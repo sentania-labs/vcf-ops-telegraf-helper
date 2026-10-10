@@ -20,6 +20,7 @@ from vcf_ops_telegraf_helper.adapters.base import IntegrationArtifacts, VCFOpsIn
 from vcf_ops_telegraf_helper.logger import get_logger
 from vcf_ops_telegraf_helper.models.vcf import (
     AgentObjectInfo,
+    AgentTaskStatus,
     AuthToken,
     CollectorInfo,
     VCFEnvironment,
@@ -1232,3 +1233,62 @@ class VCF91OpenTelegrafIntegration(VCFOpsIntegration):
             if cid not in grouped:
                 targets.append(CollectorInfo(address=p.get("hostName"), display_name=p.get("name")))
         return targets
+
+    def resolve_vm_resource_id(self, vc_id: str, vm_mor: str) -> Optional[str]:
+        for res in self._fetch_paged_resources(strict=True, adapterKind="VMWARE", resourceKind="VirtualMachine"):
+            if self._is_stale(res):
+                continue
+            _, _, vcid, mor = self._extract_vm_identifiers(res)
+            if vcid == vc_id and mor == vm_mor:
+                return res.get("identifier")
+        return None
+
+    def uninstall_managed_agent(
+        self, vm_resource_id: str, guest_username: str, guest_password: str, retain_config: bool = False
+    ) -> str:
+        self._ensure_token()
+        if not self.env.token:
+            raise RuntimeError("Cannot retire the managed agent: no API token (check credentials)")
+        url = f"{self.base_url}/suite-api/api/applications/agents"
+        payload = {
+            "resourceCredentials": [
+                {"resourceId": vm_resource_id, "username": guest_username, "password": guest_password}
+            ],
+            "retainTelegrafConf": bool(retain_config),
+        }
+        headers = dict(self._api_headers(), **{"Content-Type": "application/json"})
+        resp = self.session.delete(url, json=payload, headers=headers, timeout=60)
+        if resp.status_code not in (200, 202):
+            detail = ""
+            try:
+                detail = resp.json().get("message") or resp.text[:300]
+            except Exception:
+                detail = resp.text[:300]
+            raise RuntimeError(f"VCF Operations refused the agent uninstall (HTTP {resp.status_code}): {detail}")
+        try:
+            statuses = resp.json().get("taskStatuses") or []
+        except Exception as exc:
+            raise RuntimeError("VCF Operations accepted the uninstall but returned no task status") from exc
+        for st in statuses:
+            task_id = st.get("taskID") or st.get("taskId")
+            if task_id:
+                return str(task_id)
+        raise RuntimeError("VCF Operations accepted the uninstall but returned no task id")
+
+    def get_agent_task_status(self, task_id: str) -> AgentTaskStatus:
+        self._ensure_token()
+        url = f"{self.base_url}/suite-api/api/applications/agents/{task_id}/status"
+        resp = self.session.get(url, headers=self._api_headers(), timeout=30)
+        if resp.status_code != 200:
+            raise RuntimeError(f"Agent task {task_id} status query failed with HTTP {resp.status_code}")
+        data = resp.json()
+        objects = data.get("bootstrapObjectStatuses") or []
+        first = objects[0] if objects else {}
+        messages = [str(m) for m in (first.get("messages") or [])]
+        return AgentTaskStatus(
+            task_id=str(data.get("taskId") or task_id),
+            name=data.get("name"),
+            stage=first.get("stage"),
+            messages=messages,
+            raw=data,
+        )

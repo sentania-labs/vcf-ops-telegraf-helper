@@ -38,6 +38,7 @@ from vcf_ops_telegraf_helper.validation.validator import Validator
 from vcf_ops_telegraf_helper.workflow.progress import ProgressReporter, SilentProgressReporter
 from vcf_ops_telegraf_helper.workflow.windows import (
     ManagedInstallation,
+    WindowsTelegrafDetection,
     detect_managed_installation,
     detect_windows_telegraf,
     set_windows_tags_binary,
@@ -217,12 +218,22 @@ class ConfigureEndpointWorkflow:
 
                 win_det = detect_windows_telegraf(self.executor)
                 self.managed_installation = detect_managed_installation(self.executor, win_det, read_config=False)
-                if self.managed_installation.present:
+                if not self.managed_installation.query_ok:
                     raise RuntimeError(
-                        "This agent is managed by VCF Operations "
-                        f"({', '.join(sorted(self.managed_installation.services))}). "
-                        "Use VCF Operations to manage it; helper changes are refused."
+                        "Could not query Windows services for an Ops-managed agent; refusing to continue without that answer: "
+                        + self.managed_installation.query_error
                     )
+                if self.managed_installation.present:
+                    if not self.options.allow_managed_agent:
+                        raise RuntimeError(
+                            "This agent is managed by VCF Operations "
+                            f"({', '.join(sorted(self.managed_installation.services))}). "
+                            "Use VCF Operations to manage it; helper changes are refused."
+                        )
+                    # Takeover preflight: the managed agent is about to be retired, so plan the open-source
+                    # install from scratch instead of adopting the managed binary, paths or certificates.
+                    self.reporter.on_message("Ops-managed agent present; planning the open-source install as if it were already retired")
+                    win_det = WindowsTelegrafDetection(installed=False)
                 installed = win_det.installed
                 version_str = win_det.version
                 service_state = win_det.service_state or ("Running" if win_det.running else "Stopped")
@@ -1461,34 +1472,30 @@ class ConfigureEndpointWorkflow:
         self.reporter.on_stage_complete(res)
         return res
 
-    def run(self) -> RunSummary:
-        """Execute the entire 8-stage workflow sequentially."""
-        stages = [
-            self.detect_target,
-            self.detect_telegraf,
-            self.configure_vcf_output,
-            self.render_inputs,
-            self.validate,
-            self.apply,
-            self.restart_if_needed,
-            self.verify,
-        ]
+    PREPARE_STAGES = ("detect_target", "detect_telegraf", "configure_vcf_output", "render_inputs", "validate")
+    CHANGE_STAGES = ("apply", "restart_if_needed", "verify")
 
-        overall_success = True
-        for stage_fn in stages:
-            if stage_fn == self.apply and self.preview_callback:
+    def run_stages(self, names: tuple) -> bool:
+        """Run the named stages in order, appending their results; False as soon as one fails."""
+        for name in names:
+            stage_fn = getattr(self, name)
+            if name == "apply" and self.preview_callback:
                 self.preview_callback()
             stage_res = stage_fn()
             stage_res.message = self._sanitize(stage_res.message) or ""
             stage_res.details = self._sanitize(stage_res.details)
             stage_res.command_output = self._sanitize(stage_res.command_output)
             self.stage_results.append(stage_res)
-
-            # Abort if a critical stage failed
             if stage_res.status == StageStatus.FAIL:
-                overall_success = False
-                break
+                return False
+        return True
 
+    def run(self) -> RunSummary:
+        """Execute the entire 8-stage workflow sequentially."""
+        overall_success = self.run_stages(self.PREPARE_STAGES + self.CHANGE_STAGES)
+        return self.summary(overall_success)
+
+    def summary(self, overall_success: bool) -> RunSummary:
         return RunSummary(
             target_hostname=self.target.hostname,
             vcf_environment=self.env.url,
