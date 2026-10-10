@@ -1787,6 +1787,21 @@ class MainWindow(QMainWindow):
             self._imported_base = None
             if hasattr(self, "catalog_items"):
                 self._apply_baseline_preset()
+                self._reset_workload_inputs()
+
+    def _reset_workload_inputs(self) -> None:
+        """Imported connection strings (which may carry credentials) never outlive the endpoint they came from."""
+        is_win = self.ep_os_combo.currentText().strip().lower().startswith("win") if hasattr(self, "ep_os_combo") else False
+        self.nginx_url_input.setText("http://localhost/status")
+        self.apache_url_input.setText("http://localhost/server-status?auto")
+        self.mysql_server_input.setText("tcp(127.0.0.1:3306)/")
+        self.postgres_addr_input.setText("host=localhost user=postgres sslmode=disable")
+        self.mssql_server_input.setText("Server=127.0.0.1;Port=1433;User Id=sa;Password=;app name=telegraf;log=1;")
+        self.docker_endpoint_input.setText("npipe:////./pipe/docker_engine" if is_win else "unix:///var/run/docker.sock")
+        self.ping_url_input.setText("10.10.10.1")
+        self.win_svc_names_input.setText("telegraf")
+        self.custom_toml_input.setPlainText("")
+        self._custom_toml_manually_unchecked = False
 
     def _on_takeover_toggled(self, checked: bool) -> None:
         if checked and self.managed_installation is not None:
@@ -3193,7 +3208,8 @@ class MainWindow(QMainWindow):
         dry_run = getattr(self, "dry_run_check", None) and self.dry_run_check.isChecked()
         quote = (lambda value: "'" + value.replace("'", "''") + "'") if sys.platform == "win32" else shlex.quote
         parts = ["vcf-telegraf-helper run"]
-        if self.replace_inputs_check.isChecked():
+        takeover = self._takeover_active()
+        if self.replace_inputs_check.isChecked() and not takeover:
             parts.append("--replace-inputs")
         if not env.agent_verify_ssl:
             parts.append("--no-agent-verify-ssl")
@@ -3233,10 +3249,10 @@ class MainWindow(QMainWindow):
         if target.winrm_use_ssl:
             parts.append("--winrm-ssl")
 
-        if target.install_telegraf:
+        if target.install_telegraf and not takeover:
             parts.append("--install-telegraf")
-            if target.telegraf_version and target.telegraf_version != "1.40.1":
-                parts.append(f"--telegraf-version {quote(target.telegraf_version)}")
+        if target.install_telegraf and target.telegraf_version and target.telegraf_version != "1.40.1":
+            parts.append(f"--telegraf-version {quote(target.telegraf_version)}")
 
         reg_host = getattr(target, "registered_hostname", None) or getattr(self, "discovered_hostname", None)
         if reg_host and reg_host != target.hostname:
@@ -3247,6 +3263,30 @@ class MainWindow(QMainWindow):
                 parts.append(f"--vc-id {quote(target.vc_id)}")
         if getattr(self, "selected_vm_name", None):
             parts.append(f"--vm-name {quote(self.selected_vm_name)}")
+
+        if takeover:
+            # The CLI imports the managed inputs itself and refuses input flags; only additions beyond the import travel
+            base = getattr(self, "_imported_base", None)
+            vm_label = self.bound_vm.name if self.bound_vm else (self.selected_vm_name or target.vm_mor or "")
+            parts.append("--take-over-managed-agent")
+            parts.append(f"--confirm-takeover {quote(vm_label)}")
+            for flag, plugin, value in (
+                ("--nginx", mon.nginx, mon.nginx.urls[:1]), ("--apache", mon.apache, mon.apache.urls[:1]),
+                ("--mysql", mon.mysql, mon.mysql.servers[:1]), ("--postgres", mon.postgresql, [mon.postgresql.address]),
+                ("--mssql", mon.mssql, mon.mssql.servers[:1]), ("--docker", mon.docker, [mon.docker.endpoint]),
+                ("--ping", mon.ping, mon.ping.urls[:1]),
+            ):
+                name = flag.lstrip("-").replace("postgres", "postgresql")
+                already = base is not None and getattr(base, name).enabled
+                if plugin.enabled and value and not already:
+                    parts.append(f"{flag} {quote(value[0])}")
+            known = {o.object_name for o in (base.win_perf_counters.additional_objects if base else [])}
+            for obj in mon.win_perf_counters.additional_objects:
+                if obj.object_name not in known:
+                    parts.append(f"--win-perf-object {quote(obj.model_dump_json())}")
+            if sys.platform == "win32":
+                return " ".join(parts)
+            return " \\\n  ".join(parts)
 
         if target.os_family == OSFamily.WINDOWS:
             has_win_core = mon.win_perf_counters.enabled or mon.win_os.enabled or (mon.win_services.enabled and bool(mon.win_services.service_names))
@@ -3306,11 +3346,7 @@ class MainWindow(QMainWindow):
         if mon.ping.enabled and mon.ping.urls:
             parts.append(f"--ping {quote(mon.ping.urls[0])}")
 
-        if self._takeover_active():
-            vm_label = self.bound_vm.name if self.bound_vm else (self.selected_vm_name or target.vm_mor or "")
-            parts.append("--take-over-managed-agent")
-            parts.append(f"--confirm-takeover {quote(vm_label)}")
-        elif dry_run:
+        if dry_run:
             parts.append("--dry-run")
 
         if sys.platform == "win32":

@@ -90,6 +90,19 @@ def test_gui_takeover_option_imports_inputs_and_builds_the_command(tmp_path, mon
     assert window._get_endpoint_target().install_telegraf is True
     cmd = window._build_cli_command()
     assert "--take-over-managed-agent" in cmd and "--confirm-takeover dbdemo01" in cmd and "--dry-run" not in cmd
+    # the command only carries what the CLI accepts in takeover mode: no install, input or replace flags
+    for forbidden in ("--install-telegraf", "--replace-inputs", "--win-", "--no-", "--cpu", "--mem"):
+        assert forbidden not in cmd.replace("--no-agent-verify-ssl", "").replace("--no-verify-ssl", ""), cmd
+    # an addition the operator enabled on top of the import travels as a workload flag
+    window.ping_check.setChecked(True)
+    window.ping_url_input.setText("10.0.0.9")
+    assert "--ping 10.0.0.9" in window._build_cli_command()
+    from click.testing import CliRunner
+    from vcf_ops_telegraf_helper.cli.main import cli
+    import shlex
+    args = shlex.split(window._build_cli_command().replace("\\\n", " "))[1:]
+    parsed = CliRunner().invoke(cli, args + ["--mock-vcf"])
+    assert "do not apply" not in parsed.output and "Usage:" not in parsed.output, parsed.output
 
     window._update_preview()
     plan = window.review_summary_box.toPlainText()
@@ -318,6 +331,10 @@ def test_gui_imported_inputs_do_not_leak_to_another_vm(tmp_path, monkeypatch, jo
     assert mon.mssql.enabled is False and "procstat" not in mon.custom_toml and "hunter2" not in mon.custom_toml
     assert mon.win_perf_counters.process_instances == ["_Total", "telegraf"]
     assert window.ep_uninstall_btn.isEnabled()
+    # the imported connection string (with its password) is gone from the widget too
+    assert "hunter2" not in window.mssql_server_input.text()
+    window.mssql_check.setChecked(True)
+    assert "hunter2" not in window._get_monitoring_config().mssql.servers[0]
     window.close()
 
 
@@ -398,15 +415,17 @@ def test_cli_takeover_refuses_ignored_flags_resolves_vc_id_and_exit_codes(monkey
         assert "Resolved vCenter id" in res.output and adapters[-1].uninstall_calls[0][0] == "res-vm-001"
         assert TakeoverJournal().load(VC_ID, VM_MOR).vc_id == VC_ID
 
-    # a different object: applied, labelled, exit code 3
+    # a different object: applied, labelled, exit code 3 (fresh journal: each scenario is its own VM history)
     endpoint = ManagedWindowsEndpoint()
+    monkeypatch.setattr("vcf_ops_telegraf_helper.storage.journal.DEFAULT_JOURNAL_DIR", journal_dir / "changed")
     with patch("vcf_ops_telegraf_helper.cli.main.WinRMExecutor", return_value=endpoint), \
          patch("vcf_ops_telegraf_helper.cli.main.MockVCFOpsIntegration", side_effect=lambda env: make_adapter(env, new_object=True)):
         res = CliRunner().invoke(cli, base + ["--vc-id", VC_ID])
-        assert res.exit_code == 3 and "DIFFERENT OBJECT" in res.output and "CHANGED OBJECT" in res.output
+        assert res.exit_code == 3 and "DIFFERENT OBJECT" in res.output and "CHANGED OBJECT" in res.output, res.output[-1200:]
 
     # Ops slow: applied, pending, exit 0 but not called COMPLETED
     endpoint = ManagedWindowsEndpoint()
+    monkeypatch.setattr("vcf_ops_telegraf_helper.storage.journal.DEFAULT_JOURNAL_DIR", journal_dir / "pending")
     with patch("vcf_ops_telegraf_helper.cli.main.WinRMExecutor", return_value=endpoint), \
          patch("vcf_ops_telegraf_helper.cli.main.MockVCFOpsIntegration", side_effect=lambda env: OpsWithUninstall(env, endpoint, flip_after_polls=99)):
         res = CliRunner().invoke(cli, base + ["--vc-id", VC_ID])
