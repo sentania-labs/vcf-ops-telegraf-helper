@@ -139,7 +139,7 @@ On managed Windows, the pip-generated launcher is unsigned and may be blocked by
 
 ## Documentation
 
-* [docs/agent-takeover-plan.md](docs/agent-takeover-plan.md): Planned managed-agent takeover, configuration preservation, recovery, and validation limits.
+* [docs/agent-takeover.md](docs/agent-takeover.md): Taking over an Ops-managed agent: what the helper does and refuses, the seven stages, resume, lab evidence, and the validation list for the test build.
 * [docs/architecture.md](docs/architecture.md): Architectural design, boundaries, and safety models.
 * [docs/supported-workflow.md](docs/supported-workflow.md): Detailed comparison against Broadcom's documented procedure.
 * [docs/references.md](docs/references.md): Direct links to authoritative Broadcom technical documentation.
