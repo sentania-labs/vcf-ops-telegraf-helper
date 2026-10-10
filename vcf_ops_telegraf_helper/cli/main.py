@@ -18,8 +18,10 @@ from vcf_ops_telegraf_helper.cli.display import (
     display_banner,
     display_preview,
     display_summary,
+    display_takeover_summary,
 )
 from vcf_ops_telegraf_helper.cli.wizard import run_wizard
+from vcf_ops_telegraf_helper.workflow.takeover import TakeoverOptions, TakeoverWorkflow
 from vcf_ops_telegraf_helper.executors.local import LocalExecutor
 from vcf_ops_telegraf_helper.executors.mock import MockExecutor
 from vcf_ops_telegraf_helper.executors.ssh import SSHExecutor
@@ -319,6 +321,9 @@ def resolve_monitoring_config(
 @click.option("--vm-id", default=None, help="Target vCenter virtual machine MOR (e.g. vm-1042)")
 @click.option("--vc-id", default=None, help="vCenter instance UUID for --vm-id (resolved from inventory if omitted)")
 @click.option("--force-new-cert", is_flag=True, default=False, help="Force minting a new client certificate even if existing cert is valid")
+@click.option("--take-over-managed-agent", is_flag=True, default=False, help="Retire the VCF Operations product-managed agent on the VM and replace it with open-source Telegraf (Windows, requires --vm-id)")
+@click.option("--confirm-takeover", default=None, help="Type the VM name (or MOR) to confirm the takeover; monitoring is interrupted for about 15 minutes")
+@click.option("--continuity-wait", type=int, default=900, show_default=True, help="Seconds to wait for VCF Operations to show the object as Open Source with fresh samples")
 def run_cmd(
     vcf_url: str,
     vcf_user: str,
@@ -372,12 +377,43 @@ def run_cmd(
     vm_id: Optional[str] = None,
     vc_id: Optional[str] = None,
     force_new_cert: bool = False,
+    take_over_managed_agent: bool = False,
+    confirm_takeover: Optional[str] = None,
+    continuity_wait: int = 900,
 ) -> None:
     """Execute the guided workflow via command-line options."""
     display_banner(console)
 
     if vc_id and not vm_id:
         raise click.UsageError("--vc-id requires --vm-id")
+    if take_over_managed_agent:
+        if not vm_id:
+            raise click.UsageError("--take-over-managed-agent needs the VM selected from inventory: pass --vm-id (and --vc-id)")
+        expected = [v for v in (vm_name, vm_id) if v]
+        if not confirm_takeover or confirm_takeover not in expected:
+            raise click.UsageError(
+                "--take-over-managed-agent retires the Ops-managed agent and interrupts monitoring for about 15 minutes. "
+                f"Confirm with --confirm-takeover {expected[0]}"
+            )
+        if dry_run or preview:
+            raise click.UsageError("--dry-run and --preview are not available with --take-over-managed-agent")
+        ignored = [flag for flag, given in (
+            ("--no-baseline", no_baseline), ("--cpu/--no-cpu", cpu is not None), ("--mem/--no-mem", mem is not None),
+            ("--disk/--no-disk", disk is not None), ("--net/--no-net", net is not None), ("--system/--no-system", system is not None),
+            ("--swap/--no-swap", swap is not None), ("--diskio/--no-diskio", diskio is not None),
+            ("--processes/--no-processes", processes is not None), ("--win-perf/--no-win-perf", win_perf is not None),
+            ("--win-os/--no-win-os", win_os is not None), ("--win-services", win_services is not None),
+            ("--no-win-services", no_win_services), ("--replace-inputs", replace_inputs),
+            ("--install-telegraf", install_telegraf), ("--force-new-cert", force_new_cert),
+        ) if given]
+        if ignored:
+            raise click.UsageError(
+                "With --take-over-managed-agent the imported managed configuration is the starting point and the install, "
+                "certificate and input replacement are forced on; these flags do not apply: " + ", ".join(ignored)
+                + ". Workload additions (--nginx, --apache, --mysql, --postgres, --mssql, --docker, --ping, --win-perf-object) are merged on top."
+            )
+    elif confirm_takeover:
+        raise click.UsageError("--confirm-takeover only applies with --take-over-managed-agent")
 
     conn_method = ConnectionMethod(connection)
     if target_os:
@@ -492,6 +528,50 @@ def run_cmd(
         force_new_cert=force_new_cert,
     )
 
+    vcf_env.agent_verify_ssl = agent_verify_ssl
+    if take_over_managed_agent:
+        if not target.vc_id:
+            # The takeover addresses the VM by vCenter id and MOR; resolve the id from inventory when only the MOR was given
+            matches = [vm for vm in adapter.list_virtual_machines(strict=True) if vm.vm_mor == vm_id and vm.vc_id]
+            if len(matches) != 1:
+                raise click.UsageError(
+                    f"--vm-id {vm_id} matches {len(matches)} VMs in VCF Operations inventory; pass --vc-id to choose one"
+                )
+            target.vc_id = matches[0].vc_id
+            console.print(f"Resolved vCenter id [cyan]{target.vc_id}[/cyan] for {vm_id} ({matches[0].name})")
+        # The imported managed configuration is the starting point; only workload additions are merged
+        additions = resolve_monitoring_config(
+            is_win=is_win, no_baseline=True, win_perf_object=win_perf_object, nginx=nginx, apache=apache,
+            mysql=mysql, postgres=postgres, mssql=mssql, docker=docker, ping=ping,
+        )
+        takeover = TakeoverWorkflow(
+            environment=vcf_env,
+            target=target,
+            monitoring=None,
+            executor=executor,
+            adapter=adapter,
+            takeover=TakeoverOptions(
+                confirmation_text=f"--confirm-takeover {confirm_takeover}",
+                continuity_wait_seconds=max(0, continuity_wait),
+            ),
+            options=wf_options,
+            reporter=reporter,
+            additions=additions,
+        )
+        summary = takeover.run()
+        display_takeover_summary(console, summary)
+        if export_md:
+            Path(export_md).write_text(summary.to_markdown(), encoding="utf-8")
+            console.print(f"[bold green]✓[/bold green] Markdown report written to [cyan]{export_md}[/cyan]")
+        if export_json:
+            Path(export_json).write_text(summary.to_json(), encoding="utf-8")
+            console.print(f"[bold green]✓[/bold green] JSON report written to [cyan]{export_json}[/cyan]")
+        if not summary.success:
+            sys.exit(1)
+        if any(str(v).startswith("CHANGED") for v in summary.results.values()):
+            sys.exit(3)  # applied, but Ops created a different object: history did not follow
+        return
+
     workflow = ConfigureEndpointWorkflow(
         environment=vcf_env,
         target=target,
@@ -502,7 +582,6 @@ def run_cmd(
         reporter=reporter,
     )
 
-    vcf_env.agent_verify_ssl = agent_verify_ssl
     if preview or dry_run:
         def show_prepared_preview():
             discovery = workflow.discovery

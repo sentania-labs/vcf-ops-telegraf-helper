@@ -9,6 +9,8 @@ def probe_endpoint(target, executor):
     if target.os_family == OSFamily.WINDOWS:
         found = detect_windows_telegraf(executor)
         managed = detect_managed_installation(executor, found, read_config=False)
+        if managed.present:
+            managed = detect_managed_installation(executor, found, read_config=True)
         caption = executor.execute('(Get-CimInstance Win32_OperatingSystem).Caption', timeout=10)
         hostname = executor.execute('$env:COMPUTERNAME', timeout=10)
         result = dict(installed=found.installed, version=found.version or 'N/A', running=found.running,

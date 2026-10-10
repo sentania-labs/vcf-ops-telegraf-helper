@@ -242,6 +242,13 @@ class TakeoverWorkflow:
                 raise RuntimeError("No Ops-managed agent found on this endpoint; nothing to take over.")
 
             prior_note = None
+            if previous and previous.state in ("retired", "cleaned", "installed"):
+                raise RuntimeError(
+                    f"The journal says this VM's managed agent was already retired (state {previous.state}, task "
+                    f"{previous.uninstall_task_id}), yet the managed services are present again "
+                    f"({', '.join(sorted(self.managed.services))}). Not submitting a second uninstall; reconcile in VCF Operations, "
+                    "then remove the journal record under the app's config directory to start over."
+                )
             if previous and previous.state == "retire_failed" and previous.uninstall_task_id:
                 # Never submit a second uninstall while the journaled one is unresolved
                 status = self.adapter.get_agent_task_status(previous.uninstall_task_id)
@@ -564,7 +571,10 @@ class TakeoverWorkflow:
             assert self.record is not None and self.install_workflow is not None
             ok = self.install_workflow.run_stages(ConfigureEndpointWorkflow.CHANGE_STAGES)
             self.install_summary = self.install_workflow.summary(ok)
-            self.verifications.update(self.install_summary.verifications)
+            # The continuity stage is the authority on ingestion; the inner checks would show a misleading PASS
+            self.verifications.update({
+                k: v for k, v in self.install_summary.verifications.items() if k not in ("VCF Ops ingestion", "Metrics transmission")
+            })
             installed = self.install_summary.verifications.get("Telegraf installed", "FAIL").startswith("PASS")
             service = self.install_summary.verifications.get("Service running", "FAIL").startswith("PASS")
             self.results[RESULT_INSTALL] = "PASS" if (ok or (installed and service)) else "FAIL"
