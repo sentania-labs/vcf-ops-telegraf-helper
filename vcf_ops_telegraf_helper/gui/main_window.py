@@ -1236,7 +1236,7 @@ class MainWindow(QMainWindow):
         self.ep_managed_desc = QLabel("")
         self.ep_managed_desc.setProperty("class", "lattice-muted")
         self.ep_managed_desc.setWordWrap(True)
-        self.takeover_check = QCheckBox("Take over existing Ops agent (retire it through VCF Operations and replace it with open-source Telegraf)")
+        self.takeover_check = QCheckBox("Take over existing Ops agent (replace it with open-source Telegraf)")
         self.takeover_check.setChecked(False)
         self.takeover_check.toggled.connect(self._on_takeover_toggled)
         mg_layout.addWidget(self.ep_managed_title)
@@ -1679,7 +1679,7 @@ class MainWindow(QMainWindow):
             "Taking it over retires the agent through VCF Operations, keeps the same Ops object and its history, "
             "and installs open-source Telegraf with the same inputs. Monitoring is interrupted for about 15 minutes."
         )
-        self.takeover_check.setText("Take over existing Ops agent (retire it through VCF Operations and replace it with open-source Telegraf)")
+        self.takeover_check.setText("Take over existing Ops agent (replace it with open-source Telegraf)")
         self.ep_managed_banner.setVisible(True)
         self.ep_missing_banner.setVisible(False)
         self.ep_uninstall_btn.setEnabled(False)
@@ -1708,7 +1708,7 @@ class MainWindow(QMainWindow):
             f"A takeover of this VM was journaled at {record.updated_at} and stopped after the managed agent was retired "
             f"(state: {record.state}). No agent is reporting right now. Check the box to resume from the backup under {record.backup_dir}."
         )
-        self.takeover_check.setText("Resume the interrupted takeover (install open-source Telegraf from the journaled backup)")
+        self.takeover_check.setText("Resume the interrupted takeover from the journaled backup")
         self.ep_managed_banner.setVisible(True)
         self.ep_missing_banner.setVisible(False)
         self.ep_uninstall_btn.setEnabled(True)
@@ -1848,6 +1848,15 @@ class MainWindow(QMainWindow):
             return
         active = self._takeover_active()
         self.execute_btn.setText("Execute Takeover ->" if active else "Execute Guided Workflow ->")
+        if hasattr(self, "execute_desc"):
+            self.execute_desc.setText(
+                "Execute the takeover: capture and back up the managed agent, validate the replacement, retire the agent through "
+                "VCF Operations, verify the endpoint is clean, install open-source Telegraf, then confirm the same Ops object "
+                "reports as Open Source. Four results are reported separately. You will be asked to type the VM name."
+                if active else
+                "Execute the guided 8-stage onboarding workflow. "
+                "Stage results and operational verifications are reported honestly without masking failure domains."
+            )
         self.dry_run_check.setEnabled(not active and not getattr(self, "_workflow_active", False))
         if active:
             self.dry_run_check.setChecked(False)
@@ -3007,13 +3016,13 @@ class MainWindow(QMainWindow):
         lbl.setProperty("class", "lattice-section-label")
         c_layout.addWidget(lbl)
 
-        desc = QLabel(
+        self.execute_desc = QLabel(
             "Execute the guided 8-stage onboarding workflow. "
             "Stage results and operational verifications are reported honestly without masking failure domains."
         )
-        desc.setProperty("class", "lattice-muted")
-        desc.setWordWrap(True)
-        c_layout.addWidget(desc)
+        self.execute_desc.setProperty("class", "lattice-muted")
+        self.execute_desc.setWordWrap(True)
+        c_layout.addWidget(self.execute_desc)
 
         action_row = QHBoxLayout()
         self.replace_inputs_check = QCheckBox("Replace existing helper inputs")

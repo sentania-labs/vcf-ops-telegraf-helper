@@ -152,7 +152,7 @@ def test_gui_takeover_runs_and_reports_four_results(tmp_path, monkeypatch, journ
     log = window.stage_list_box.toPlainText()
     assert "TAKEOVER RESULT: TAKEOVER COMPLETE" in log
     # every takeover stage and every inner configure stage is logged by name
-    for marker in ("[1/6 Capturing", "[3/6 Retiring", "[6/6 Verifying object continuity", "[8/8 Verifying]"):
+    for marker in ("[1/7 Capturing", "[3/7 Preparing", "[4/7 Retiring", "[7/7 Verifying object continuity", "[8/8 Verifying]"):
         assert marker in log, log
     assert window.preview_system_box.toPlainText().count("[[inputs.win_perf_counters]]") == 1
     for name in ("Managed agent retirement", "Open-source Telegraf installation", "Registration on the same Ops object", "Fresh metric ingestion"):
