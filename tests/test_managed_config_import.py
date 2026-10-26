@@ -317,6 +317,46 @@ def test_workflow_renders_exec_without_argument_and_patches_the_script():
     assert f'set TELEGRAF_BIN_PATH="{wf.discovery.telegraf_bin_path}"' in wf.artifacts.mandatory_tags_content
 
 
+def test_tags_script_default_survives_a_repeated_render():
+    """Issue #62: re-rendering (a second enrollment or a preview) must not add default lines or quotes."""
+    from test_workflow import _create_test_workflow
+    from vcf_ops_telegraf_helper.models.endpoint import OSFamily
+
+    wf = _create_test_workflow()
+    wf.target.os_family = OSFamily.WINDOWS
+    wf.detect_telegraf()
+    wf.configure_vcf_output()
+    wf.artifacts.mandatory_tags_content = VCF91OpenTelegrafIntegration._get_windows_mandatory_tag_script()
+    bin_path = wf.discovery.telegraf_bin_path
+
+    wf.render_inputs()
+    once = wf.artifacts.mandatory_tags_content
+    wf.render_inputs()
+    twice = wf.artifacts.mandatory_tags_content
+
+    assert once == twice
+    assert once.count(f'set TELEGRAF_BIN_PATH="{bin_path}"') == 1
+    # the %~1 override line is untouched, so the script still has exactly two assignments
+    assert twice.count("set TELEGRAF_BIN_PATH=") == 2
+    assert twice.count(f'set TELEGRAF_BIN_PATH="{bin_path}"') == 1
+
+
+def test_windows_tags_default_follows_a_moved_binary():
+    """The script's default must track the detected binary, including a custom install directory."""
+    from vcf_ops_telegraf_helper.workflow.windows import set_windows_tags_binary
+
+    own = VCF91OpenTelegrafIntegration._get_windows_mandatory_tag_script()
+    first = set_windows_tags_binary(own, r"C:\Program Files\Telegraf\telegraf.exe")
+    assert 'set TELEGRAF_BIN_PATH="C:\\Program Files\\Telegraf\\telegraf.exe"' in first
+    assert 'set TELEGRAF_BIN_PATH="C:\\telegraf\\telegraf.exe"' not in first
+    # a later enrollment on a host whose binary moved replaces the value in place, one line only
+    second = set_windows_tags_binary(first, r"D:\Tools\Telegraf\telegraf.exe")
+    assert 'set TELEGRAF_BIN_PATH="D:\\Tools\\Telegraf\\telegraf.exe"' in second
+    assert second.count('set TELEGRAF_BIN_PATH="D:\\Tools\\Telegraf\\telegraf.exe"') == 1
+    assert second.count("set TELEGRAF_BIN_PATH=") == first.count("set TELEGRAF_BIN_PATH=")
+    assert 'set TELEGRAF_BIN_PATH="C:\\Program Files\\Telegraf\\telegraf.exe"' not in second
+
+
 def test_windows_exec_line_is_quoted_and_passes_no_argument():
     out = TelegrafRenderer.render_vcf_output(
         collector_address="172.27.8.54", hostname="tg-w22-01", vm_mor="vm-6068", vc_id="vc",
