@@ -460,6 +460,9 @@ class MainWindow(QMainWindow):
 
         # Content area: left sidebar navigation, right step stack
         body_layout = QHBoxLayout()
+        # Attach sublayouts before populating them. PySide6 6.12 no longer
+        # transfers existing children's Python ownership when adding a layout.
+        main_layout.addLayout(body_layout, 1)
         body_layout.setContentsMargins(0, 0, 0, 0)
         body_layout.setSpacing(0)
 
@@ -512,7 +515,6 @@ class MainWindow(QMainWindow):
             chk.toggled.connect(lambda _: self._refresh_step_gating())
 
         body_layout.addWidget(self.page_stack, 1)
-        main_layout.addLayout(body_layout, 1)
         self._refresh_step_gating()
 
     def _on_step_changed(self, row: int) -> None:
@@ -680,6 +682,7 @@ class MainWindow(QMainWindow):
         c_layout.addWidget(desc)
 
         grid = QGridLayout()
+        c_layout.addLayout(grid)
         grid.setSpacing(10)
 
         grid.addWidget(QLabel("VCF Operations URL:"), 0, 0)
@@ -722,7 +725,6 @@ class MainWindow(QMainWindow):
         grid.addWidget(self.vcf_auth_source_label, 5, 0)
         grid.addWidget(self.vcf_auth_source_combo, 5, 1)
 
-        c_layout.addLayout(grid)
         self._update_vcf_auth_visibility()
 
         self.vcf_ssl_check = QCheckBox("Verify desktop TLS to VCF Operations")
@@ -750,6 +752,7 @@ class MainWindow(QMainWindow):
         c_layout.addWidget(self.vcf_ca_widget)
 
         test_row = QHBoxLayout()
+        c_layout.addLayout(test_row)
         self.test_vcf_btn = QPushButton("Validate VCF Connection")
         self.test_vcf_btn.clicked.connect(self._test_vcf_connection)
         test_row.addWidget(self.test_vcf_btn)
@@ -758,7 +761,6 @@ class MainWindow(QMainWindow):
         self.vcf_status_label.setProperty("class", "lattice-caption")
         test_row.addWidget(self.vcf_status_label)
         test_row.addStretch()
-        c_layout.addLayout(test_row)
 
         for w in (self.vcf_url_input, self.vcf_token_input, self.vcf_user_input, self.vcf_pass_input, self.vcf_ca_input):
             w.textChanged.connect(self._invalidate_vcf_connection)
@@ -896,6 +898,7 @@ class MainWindow(QMainWindow):
         c_layout.addWidget(desc)
 
         filter_row = QHBoxLayout()
+        c_layout.addLayout(filter_row)
         filter_row.setSpacing(8)
 
         self.vm_search_input = QLineEdit()
@@ -917,6 +920,7 @@ class MainWindow(QMainWindow):
         self.vm_show_off_check.setChecked(False)
         self.vm_show_off_check.toggled.connect(self._filter_vm_table)
         secondary_filter_row = QHBoxLayout()
+        c_layout.addLayout(secondary_filter_row)
         secondary_filter_row.addWidget(self.vm_show_off_check)
 
         self.fetch_vms_btn = QPushButton("Refresh")
@@ -928,8 +932,6 @@ class MainWindow(QMainWindow):
         self.vm_count_label.setProperty("class", "lattice-caption")
         secondary_filter_row.addWidget(self.vm_count_label)
 
-        c_layout.addLayout(filter_row)
-        c_layout.addLayout(secondary_filter_row)
         self.vm_status_filter.blockSignals(True)
         self.vm_status_filter.setCurrentText("All Agent States")
         self.vm_status_filter.blockSignals(False)
@@ -1134,6 +1136,7 @@ class MainWindow(QMainWindow):
         c_layout.addWidget(self.target_summary_label)
 
         grid = QGridLayout()
+        c_layout.addLayout(grid)
         grid.setSpacing(10)
 
         grid.addWidget(QLabel("Target OS:"), 0, 0)
@@ -1176,12 +1179,12 @@ class MainWindow(QMainWindow):
         self.ep_pass_input.setEchoMode(QLineEdit.Password)
         grid.addWidget(self.ep_pass_label, 4, 0)
         credential_row = QHBoxLayout()
+        grid.addLayout(credential_row, 4, 1)
         credential_row.addWidget(self.ep_pass_input)
         self.ep_key_browse_btn = QPushButton("Browse...")
         self.ep_key_browse_btn.clicked.connect(self._browse_ssh_key)
         self.ep_key_browse_btn.setVisible(False)
         credential_row.addWidget(self.ep_key_browse_btn)
-        grid.addLayout(credential_row, 4, 1)
 
         self.ep_winrm_ssl_check = QCheckBox("Use HTTPS for WinRM (port 5986)")
         self.ep_winrm_ssl_check.setChecked(False)
@@ -1224,7 +1227,6 @@ class MainWindow(QMainWindow):
         grid.addWidget(self.ep_port_label, 9, 0)
         grid.addWidget(self.ep_port_input, 9, 1)
 
-        c_layout.addLayout(grid)
         self._update_auth_and_endpoint_visibility()
 
         self.ep_missing_banner = QFrame()
@@ -1272,6 +1274,7 @@ class MainWindow(QMainWindow):
         c_layout.addWidget(self.ep_managed_banner)
 
         det_row = QHBoxLayout()
+        c_layout.addLayout(det_row)
         self.detect_ep_btn = QPushButton("Detect Endpoint")
         self.detect_ep_btn.clicked.connect(self._detect_endpoint)
         det_row.addWidget(self.detect_ep_btn)
@@ -1285,7 +1288,6 @@ class MainWindow(QMainWindow):
         self.ep_status_label.setProperty("class", "lattice-caption")
         det_row.addWidget(self.ep_status_label)
         det_row.addStretch()
-        c_layout.addLayout(det_row)
 
         self.ep_details_box = QPlainTextEdit()
         self.ep_details_box.setProperty("class", "code-block")
@@ -2069,6 +2071,7 @@ class MainWindow(QMainWindow):
 
         # Preset buttons toolbar
         preset_row = QHBoxLayout()
+        c_layout.addLayout(preset_row)
         preset_lbl = QLabel("PRESETS:")
         preset_lbl.setProperty("class", "lattice-caption")
         preset_row.addWidget(preset_lbl)
@@ -2086,7 +2089,6 @@ class MainWindow(QMainWindow):
         preset_row.addWidget(self.btn_preset_clear)
 
         preset_row.addStretch()
-        c_layout.addLayout(preset_row)
 
         # Checkboxes for each plugin
         self.cpu_check = QCheckBox("Enable CPU Metrics")
@@ -2186,6 +2188,7 @@ class MainWindow(QMainWindow):
 
         # Two-pane container
         pane_layout = QVBoxLayout()
+        c_layout.addLayout(pane_layout)
         pane_layout.setSpacing(12)
 
         # Left pane: Catalog list
@@ -2460,8 +2463,6 @@ class MainWindow(QMainWindow):
         if is_win and self.docker_endpoint_input.text().strip() in ("", "unix:///var/run/docker.sock"):
             self.docker_endpoint_input.setText("npipe:////./pipe/docker_engine")
 
-        c_layout.addLayout(pane_layout)
-
         layout.addWidget(card)
         layout.addStretch()
 
@@ -2491,6 +2492,7 @@ class MainWindow(QMainWindow):
         layout.setSpacing(10)
 
         header_row = QHBoxLayout()
+        layout.addLayout(header_row)
         cat_badge = QLabel(f"[{category.upper()}]")
         cat_badge.setProperty("class", "lattice-caption")
         cat_badge.setStyleSheet("color: #3987e5; font-weight: 600;")
@@ -2501,7 +2503,6 @@ class MainWindow(QMainWindow):
         card_title.setWordWrap(True)
         header_row.addWidget(card_title)
         header_row.addStretch()
-        layout.addLayout(header_row)
 
         layout.addWidget(checkbox)
 
@@ -3109,13 +3110,14 @@ class MainWindow(QMainWindow):
         self.execute_desc.setWordWrap(True)
         c_layout.addWidget(self.execute_desc)
 
-        action_row = QHBoxLayout()
         self.replace_inputs_check = QCheckBox("Replace existing helper inputs")
         self.replace_inputs_check.setToolTip("Unchecked preserves deployed helper inputs; other fragments are always retained.")
         c_layout.addWidget(self.replace_inputs_check)
         self.result_banner = QLabel()
         self.result_banner.setWordWrap(True)
         c_layout.addWidget(self.result_banner)
+        action_row = QHBoxLayout()
+        c_layout.addLayout(action_row)
         self.dry_run_check = QCheckBox("Dry-run (no endpoint changes)")
         action_row.addWidget(self.dry_run_check)
 
@@ -3130,8 +3132,6 @@ class MainWindow(QMainWindow):
         self.export_json_btn.setEnabled(False)
         self.export_json_btn.clicked.connect(self._export_json)
         action_row.addWidget(self.export_json_btn)
-
-        c_layout.addLayout(action_row)
 
         # Stage list box
         stg_lbl = QLabel("STAGE PROGRESS")
@@ -3150,6 +3150,7 @@ class MainWindow(QMainWindow):
         c_layout.addWidget(cli_lbl)
 
         cli_header_row = QHBoxLayout()
+        c_layout.addLayout(cli_header_row)
         cli_desc = QLabel("Command-line invocation to repeat this exact onboarding workflow from CLI or scripts:")
         cli_desc.setProperty("class", "lattice-muted")
         cli_desc.setWordWrap(True)
@@ -3160,7 +3161,6 @@ class MainWindow(QMainWindow):
         self.copy_cli_btn.setProperty("class", "secondary")
         self.copy_cli_btn.clicked.connect(self._copy_cli_command)
         cli_header_row.addWidget(self.copy_cli_btn)
-        c_layout.addLayout(cli_header_row)
 
         self.cli_command_box = QPlainTextEdit()
         self.cli_command_box.setProperty("class", "code-block")

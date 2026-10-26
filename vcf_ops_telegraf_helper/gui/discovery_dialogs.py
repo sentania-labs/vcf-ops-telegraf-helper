@@ -71,6 +71,7 @@ class ServicesDiscoveryDialog(QDialog):
 
         # Search filter and bulk buttons
         ctrl_row = QHBoxLayout()
+        layout.addLayout(ctrl_row)
         self.search_input = QLineEdit()
         self.search_input.setPlaceholderText("Filter services by name or description...")
         self.search_input.textChanged.connect(self._filter_table)
@@ -91,8 +92,6 @@ class ServicesDiscoveryDialog(QDialog):
         btn_clear.clicked.connect(self._clear_all)
         ctrl_row.addWidget(btn_clear)
 
-        layout.addLayout(ctrl_row)
-
         # Table
         self.table = QTableWidget()
         self.table.setColumnCount(4)
@@ -109,6 +108,7 @@ class ServicesDiscoveryDialog(QDialog):
 
         # Bottom summary and actions
         bottom_row = QHBoxLayout()
+        layout.addLayout(bottom_row)
         self.count_label = QLabel(f"Total services: {len(self.services)}")
         self.count_label.setProperty("class", "lattice-caption")
         bottom_row.addWidget(self.count_label)
@@ -120,8 +120,6 @@ class ServicesDiscoveryDialog(QDialog):
         btns.accepted.connect(self._on_accept)
         btns.rejected.connect(self.reject)
         bottom_row.addWidget(btns)
-
-        layout.addLayout(bottom_row)
 
     def _populate_table(self, services: List[DiscoveredService]) -> None:
         self.table.setRowCount(len(services))
@@ -245,6 +243,7 @@ class PerfmonDiscoveryDialog(QDialog):
         self._populate_table(self.counter_sets)
 
         bottom_row = QHBoxLayout()
+        layout.addLayout(bottom_row)
         self.count_label = QLabel(f"Total sets: {len(self.counter_sets)}")
         self.count_label.setProperty("class", "lattice-caption")
         bottom_row.addWidget(self.count_label)
@@ -256,8 +255,6 @@ class PerfmonDiscoveryDialog(QDialog):
         btns.accepted.connect(self._on_accept)
         btns.rejected.connect(self.reject)
         bottom_row.addWidget(btns)
-
-        layout.addLayout(bottom_row)
 
     def _populate_table(self, sets: List[DiscoveredPerfmonSet]) -> None:
         self.table.setRowCount(len(sets))
@@ -359,6 +356,7 @@ class DatabaseDiscoveryDialog(QDialog):
         self._populate_table(self.databases)
 
         bottom_row = QHBoxLayout()
+        layout.addLayout(bottom_row)
         self.count_label = QLabel(f"Total databases: {len(self.databases)}")
         self.count_label.setProperty("class", "lattice-caption")
         bottom_row.addWidget(self.count_label)
@@ -370,8 +368,6 @@ class DatabaseDiscoveryDialog(QDialog):
         btns.accepted.connect(self._on_accept)
         btns.rejected.connect(self.reject)
         bottom_row.addWidget(btns)
-
-        layout.addLayout(bottom_row)
 
     def _populate_table(self, databases: List[DiscoveredDatabase]) -> None:
         self.table.setRowCount(len(databases))
@@ -464,6 +460,7 @@ class DatabaseConnectDialog(QDialog):
 
         # Fields
         form = QGridLayout()
+        layout.addLayout(form)
         form.setSpacing(10)
 
         form.addWidget(QLabel("Port:"), 0, 0)
@@ -482,9 +479,9 @@ class DatabaseConnectDialog(QDialog):
             self.radio_integrated.toggled.connect(self._on_auth_toggled)
             self.radio_sql.toggled.connect(self._on_auth_toggled)
             radio_box = QVBoxLayout()
+            form.addLayout(radio_box, row, 1)
             radio_box.addWidget(self.radio_integrated)
             radio_box.addWidget(self.radio_sql)
-            form.addLayout(radio_box, row, 1)
             row += 1
         elif self.engine_name in ("postgresql", "postgres"):
             form.addWidget(QLabel("Authentication:"), row, 0)
@@ -497,9 +494,9 @@ class DatabaseConnectDialog(QDialog):
             self.radio_peer.toggled.connect(self._on_auth_toggled)
             self.radio_pw.toggled.connect(self._on_auth_toggled)
             radio_box = QVBoxLayout()
+            form.addLayout(radio_box, row, 1)
             radio_box.addWidget(self.radio_peer)
             radio_box.addWidget(self.radio_pw)
-            form.addLayout(radio_box, row, 1)
             row += 1
 
         self.user_lbl = QLabel("Username:")
@@ -527,7 +524,6 @@ class DatabaseConnectDialog(QDialog):
         form.addWidget(self.pass_lbl, row, 0)
         form.addWidget(self.pass_input, row, 1)
 
-        layout.addLayout(form)
         layout.addStretch()
 
         btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
