@@ -24,7 +24,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-gui = ["PySide6>=6.7.2,<6.12"]  # 6.12.0 aborts at interpreter exit (pure virtual method called); see the tracking issue
+gui = ["PySide6>=6.7.2,<6.12"]  # Retain until the #64 layout ownership fix has frozen Windows/macOS exit evidence.
 
 [project.scripts]
 vcf-telegraf-helper = "vcf_ops_telegraf_helper.cli.main:cli"
