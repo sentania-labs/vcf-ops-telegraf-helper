@@ -914,6 +914,36 @@ def test_main_window_inventory_error_is_shown_not_empty(qapp, tmp_path, monkeypa
     assert "503" in window.vm_count_label.text()
 
 
+def test_main_window_collector_error_is_shown_not_none_found(qapp, tmp_path, monkeypatch):
+    """A failed or unrecognised collector query sets an error placeholder on the dropdown rather than claiming none exist."""
+    from vcf_ops_telegraf_helper.adapters.vcf91 import VCF91OpenTelegrafIntegration
+    from test_adapters import _ops8_suite_api, _patched_api
+
+    window = _mock_window(qapp, tmp_path, monkeypatch)
+    env = window._get_vcf_env()
+    env.token = "ops8-token"
+    ops8_adapter = VCF91OpenTelegrafIntegration(env, session=_ops8_suite_api())
+    window._load_collector_targets(ops8_adapter)
+    assert window.ep_collector_combo.count() == 4
+    labels = [window.ep_collector_combo.itemText(i) for i in range(window.ep_collector_combo.count())]
+    assert labels == [
+        "Collector group: Ops8 HA Proxy Group (virtual IP 198.51.100.30)",
+        "Cloud proxy: Cloud Proxy-cp8-01 (198.51.100.31) in Ops8 HA Proxy Group",
+        "Cloud proxy: Cloud Proxy-cp8-02 (198.51.100.32) in Ops8 HA Proxy Group",
+        "Cloud proxy: Cloud Proxy-standalone (198.51.100.33)",
+    ]
+
+    bad_adapter = VCF91OpenTelegrafIntegration(
+        env,
+        session=_patched_api({"/collectors": (200, {"unexpectedShape": []})}),
+    )
+    window._load_collector_targets(bad_adapter)
+    assert window.ep_collector_combo.count() == 0
+    assert "Could not load cloud proxies:" in window.ep_collector_combo.placeholderText()
+    assert "unrecognised response keys" in window.ep_collector_combo.placeholderText()
+
+
+
 def test_main_window_rejected_credentials_do_not_unlock(qapp, tmp_path, monkeypatch):
     """A reachable instance that rejects the credentials leaves Step 2 locked."""
     from vcf_ops_telegraf_helper.adapters.mock import MockVCFOpsIntegration

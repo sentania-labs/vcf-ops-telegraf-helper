@@ -893,3 +893,188 @@ def test_vcf91_list_auth_sources_unauthenticated():
     session.get.return_value = MagicMock(status_code=500)
     assert adapter.list_auth_sources() == []
 
+
+def _ops8_suite_api():
+    """Session whose GET answers mirror VCF Operations 8.x Suite API response shapes."""
+    vms = [_vm_res("r-win", "win-app01", "vm-201", "vc-1")]
+    props = {
+        "r-win": {
+            "summary|runtime|powerState": "Powered On",
+            "summary|config|isTemplate": "false",
+            "summary|guest|ipAddress": "192.168.10.25",
+            "summary|guest|hostName": "win-app01.corp.local",
+            "config|guestFullName": "Microsoft Windows Server 2022 (64-bit)",
+        },
+    }
+    agents = [{
+        "identifier": "a-1",
+        "resourceKey": {
+            "name": "Windows OS on win-app01",
+            "resourceKindKey": "win",
+            "resourceIdentifiers": [
+                {"identifierType": {"name": "VCID"}, "value": "vc-1"},
+                {"identifierType": {"name": "VMMOR"}, "value": "vm-201"},
+            ],
+        },
+        "resourceStatusStates": [{"resourceState": "STARTED", "resourceStatus": "DATA_RECEIVING", "adapterInstanceId": "ai-8"}],
+    }]
+
+    def _resp(payload, code=200):
+        r = MagicMock()
+        r.status_code = code
+        r.json.return_value = payload
+        r.text = ""
+        return r
+
+    def get(url, headers=None, params=None, timeout=None):
+        if url.endswith("/resources/properties"):
+            ids = [v for k, v in params if k == "resourceId"]
+            return _resp({"resourcePropertiesList": [
+                {"resourceId": i, "property": [{"name": k, "value": v} for k, v in props.get(i, {}).items()]} for i in ids
+            ]})
+        if url.endswith("/resources") and (params or {}).get("adapterKind") == "APPOSUCP":
+            return _resp({"resourceList": agents, "pageInfo": {"totalCount": len(agents)}})
+        if url.endswith("/resources"):
+            return _resp({"resourceList": vms, "pageInfo": {"totalCount": len(vms)}})
+        if url.endswith("/adapters"):
+            return _resp({"adapterInstancesInfoDto": [{"id": "ai-8", "collectorId": 6}]})
+        if url.endswith("/collectors"):
+            # Ops 8.x: cloud proxies report type="CLOUD_PROXY"; cluster nodes report INTERNAL; legacy remote collectors report REMOTE
+            return _resp({
+                "collector": [
+                    {
+                        "id": "1",
+                        "name": "vRealize Operations Manager Collector-ops8-node01",
+                        "hostName": "198.51.100.10",
+                        "state": "UP",
+                        "type": "INTERNAL",
+                        "local": True,
+                        "nodeIdentifier": "00000000-0000-0000-0000-000000000001",
+                        "uuId": "00000000-0000-0000-0000-000000000011",
+                    },
+                    {
+                        "id": "5",
+                        "name": "Remote Collector-rc01",
+                        "hostName": "198.51.100.20",
+                        "state": "UP",
+                        "type": "REMOTE",
+                        "local": False,
+                        "nodeIdentifier": "00000000-0000-0000-0000-000000000005",
+                        "uuId": "00000000-0000-0000-0000-000000000015",
+                    },
+                    {
+                        "id": "6",
+                        "name": "Cloud Proxy-cp8-01",
+                        "hostName": "198.51.100.31",
+                        "state": "UP",
+                        "type": "CLOUD_PROXY",
+                        "local": False,
+                        "nodeIdentifier": "00000000-0000-0000-0000-000000000006",
+                        "uuId": "00000000-0000-0000-0000-000000000016",
+                    },
+                    {
+                        "id": "7",
+                        "name": "Cloud Proxy-cp8-02",
+                        "hostName": "198.51.100.32",
+                        "state": "UP",
+                        "type": "CLOUD_PROXY",
+                        "local": False,
+                        "nodeIdentifier": "00000000-0000-0000-0000-000000000007",
+                        "uuId": "00000000-0000-0000-0000-000000000017",
+                    },
+                    {
+                        "id": "8",
+                        "name": "Cloud Proxy-standalone",
+                        "ipAddress": "198.51.100.33",
+                        "state": "UP",
+                        "type": "CLOUD_PROXY",
+                        "local": False,
+                        "nodeIdentifier": "00000000-0000-0000-0000-000000000008",
+                        "uuId": "00000000-0000-0000-0000-000000000018",
+                    },
+                ]
+            })
+        if url.endswith("/collectorGroups"):
+            # Ops 8.x endpoint path is lowercase /suite-api/api/collectorgroups
+            return _resp({"message": "Not Found"}, code=404)
+        if url.endswith("/collectorgroups"):
+            return _resp({
+                "collectorGroups": [
+                    {
+                        "id": "11111111-2222-3333-4444-555555555555",
+                        "name": "Ops8 HA Proxy Group",
+                        "description": "Cloud proxy group with HA VIP",
+                        "collectorIds": [6, 7],
+                        "systemDefined": False,
+                        "virtualIP": "198.51.100.30",
+                    },
+                    {
+                        "id": "00000000-0000-0000-0000-000000000000",
+                        "name": "Default collector group",
+                        "collectorIds": [1, 5],
+                        "systemDefined": True,
+                    },
+                ]
+            })
+        raise AssertionError(f"unexpected GET {url}")
+
+    session = MagicMock(spec=requests.Session)
+    session.get.side_effect = get
+    return session
+
+
+def test_vcf91_ops8_cloud_proxy_and_collector_group_discovery():
+    """VCF Operations 8.x CLOUD_PROXY collectors and collectorIds groups populate collector targets and VM agent mappings."""
+    adapter = VCF91OpenTelegrafIntegration(_api_env(), session=_ops8_suite_api())
+    targets = [(t.address, t.name, t.is_collector_group, t.display_name) for t in adapter.list_collector_targets()]
+    assert targets == [
+        ("198.51.100.30", "Ops8 HA Proxy Group", True, None),
+        ("198.51.100.31", "Ops8 HA Proxy Group", False, "Cloud Proxy-cp8-01"),
+        ("198.51.100.32", "Ops8 HA Proxy Group", False, "Cloud Proxy-cp8-02"),
+        ("198.51.100.33", None, False, "Cloud Proxy-standalone"),
+    ]
+
+    vms = adapter.list_virtual_machines(strict=True)
+    assert len(vms) == 1
+    assert vms[0].collector_address == "198.51.100.31"
+    assert vms[0].collector_group == "Ops8 HA Proxy Group"
+
+    # Resolving a member proxy IP to its group name works when the group uses collectorIds
+    adapter.env.collector = CollectorInfo(address="198.51.100.31")
+    assert adapter.resolve_collector_group_name("198.51.100.31") == "Ops8 HA Proxy Group"
+
+
+def test_vcf91_unrecognised_collector_or_group_shape_raises_in_strict_mode():
+    """An unrecognised JSON payload shape raises a descriptive error instead of pretending no proxies exist."""
+    import pytest
+
+    adapter = VCF91OpenTelegrafIntegration(
+        _api_env(),
+        session=_patched_api({"/collectors": (200, {"unexpectedKey": [{"id": "1"}]})}),
+    )
+    with pytest.raises(RuntimeError, match="unrecognised response keys"):
+        adapter.list_collector_targets()
+
+    adapter_groups = VCF91OpenTelegrafIntegration(
+        _api_env(),
+        session=_patched_api({
+            "/collectorGroups": (200, {"unexpectedGroupKey": []}),
+            "/collectorgroups": (200, {"unexpectedGroupKey": []}),
+        }),
+    )
+    with pytest.raises(RuntimeError, match="unrecognised response keys"):
+        adapter_groups.list_collector_targets()
+
+
+def test_vcf91_empty_collector_response_with_valid_key_returns_empty():
+    """A valid response with an empty collector list returns [] without raising."""
+    adapter = VCF91OpenTelegrafIntegration(
+        _api_env(),
+        session=_patched_api({
+            "/collectors": (200, {"collector": []}),
+            "/collectorGroups": (200, {"collectorGroups": []}),
+        }),
+    )
+    assert adapter.list_collector_targets() == []
+
+

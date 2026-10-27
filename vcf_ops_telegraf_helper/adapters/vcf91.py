@@ -304,10 +304,48 @@ class VCF91OpenTelegrafIntegration(VCFOpsIntegration):
             return True, vm_name or res_key.get("name"), vcid, vm_mor
         return False, None, None, None
 
+    _CLOUD_PROXY_TYPES = frozenset({"CLOUD_PROXY", "UNIFIED_CLOUD_PROXY"})
+
+    @classmethod
+    def _is_cloud_proxy(cls, collector: Dict[str, Any]) -> bool:
+        ctype = str(collector.get("type") or "").strip().upper()
+        return ctype in cls._CLOUD_PROXY_TYPES
+
+    @staticmethod
+    def _collector_address(collector: Dict[str, Any]) -> Optional[str]:
+        for key in ("hostName", "ipAddress", "address"):
+            val = collector.get(key)
+            if val is not None and str(val).strip():
+                return str(val).strip()
+        return None
+
+    @staticmethod
+    def _group_collector_ids(group: Dict[str, Any]) -> List[str]:
+        raw = group.get("collectorId")
+        if raw is None:
+            raw = group.get("collectorIds")
+        if isinstance(raw, list):
+            return [str(cid).strip() for cid in raw if cid is not None and str(cid).strip()]
+        if raw is not None and not isinstance(raw, (dict, bool)) and str(raw).strip():
+            return [str(raw).strip()]
+        nodes = group.get("nodes")
+        if isinstance(nodes, list):
+            ids: List[str] = []
+            for node in nodes:
+                if not isinstance(node, dict):
+                    continue
+                props = node.get("properties") if isinstance(node.get("properties"), dict) else {}
+                cid = node.get("id") if node.get("id") is not None else props.get("collectorId")
+                if cid is not None and str(cid).strip():
+                    ids.append(str(cid).strip())
+            return ids
+        return []
+
     def get_collector_groups(self, strict: bool = False) -> List[Dict[str, Any]]:
         """Retrieve list of collector groups from VCF Operations Suite API.
 
-        With strict=True a failed query raises instead of looking like an empty list.
+        With strict=True a failed query or unrecognised response shape raises instead of
+        looking like an empty list.
         """
         if not self.env.token:
             if strict:
@@ -318,33 +356,69 @@ class VCF91OpenTelegrafIntegration(VCFOpsIntegration):
             "Accept": "application/json",
             "Authorization": f"vRealizeOpsToken {self.env.token}",
         }
+        last_reason: Optional[str] = None
         for endpoint in ("/suite-api/api/collectorGroups", "/suite-api/api/collectorgroups"):
             try:
                 resp = self.session.get(f"{self.base_url}{endpoint}", headers=headers, timeout=10)
-                if resp.status_code == 200:
-                    data = resp.json()
-                    groups = data.get("collectorGroup", []) or data.get("collectorGroups", [])
-                    if isinstance(groups, list):
-                        return groups
-                    elif isinstance(groups, dict):
-                        return [groups]
-                else:
-                    logger.warning(
-                        "Collector groups query to %s returned HTTP %d: %s",
-                        endpoint,
-                        resp.status_code,
-                        resp.text,
-                    )
             except Exception as e:
+                last_reason = f"{endpoint} failed: {e}"
                 logger.warning("Failed querying collector groups at %s: %s", endpoint, e)
+                continue
+            if resp.status_code != 200:
+                last_reason = f"{endpoint} returned HTTP {resp.status_code}"
+                logger.warning(
+                    "Collector groups query to %s returned HTTP %d: %s",
+                    endpoint,
+                    resp.status_code,
+                    resp.text,
+                )
+                continue
+            try:
+                data = resp.json()
+            except Exception as e:
+                last_reason = f"{endpoint} returned invalid JSON: {e}"
+                logger.warning("Collector groups query to %s returned invalid JSON: %s", endpoint, e)
+                continue
+            if not isinstance(data, dict):
+                last_reason = f"{endpoint} returned unexpected JSON type {type(data).__name__}"
+                logger.warning("Collector groups query to %s returned non-object JSON: %r", endpoint, data)
+                continue
+            groups_val = None
+            has_key = False
+            for key in ("collectorGroup", "collectorGroups", "collector-group", "collector-groups"):
+                if key in data:
+                    has_key = True
+                    groups_val = data[key]
+                    if groups_val:
+                        break
+            if isinstance(groups_val, list):
+                if all(isinstance(g, dict) for g in groups_val):
+                    return groups_val
+                last_reason = f"{endpoint} returned non-object entries in collector group list"
+                logger.warning("Collector groups query to %s returned invalid group items: %r", endpoint, groups_val)
+                continue
+            if isinstance(groups_val, dict):
+                return [groups_val]
+            if has_key and groups_val is None:
+                return []
+            if not data or set(data.keys()) <= {"pageInfo", "links"}:
+                return []
+            last_reason = f"{endpoint} returned unrecognised response keys {sorted(data.keys())}"
+            logger.warning(
+                "Collector groups query to %s returned unrecognised response shape (keys=%s)",
+                endpoint,
+                sorted(data.keys()),
+            )
         if strict:
-            raise RuntimeError("VCF Operations collector group query failed (see log for details)")
+            detail = f": {last_reason}" if last_reason else " (see log for details)"
+            raise RuntimeError(f"VCF Operations collector group query failed{detail}")
         return []
 
     def get_collectors(self, strict: bool = False) -> List[Dict[str, Any]]:
         """Retrieve list of collectors from VCF Operations Suite API.
 
-        With strict=True a failed query raises instead of looking like an empty list.
+        With strict=True a failed query or unrecognised response shape raises instead of
+        looking like an empty list.
         """
         if not self.env.token:
             if strict:
@@ -355,21 +429,56 @@ class VCF91OpenTelegrafIntegration(VCFOpsIntegration):
             "Accept": "application/json",
             "Authorization": f"vRealizeOpsToken {self.env.token}",
         }
+        endpoint = "/suite-api/api/collectors"
+        last_reason: Optional[str] = None
         try:
-            resp = self.session.get(f"{self.base_url}/suite-api/api/collectors", headers=headers, timeout=10)
-            if resp.status_code == 200:
-                data = resp.json()
-                collectors = data.get("collector", []) or data.get("collectors", [])
-                if isinstance(collectors, list):
-                    return collectors
-                elif isinstance(collectors, dict):
-                    return [collectors]
-            else:
+            resp = self.session.get(f"{self.base_url}{endpoint}", headers=headers, timeout=10)
+            if resp.status_code != 200:
+                last_reason = f"{endpoint} returned HTTP {resp.status_code}"
                 logger.warning("Collectors query returned HTTP %d: %s", resp.status_code, resp.text)
+            else:
+                try:
+                    data = resp.json()
+                except Exception as e:
+                    last_reason = f"{endpoint} returned invalid JSON: {e}"
+                    logger.warning("Collectors query returned invalid JSON: %s", e)
+                    data = None
+                if data is not None:
+                    if not isinstance(data, dict):
+                        last_reason = f"{endpoint} returned unexpected JSON type {type(data).__name__}"
+                        logger.warning("Collectors query returned non-object JSON: %r", data)
+                    else:
+                        collectors_val = None
+                        has_key = False
+                        for key in ("collector", "collectors"):
+                            if key in data:
+                                has_key = True
+                                collectors_val = data[key]
+                                if collectors_val:
+                                    break
+                        if isinstance(collectors_val, list):
+                            if all(isinstance(c, dict) for c in collectors_val):
+                                return collectors_val
+                            last_reason = f"{endpoint} returned non-object entries in collector list"
+                            logger.warning("Collectors query returned invalid collector items: %r", collectors_val)
+                        elif isinstance(collectors_val, dict):
+                            return [collectors_val]
+                        elif has_key and collectors_val is None:
+                            return []
+                        elif not data or set(data.keys()) <= {"pageInfo", "links"}:
+                            return []
+                        else:
+                            last_reason = f"{endpoint} returned unrecognised response keys {sorted(data.keys())}"
+                            logger.warning(
+                                "Collectors query returned unrecognised response shape (keys=%s)",
+                                sorted(data.keys()),
+                            )
         except Exception as e:
+            last_reason = f"{endpoint} failed: {e}"
             logger.warning("Failed querying collectors: %s", e)
         if strict:
-            raise RuntimeError("VCF Operations collector query failed (see log for details)")
+            detail = f": {last_reason}" if last_reason else " (see log for details)"
+            raise RuntimeError(f"VCF Operations collector query failed{detail}")
         return []
 
     def resolve_collector_group_name(self, collector_target: str) -> str:
@@ -406,9 +515,10 @@ class VCF91OpenTelegrafIntegration(VCFOpsIntegration):
         matching_collector = None
         for c in collectors:
             c_ip = str(c.get("ipAddress", "")).strip().lower()
+            c_addr = str(c.get("address", "")).strip().lower()
             c_name = str(c.get("name", "")).strip().lower()
             c_host = str(c.get("hostName", "")).strip().lower()
-            if target_clean in (c_ip, c_name, c_host):
+            if target_clean in (c_ip, c_addr, c_name, c_host):
                 matching_collector = c
                 break
 
@@ -421,6 +531,11 @@ class VCF91OpenTelegrafIntegration(VCFOpsIntegration):
                 for g in groups:
                     if str(g.get("id", "")) == c_group_id:
                         return g.get("name", collector_target)
+            c_id = str(matching_collector.get("id", "")).strip()
+            if c_id:
+                for g in groups:
+                    if c_id in self._group_collector_ids(g) and g.get("name"):
+                        return str(g["name"])
 
         # 3. Fallback: if exactly one group exists in the environment, use it
         if len(groups) == 1 and groups[0].get("name"):
@@ -702,14 +817,14 @@ class VCF91OpenTelegrafIntegration(VCFOpsIntegration):
                 if any(g.get(k) for k in ("vip", "virtualIP", "virtualIp", "ipAddress", "configuredVip")):
                     has_ip_info = True
             for c in all_collectors:
-                for k in ("ipAddress", "name", "hostName"):
+                for k in ("ipAddress", "address", "name", "hostName"):
                     val = str(c.get(k, "")).strip().lower()
                     if val:
                         clean_v = val.split(":")[0]
                         known_targets.add(clean_v)
                         if "." in clean_v and not self._looks_like_ip(clean_v):
                             known_targets.add(clean_v.split(".")[0])
-                if c.get("ipAddress"):
+                if c.get("ipAddress") or c.get("address"):
                     has_ip_info = True
 
             target_clean = collector_addr.strip().lower().split(":")[0]
@@ -1064,8 +1179,8 @@ class VCF91OpenTelegrafIntegration(VCFOpsIntegration):
         groups = self.get_collector_groups(strict=True)
         group_of: Dict[str, str] = {}
         for g in groups:
-            for cid in g.get("collectorId") or []:
-                group_of[str(cid)] = g.get("name")
+            for cid in self._group_collector_ids(g):
+                group_of[cid] = g.get("name")
         return collectors, group_of, groups
 
     @staticmethod
@@ -1129,7 +1244,7 @@ class VCF91OpenTelegrafIntegration(VCFOpsIntegration):
                 "kind": res_key.get("resourceKindKey"),
                 "managed_type": managed_types.get(res.get("identifier")),
                 "receiving": status.get("resourceStatus") == "DATA_RECEIVING",
-                "collector_address": collector.get("hostName"),
+                "collector_address": self._collector_address(collector),
                 "collector_group": group_of.get(collector_id or ""),
             })
         return registrations
@@ -1208,30 +1323,31 @@ class VCF91OpenTelegrafIntegration(VCFOpsIntegration):
         (via its virtual IP when it has one) and each cloud proxy individually."""
         self._ensure_token()
         collectors, group_of, groups = self._collector_maps()
-        proxies = {}
+        proxies: Dict[str, Tuple[Dict[str, Any], str]] = {}
         for cid, c in collectors.items():
-            if c.get("type") != "UNIFIED_CLOUD_PROXY":
+            if not self._is_cloud_proxy(c):
                 continue
-            if not c.get("hostName"):
+            addr = self._collector_address(c)
+            if not addr:
                 logger.warning("Skipping cloud proxy %s (%s): no address reported", cid, c.get("name"))
                 continue
-            proxies[cid] = c
+            proxies[cid] = (c, addr)
         targets: List[CollectorInfo] = []
         for g in groups:
-            member_proxies = [proxies[str(cid)] for cid in g.get("collectorId") or [] if str(cid) in proxies]
+            member_proxies = [proxies[cid] for cid in self._group_collector_ids(g) if cid in proxies]
             if not member_proxies:
                 continue
             vip = self._group_vip(g)
             if vip:
                 targets.append(CollectorInfo(address=vip, name=g.get("name"), is_collector_group=True))
-            for p in member_proxies:
+            for p, addr in member_proxies:
                 targets.append(
-                    CollectorInfo(address=p.get("hostName"), name=g.get("name"), display_name=p.get("name"))
+                    CollectorInfo(address=addr, name=g.get("name"), display_name=p.get("name"))
                 )
         grouped = {str(cid) for cid in group_of}
-        for cid, p in proxies.items():
+        for cid, (p, addr) in proxies.items():
             if cid not in grouped:
-                targets.append(CollectorInfo(address=p.get("hostName"), display_name=p.get("name")))
+                targets.append(CollectorInfo(address=addr, display_name=p.get("name")))
         return targets
 
     def resolve_vm_resource_id(self, vc_id: str, vm_mor: str) -> Optional[str]:
