@@ -304,6 +304,32 @@ class VCF91OpenTelegrafIntegration(VCFOpsIntegration):
             return True, vm_name or res_key.get("name"), vcid, vm_mor
         return False, None, None, None
 
+    _CLOUD_PROXY_TYPES = frozenset({"CLOUD_PROXY", "UNIFIED_CLOUD_PROXY"})
+
+    @classmethod
+    def _is_cloud_proxy(cls, collector: Dict[str, Any]) -> bool:
+        ctype = str(collector.get("type") or "").strip().upper()
+        return ctype in cls._CLOUD_PROXY_TYPES
+
+    @staticmethod
+    def _group_collector_ids(group: Dict[str, Any]) -> List[str]:
+        raw = group.get("collectorId") or group.get("collectorIds") or []
+        return [str(cid).strip() for cid in raw if cid is not None and str(cid).strip()]
+
+    @staticmethod
+    def _extract_object_list(data: Any, keys: Tuple[str, ...], endpoint: str) -> List[Dict[str, Any]]:
+        if not isinstance(data, dict):
+            raise ValueError(f"{endpoint} returned unexpected JSON type {type(data).__name__}")
+        val = next((data[key] for key in keys if data.get(key)), None)
+        if isinstance(val, dict):
+            return [val]
+        if not isinstance(val, list) or not val:
+            logger.warning("%s returned no entries (top-level keys: %s)", endpoint, sorted(data.keys()))
+            return []
+        if not all(isinstance(item, dict) for item in val):
+            raise ValueError(f"{endpoint} returned non-object entries in list")
+        return val
+
     def get_collector_groups(self, strict: bool = False) -> List[Dict[str, Any]]:
         """Retrieve list of collector groups from VCF Operations Suite API.
 
@@ -318,27 +344,37 @@ class VCF91OpenTelegrafIntegration(VCFOpsIntegration):
             "Accept": "application/json",
             "Authorization": f"vRealizeOpsToken {self.env.token}",
         }
+        last_reason: Optional[str] = None
         for endpoint in ("/suite-api/api/collectorGroups", "/suite-api/api/collectorgroups"):
             try:
                 resp = self.session.get(f"{self.base_url}{endpoint}", headers=headers, timeout=10)
-                if resp.status_code == 200:
-                    data = resp.json()
-                    groups = data.get("collectorGroup", []) or data.get("collectorGroups", [])
-                    if isinstance(groups, list):
-                        return groups
-                    elif isinstance(groups, dict):
-                        return [groups]
-                else:
-                    logger.warning(
-                        "Collector groups query to %s returned HTTP %d: %s",
-                        endpoint,
-                        resp.status_code,
-                        resp.text,
-                    )
             except Exception as e:
+                last_reason = f"{endpoint} failed: {e}"
                 logger.warning("Failed querying collector groups at %s: %s", endpoint, e)
+                continue
+            if resp.status_code != 200:
+                last_reason = f"{endpoint} returned HTTP {resp.status_code}"
+                logger.warning(
+                    "Collector groups query to %s returned HTTP %d: %s",
+                    endpoint,
+                    resp.status_code,
+                    resp.text,
+                )
+                continue
+            try:
+                data = resp.json()
+            except Exception as e:
+                last_reason = f"{endpoint} returned invalid JSON: {e}"
+                logger.warning("Collector groups query to %s returned invalid JSON: %s", endpoint, e)
+                continue
+            try:
+                return self._extract_object_list(data, ("collectorGroup", "collectorGroups"), endpoint)
+            except ValueError as e:
+                last_reason = str(e)
+                logger.warning("Collector groups query: %s", e)
         if strict:
-            raise RuntimeError("VCF Operations collector group query failed (see log for details)")
+            detail = f": {last_reason}" if last_reason else " (see log for details)"
+            raise RuntimeError(f"VCF Operations collector group query failed{detail}")
         return []
 
     def get_collectors(self, strict: bool = False) -> List[Dict[str, Any]]:
@@ -355,21 +391,32 @@ class VCF91OpenTelegrafIntegration(VCFOpsIntegration):
             "Accept": "application/json",
             "Authorization": f"vRealizeOpsToken {self.env.token}",
         }
+        endpoint = "/suite-api/api/collectors"
+        last_reason: Optional[str] = None
         try:
-            resp = self.session.get(f"{self.base_url}/suite-api/api/collectors", headers=headers, timeout=10)
-            if resp.status_code == 200:
-                data = resp.json()
-                collectors = data.get("collector", []) or data.get("collectors", [])
-                if isinstance(collectors, list):
-                    return collectors
-                elif isinstance(collectors, dict):
-                    return [collectors]
-            else:
+            resp = self.session.get(f"{self.base_url}{endpoint}", headers=headers, timeout=10)
+            if resp.status_code != 200:
+                last_reason = f"{endpoint} returned HTTP {resp.status_code}"
                 logger.warning("Collectors query returned HTTP %d: %s", resp.status_code, resp.text)
+            else:
+                try:
+                    data = resp.json()
+                except Exception as e:
+                    last_reason = f"{endpoint} returned invalid JSON: {e}"
+                    logger.warning("Collectors query returned invalid JSON: %s", e)
+                    data = None
+                if data is not None:
+                    try:
+                        return self._extract_object_list(data, ("collector", "collectors"), endpoint)
+                    except ValueError as e:
+                        last_reason = str(e)
+                        logger.warning("Collectors query: %s", e)
         except Exception as e:
+            last_reason = f"{endpoint} failed: {e}"
             logger.warning("Failed querying collectors: %s", e)
         if strict:
-            raise RuntimeError("VCF Operations collector query failed (see log for details)")
+            detail = f": {last_reason}" if last_reason else " (see log for details)"
+            raise RuntimeError(f"VCF Operations collector query failed{detail}")
         return []
 
     def resolve_collector_group_name(self, collector_target: str) -> str:
@@ -1064,8 +1111,8 @@ class VCF91OpenTelegrafIntegration(VCFOpsIntegration):
         groups = self.get_collector_groups(strict=True)
         group_of: Dict[str, str] = {}
         for g in groups:
-            for cid in g.get("collectorId") or []:
-                group_of[str(cid)] = g.get("name")
+            for cid in self._group_collector_ids(g):
+                group_of[cid] = g.get("name")
         return collectors, group_of, groups
 
     @staticmethod
@@ -1210,7 +1257,7 @@ class VCF91OpenTelegrafIntegration(VCFOpsIntegration):
         collectors, group_of, groups = self._collector_maps()
         proxies = {}
         for cid, c in collectors.items():
-            if c.get("type") != "UNIFIED_CLOUD_PROXY":
+            if not self._is_cloud_proxy(c):
                 continue
             if not c.get("hostName"):
                 logger.warning("Skipping cloud proxy %s (%s): no address reported", cid, c.get("name"))
@@ -1218,7 +1265,7 @@ class VCF91OpenTelegrafIntegration(VCFOpsIntegration):
             proxies[cid] = c
         targets: List[CollectorInfo] = []
         for g in groups:
-            member_proxies = [proxies[str(cid)] for cid in g.get("collectorId") or [] if str(cid) in proxies]
+            member_proxies = [proxies[cid] for cid in self._group_collector_ids(g) if cid in proxies]
             if not member_proxies:
                 continue
             vip = self._group_vip(g)
@@ -1232,6 +1279,11 @@ class VCF91OpenTelegrafIntegration(VCFOpsIntegration):
         for cid, p in proxies.items():
             if cid not in grouped:
                 targets.append(CollectorInfo(address=p.get("hostName"), display_name=p.get("name")))
+        if not targets:
+            logger.warning(
+                "No cloud proxies recognised; collector types reported: %s",
+                sorted({str(c.get("type")) for c in collectors.values()}),
+            )
         return targets
 
     def resolve_vm_resource_id(self, vc_id: str, vm_mor: str) -> Optional[str]:

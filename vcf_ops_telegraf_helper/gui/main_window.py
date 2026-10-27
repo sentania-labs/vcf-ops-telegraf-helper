@@ -1358,7 +1358,7 @@ class MainWindow(QMainWindow):
         if error:
             self.ep_collector_combo.setPlaceholderText(f"Could not load cloud proxies: {error}")
         elif not targets:
-            self.ep_collector_combo.setPlaceholderText("No cloud proxies found in VCF Operations")
+            self.ep_collector_combo.setPlaceholderText("No cloud proxies recognised (see log)")
         if restore < 0 and self.bound_vm is not None:
             self._preselect_collector(self.bound_vm)
         self._refresh_step_gating()
