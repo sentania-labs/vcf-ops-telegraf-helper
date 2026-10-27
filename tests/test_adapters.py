@@ -1040,6 +1040,38 @@ def test_vcf91_ops8_cloud_proxy_and_collector_group_discovery():
     assert vms[0].collector_group == "Ops8 HA Proxy Group"
 
 
+def test_vcf91_mixed_proxy_types_and_group_membership_fields_all_resolve():
+    """Both cloud proxy types and both group membership field names produce targets, whatever the Ops version."""
+    def proxy(cid, name, host, ctype):
+        return {"id": cid, "name": name, "hostName": host, "type": ctype, "state": "UP"}
+
+    adapter = VCF91OpenTelegrafIntegration(
+        _api_env(),
+        session=_patched_api({
+            "/collectors": (200, {"collector": [
+                proxy("1", "Unified-cp1", "198.51.100.41", "UNIFIED_CLOUD_PROXY"),
+                proxy("2", "Cloud-cp2", "198.51.100.42", "CLOUD_PROXY"),
+                proxy("3", "Unified-cp3", "198.51.100.43", "UNIFIED_CLOUD_PROXY"),
+                proxy("4", "Cloud-cp4", "198.51.100.44", "CLOUD_PROXY"),
+                proxy("5", "Remote-rc5", "198.51.100.45", "REMOTE"),
+            ]}),
+            "/collectorGroups": (200, {"collectorGroups": [
+                {"id": "g-singular", "name": "Singular group", "collectorId": [1, 2], "virtualIP": "198.51.100.40"},
+                {"id": "g-plural", "name": "Plural group", "collectorIds": [3, 4]},
+                {"id": "g-empty-singular", "name": "Empty singular", "collectorId": [], "collectorIds": [5]},
+            ]}),
+        }),
+    )
+    targets = [(t.address, t.name, t.is_collector_group, t.display_name) for t in adapter.list_collector_targets()]
+    assert targets == [
+        ("198.51.100.40", "Singular group", True, None),
+        ("198.51.100.41", "Singular group", False, "Unified-cp1"),
+        ("198.51.100.42", "Singular group", False, "Cloud-cp2"),
+        ("198.51.100.43", "Plural group", False, "Unified-cp3"),
+        ("198.51.100.44", "Plural group", False, "Cloud-cp4"),
+    ]
+
+
 def test_vcf91_unrecognised_collector_shape_does_not_break_inventory():
     """A 200 response with no recognisable collectors yields no targets and never raises, so VM inventory still loads."""
     adapter = VCF91OpenTelegrafIntegration(
