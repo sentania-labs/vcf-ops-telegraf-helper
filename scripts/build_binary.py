@@ -73,6 +73,10 @@ def build(platform: str) -> None:
     name = 'vcf-telegraf-helper' if mac else f'vcf-telegraf-helper-{platform}'
     options = ['--onedir', '--windowed', '--osx-bundle-identifier',
                'net.sentania.vcf-telegraf-helper'] if mac else ['--onefile']
+    if platform == 'windows':
+        # GUI subsystem: no console window opens. The CLI re-attaches to the
+        # parent terminal at startup (see cli/console.py).
+        options.append('--windowed')
     if mac:
         options += ['--icon', str(mac_icon())]
     elif platform == 'windows':
