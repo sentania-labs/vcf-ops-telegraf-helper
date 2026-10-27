@@ -341,6 +341,28 @@ class VCF91OpenTelegrafIntegration(VCFOpsIntegration):
             return ids
         return []
 
+    @staticmethod
+    def _extract_object_list(data: Any, keys: Tuple[str, ...], endpoint: str) -> List[Dict[str, Any]]:
+        if not isinstance(data, dict):
+            raise ValueError(f"{endpoint} returned unexpected JSON type {type(data).__name__}")
+        val = None
+        has_key = False
+        for key in keys:
+            if key in data:
+                has_key = True
+                val = data[key]
+                if val:
+                    break
+        if isinstance(val, list):
+            if all(isinstance(item, dict) for item in val):
+                return val
+            raise ValueError(f"{endpoint} returned non-object entries in list")
+        if isinstance(val, dict):
+            return [val]
+        if (has_key and val is None) or set(data.keys()) <= {"pageInfo", "links"}:
+            return []
+        raise ValueError(f"{endpoint} returned unrecognised response keys {sorted(data.keys())}")
+
     def get_collector_groups(self, strict: bool = False) -> List[Dict[str, Any]]:
         """Retrieve list of collector groups from VCF Operations Suite API.
 
@@ -379,36 +401,13 @@ class VCF91OpenTelegrafIntegration(VCFOpsIntegration):
                 last_reason = f"{endpoint} returned invalid JSON: {e}"
                 logger.warning("Collector groups query to %s returned invalid JSON: %s", endpoint, e)
                 continue
-            if not isinstance(data, dict):
-                last_reason = f"{endpoint} returned unexpected JSON type {type(data).__name__}"
-                logger.warning("Collector groups query to %s returned non-object JSON: %r", endpoint, data)
-                continue
-            groups_val = None
-            has_key = False
-            for key in ("collectorGroup", "collectorGroups", "collector-group", "collector-groups"):
-                if key in data:
-                    has_key = True
-                    groups_val = data[key]
-                    if groups_val:
-                        break
-            if isinstance(groups_val, list):
-                if all(isinstance(g, dict) for g in groups_val):
-                    return groups_val
-                last_reason = f"{endpoint} returned non-object entries in collector group list"
-                logger.warning("Collector groups query to %s returned invalid group items: %r", endpoint, groups_val)
-                continue
-            if isinstance(groups_val, dict):
-                return [groups_val]
-            if has_key and groups_val is None:
-                return []
-            if not data or set(data.keys()) <= {"pageInfo", "links"}:
-                return []
-            last_reason = f"{endpoint} returned unrecognised response keys {sorted(data.keys())}"
-            logger.warning(
-                "Collector groups query to %s returned unrecognised response shape (keys=%s)",
-                endpoint,
-                sorted(data.keys()),
-            )
+            try:
+                return self._extract_object_list(
+                    data, ("collectorGroup", "collectorGroups", "collector-group", "collector-groups"), endpoint
+                )
+            except ValueError as e:
+                last_reason = str(e)
+                logger.warning("Collector groups query: %s", e)
         if strict:
             detail = f": {last_reason}" if last_reason else " (see log for details)"
             raise RuntimeError(f"VCF Operations collector group query failed{detail}")
@@ -444,35 +443,11 @@ class VCF91OpenTelegrafIntegration(VCFOpsIntegration):
                     logger.warning("Collectors query returned invalid JSON: %s", e)
                     data = None
                 if data is not None:
-                    if not isinstance(data, dict):
-                        last_reason = f"{endpoint} returned unexpected JSON type {type(data).__name__}"
-                        logger.warning("Collectors query returned non-object JSON: %r", data)
-                    else:
-                        collectors_val = None
-                        has_key = False
-                        for key in ("collector", "collectors"):
-                            if key in data:
-                                has_key = True
-                                collectors_val = data[key]
-                                if collectors_val:
-                                    break
-                        if isinstance(collectors_val, list):
-                            if all(isinstance(c, dict) for c in collectors_val):
-                                return collectors_val
-                            last_reason = f"{endpoint} returned non-object entries in collector list"
-                            logger.warning("Collectors query returned invalid collector items: %r", collectors_val)
-                        elif isinstance(collectors_val, dict):
-                            return [collectors_val]
-                        elif has_key and collectors_val is None:
-                            return []
-                        elif not data or set(data.keys()) <= {"pageInfo", "links"}:
-                            return []
-                        else:
-                            last_reason = f"{endpoint} returned unrecognised response keys {sorted(data.keys())}"
-                            logger.warning(
-                                "Collectors query returned unrecognised response shape (keys=%s)",
-                                sorted(data.keys()),
-                            )
+                    try:
+                        return self._extract_object_list(data, ("collector", "collectors"), endpoint)
+                    except ValueError as e:
+                        last_reason = str(e)
+                        logger.warning("Collectors query: %s", e)
         except Exception as e:
             last_reason = f"{endpoint} failed: {e}"
             logger.warning("Failed querying collectors: %s", e)
