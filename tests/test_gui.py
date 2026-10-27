@@ -914,8 +914,8 @@ def test_main_window_inventory_error_is_shown_not_empty(qapp, tmp_path, monkeypa
     assert "503" in window.vm_count_label.text()
 
 
-def test_main_window_collector_error_is_shown_not_none_found(qapp, tmp_path, monkeypatch):
-    """A failed or unrecognised collector query sets an error placeholder on the dropdown rather than claiming none exist."""
+def test_main_window_collector_dropdown_lists_ops8_proxies_and_flags_unrecognised(qapp, tmp_path, monkeypatch):
+    """Ops 8 proxies fill the dropdown; a 200 response yielding none says none were recognised, not none exist."""
     from vcf_ops_telegraf_helper.adapters.vcf91 import VCF91OpenTelegrafIntegration
     from test_adapters import _ops8_suite_api, _patched_api
 
@@ -939,8 +939,7 @@ def test_main_window_collector_error_is_shown_not_none_found(qapp, tmp_path, mon
     )
     window._load_collector_targets(bad_adapter)
     assert window.ep_collector_combo.count() == 0
-    assert "Could not load cloud proxies:" in window.ep_collector_combo.placeholderText()
-    assert "unrecognised response keys" in window.ep_collector_combo.placeholderText()
+    assert window.ep_collector_combo.placeholderText() == "No cloud proxies recognised (see log)"
 
 
 

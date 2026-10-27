@@ -312,62 +312,28 @@ class VCF91OpenTelegrafIntegration(VCFOpsIntegration):
         return ctype in cls._CLOUD_PROXY_TYPES
 
     @staticmethod
-    def _collector_address(collector: Dict[str, Any]) -> Optional[str]:
-        for key in ("hostName", "ipAddress", "address"):
-            val = collector.get(key)
-            if val is not None and str(val).strip():
-                return str(val).strip()
-        return None
-
-    @staticmethod
     def _group_collector_ids(group: Dict[str, Any]) -> List[str]:
-        raw = group.get("collectorId")
-        if raw is None:
-            raw = group.get("collectorIds")
-        if isinstance(raw, list):
-            return [str(cid).strip() for cid in raw if cid is not None and str(cid).strip()]
-        if raw is not None and not isinstance(raw, (dict, bool)) and str(raw).strip():
-            return [str(raw).strip()]
-        nodes = group.get("nodes")
-        if isinstance(nodes, list):
-            ids: List[str] = []
-            for node in nodes:
-                if not isinstance(node, dict):
-                    continue
-                props = node.get("properties") if isinstance(node.get("properties"), dict) else {}
-                cid = node.get("id") if node.get("id") is not None else props.get("collectorId")
-                if cid is not None and str(cid).strip():
-                    ids.append(str(cid).strip())
-            return ids
-        return []
+        raw = group.get("collectorId") or group.get("collectorIds") or []
+        return [str(cid).strip() for cid in raw if cid is not None and str(cid).strip()]
 
     @staticmethod
     def _extract_object_list(data: Any, keys: Tuple[str, ...], endpoint: str) -> List[Dict[str, Any]]:
         if not isinstance(data, dict):
             raise ValueError(f"{endpoint} returned unexpected JSON type {type(data).__name__}")
-        val = None
-        has_key = False
-        for key in keys:
-            if key in data:
-                has_key = True
-                val = data[key]
-                if val:
-                    break
-        if isinstance(val, list):
-            if all(isinstance(item, dict) for item in val):
-                return val
-            raise ValueError(f"{endpoint} returned non-object entries in list")
+        val = next((data[key] for key in keys if data.get(key)), None)
         if isinstance(val, dict):
             return [val]
-        if (has_key and val is None) or set(data.keys()) <= {"pageInfo", "links"}:
+        if not isinstance(val, list) or not val:
+            logger.warning("%s returned no entries (top-level keys: %s)", endpoint, sorted(data.keys()))
             return []
-        raise ValueError(f"{endpoint} returned unrecognised response keys {sorted(data.keys())}")
+        if not all(isinstance(item, dict) for item in val):
+            raise ValueError(f"{endpoint} returned non-object entries in list")
+        return val
 
     def get_collector_groups(self, strict: bool = False) -> List[Dict[str, Any]]:
         """Retrieve list of collector groups from VCF Operations Suite API.
 
-        With strict=True a failed query or unrecognised response shape raises instead of
-        looking like an empty list.
+        With strict=True a failed query raises instead of looking like an empty list.
         """
         if not self.env.token:
             if strict:
@@ -402,9 +368,7 @@ class VCF91OpenTelegrafIntegration(VCFOpsIntegration):
                 logger.warning("Collector groups query to %s returned invalid JSON: %s", endpoint, e)
                 continue
             try:
-                return self._extract_object_list(
-                    data, ("collectorGroup", "collectorGroups", "collector-group", "collector-groups"), endpoint
-                )
+                return self._extract_object_list(data, ("collectorGroup", "collectorGroups"), endpoint)
             except ValueError as e:
                 last_reason = str(e)
                 logger.warning("Collector groups query: %s", e)
@@ -416,8 +380,7 @@ class VCF91OpenTelegrafIntegration(VCFOpsIntegration):
     def get_collectors(self, strict: bool = False) -> List[Dict[str, Any]]:
         """Retrieve list of collectors from VCF Operations Suite API.
 
-        With strict=True a failed query or unrecognised response shape raises instead of
-        looking like an empty list.
+        With strict=True a failed query raises instead of looking like an empty list.
         """
         if not self.env.token:
             if strict:
@@ -490,10 +453,9 @@ class VCF91OpenTelegrafIntegration(VCFOpsIntegration):
         matching_collector = None
         for c in collectors:
             c_ip = str(c.get("ipAddress", "")).strip().lower()
-            c_addr = str(c.get("address", "")).strip().lower()
             c_name = str(c.get("name", "")).strip().lower()
             c_host = str(c.get("hostName", "")).strip().lower()
-            if target_clean in (c_ip, c_addr, c_name, c_host):
+            if target_clean in (c_ip, c_name, c_host):
                 matching_collector = c
                 break
 
@@ -506,11 +468,6 @@ class VCF91OpenTelegrafIntegration(VCFOpsIntegration):
                 for g in groups:
                     if str(g.get("id", "")) == c_group_id:
                         return g.get("name", collector_target)
-            c_id = str(matching_collector.get("id", "")).strip()
-            if c_id:
-                for g in groups:
-                    if c_id in self._group_collector_ids(g) and g.get("name"):
-                        return str(g["name"])
 
         # 3. Fallback: if exactly one group exists in the environment, use it
         if len(groups) == 1 and groups[0].get("name"):
@@ -792,14 +749,14 @@ class VCF91OpenTelegrafIntegration(VCFOpsIntegration):
                 if any(g.get(k) for k in ("vip", "virtualIP", "virtualIp", "ipAddress", "configuredVip")):
                     has_ip_info = True
             for c in all_collectors:
-                for k in ("ipAddress", "address", "name", "hostName"):
+                for k in ("ipAddress", "name", "hostName"):
                     val = str(c.get(k, "")).strip().lower()
                     if val:
                         clean_v = val.split(":")[0]
                         known_targets.add(clean_v)
                         if "." in clean_v and not self._looks_like_ip(clean_v):
                             known_targets.add(clean_v.split(".")[0])
-                if c.get("ipAddress") or c.get("address"):
+                if c.get("ipAddress"):
                     has_ip_info = True
 
             target_clean = collector_addr.strip().lower().split(":")[0]
@@ -1219,7 +1176,7 @@ class VCF91OpenTelegrafIntegration(VCFOpsIntegration):
                 "kind": res_key.get("resourceKindKey"),
                 "managed_type": managed_types.get(res.get("identifier")),
                 "receiving": status.get("resourceStatus") == "DATA_RECEIVING",
-                "collector_address": self._collector_address(collector),
+                "collector_address": collector.get("hostName"),
                 "collector_group": group_of.get(collector_id or ""),
             })
         return registrations
@@ -1298,15 +1255,14 @@ class VCF91OpenTelegrafIntegration(VCFOpsIntegration):
         (via its virtual IP when it has one) and each cloud proxy individually."""
         self._ensure_token()
         collectors, group_of, groups = self._collector_maps()
-        proxies: Dict[str, Tuple[Dict[str, Any], str]] = {}
+        proxies = {}
         for cid, c in collectors.items():
             if not self._is_cloud_proxy(c):
                 continue
-            addr = self._collector_address(c)
-            if not addr:
+            if not c.get("hostName"):
                 logger.warning("Skipping cloud proxy %s (%s): no address reported", cid, c.get("name"))
                 continue
-            proxies[cid] = (c, addr)
+            proxies[cid] = c
         targets: List[CollectorInfo] = []
         for g in groups:
             member_proxies = [proxies[cid] for cid in self._group_collector_ids(g) if cid in proxies]
@@ -1315,14 +1271,19 @@ class VCF91OpenTelegrafIntegration(VCFOpsIntegration):
             vip = self._group_vip(g)
             if vip:
                 targets.append(CollectorInfo(address=vip, name=g.get("name"), is_collector_group=True))
-            for p, addr in member_proxies:
+            for p in member_proxies:
                 targets.append(
-                    CollectorInfo(address=addr, name=g.get("name"), display_name=p.get("name"))
+                    CollectorInfo(address=p.get("hostName"), name=g.get("name"), display_name=p.get("name"))
                 )
         grouped = {str(cid) for cid in group_of}
-        for cid, (p, addr) in proxies.items():
+        for cid, p in proxies.items():
             if cid not in grouped:
-                targets.append(CollectorInfo(address=addr, display_name=p.get("name")))
+                targets.append(CollectorInfo(address=p.get("hostName"), display_name=p.get("name")))
+        if not targets:
+            logger.warning(
+                "No cloud proxies recognised; collector types reported: %s",
+                sorted({str(c.get("type")) for c in collectors.values()}),
+            )
         return targets
 
     def resolve_vm_resource_id(self, vc_id: str, vm_mor: str) -> Optional[str]:

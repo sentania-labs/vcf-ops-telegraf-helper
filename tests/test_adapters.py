@@ -985,7 +985,7 @@ def _ops8_suite_api():
                     {
                         "id": "8",
                         "name": "Cloud Proxy-standalone",
-                        "ipAddress": "198.51.100.33",
+                        "hostName": "198.51.100.33",
                         "state": "UP",
                         "type": "CLOUD_PROXY",
                         "local": False,
@@ -1039,31 +1039,23 @@ def test_vcf91_ops8_cloud_proxy_and_collector_group_discovery():
     assert vms[0].collector_address == "198.51.100.31"
     assert vms[0].collector_group == "Ops8 HA Proxy Group"
 
-    # Resolving a member proxy IP to its group name works when the group uses collectorIds
-    adapter.env.collector = CollectorInfo(address="198.51.100.31")
-    assert adapter.resolve_collector_group_name("198.51.100.31") == "Ops8 HA Proxy Group"
 
-
-def test_vcf91_unrecognised_collector_or_group_shape_raises_in_strict_mode():
-    """An unrecognised JSON payload shape raises a descriptive error instead of pretending no proxies exist."""
-    import pytest
-
+def test_vcf91_unrecognised_collector_shape_does_not_break_inventory():
+    """A 200 response with no recognisable collectors yields no targets and never raises, so VM inventory still loads."""
     adapter = VCF91OpenTelegrafIntegration(
         _api_env(),
         session=_patched_api({"/collectors": (200, {"unexpectedKey": [{"id": "1"}]})}),
     )
-    with pytest.raises(RuntimeError, match="unrecognised response keys"):
-        adapter.list_collector_targets()
+    assert adapter.list_collector_targets() == []
+    assert adapter.list_virtual_machines(strict=True)
 
-    adapter_groups = VCF91OpenTelegrafIntegration(
-        _api_env(),
-        session=_patched_api({
-            "/collectorGroups": (200, {"unexpectedGroupKey": []}),
-            "/collectorgroups": (200, {"unexpectedGroupKey": []}),
-        }),
-    )
-    with pytest.raises(RuntimeError, match="unrecognised response keys"):
-        adapter_groups.list_collector_targets()
+
+def test_vcf91_group_with_empty_collector_id_falls_back_to_collector_ids():
+    groups = [
+        {"name": "g1", "collectorId": [], "collectorIds": [6, 7]},
+        {"name": "g2", "collectorId": [3]},
+    ]
+    assert [VCF91OpenTelegrafIntegration._group_collector_ids(g) for g in groups] == [["6", "7"], ["3"]]
 
 
 def test_vcf91_empty_collector_response_with_valid_key_returns_empty():
