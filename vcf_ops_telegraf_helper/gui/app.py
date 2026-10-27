@@ -28,7 +28,7 @@ def hide_console_window() -> None:
             # Leave that host alone, including unrelated tabs in its window.
             if hwnd and user.IsWindowVisible(hwnd):
                 user.ShowWindow(hwnd, 0)  # SW_HIDE
-            # Keep the console attached so startup diagnostics retain valid handles.
+                kernel.FreeConsole()
         except Exception:
             pass
 

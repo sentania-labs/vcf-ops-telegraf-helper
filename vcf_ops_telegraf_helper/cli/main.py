@@ -61,27 +61,20 @@ from vcf_ops_telegraf_helper.validation.validator import Validator
 from vcf_ops_telegraf_helper.workflow.engine import ConfigureEndpointWorkflow
 
 
-from vcf_ops_telegraf_helper.cli.console import attach_parent_console
-
-_parent_console_attached = attach_parent_console()
 console = Console()
 
 
 def _is_windows_double_click() -> bool:
     """Check if process was launched directly from Windows Explorer (double click)."""
-    if sys.platform != "win32":
-        return False
-    if getattr(sys, "frozen", False):
-        # The windowed binary has no console of its own; only a parent terminal gives it one.
-        return not _parent_console_attached
-    if not sys.stdout.isatty():
+    if sys.platform != "win32" or not sys.stdout.isatty():
         return False
     try:
         import ctypes
 
         process_list = (ctypes.c_uint * 4)()
         count = ctypes.windll.kernel32.GetConsoleProcessList(process_list, 4)
-        return 0 < count <= 1
+        owned_count = 2 if getattr(sys, "frozen", False) else 1
+        return 0 < count <= owned_count
     except Exception:
         return False
 
