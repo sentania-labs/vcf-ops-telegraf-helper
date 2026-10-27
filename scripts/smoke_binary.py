@@ -44,16 +44,16 @@ def smoke(artifact: Path, signed: bool = False) -> None:
                 raise RuntimeError(f'{args} failed ({result.returncode}): {result.stdout} {result.stderr}')
             print(f'PASS: {args}', flush=True)
         if sys.platform == 'win32':
-            # CREATE_NEW_CONSOLE matches Explorer's separate console launch.
+            # DETACHED_PROCESS matches Explorer: the windowed binary starts with no console.
             # Do not redirect streams: that would bypass desktop auto-detection.
             report = root / 'windows-launch.png'
             launch_env = dict(env, VCF_HELPER_GUI_SMOKE_REPORT=str(report))
             launch_env.pop('QT_QPA_PLATFORM', None)
             launch_env.pop('VCF_HELPER_NO_GUI', None)
             subprocess.run([str(binary)], cwd=root, env=launch_env,
-                           creationflags=subprocess.CREATE_NEW_CONSOLE, check=True, timeout=120)
+                           creationflags=subprocess.DETACHED_PROCESS, check=True, timeout=120)
             status = json.loads(report.with_suffix('.console.json').read_text())
-            if not status['attached'] or status['visible'] or not status['gui_visible']:
+            if status['attached'] or status['visible'] or not status['gui_visible']:
                 raise RuntimeError(f'Desktop console visibility check failed: {status}')
             if not report.is_file() or report.stat().st_size < 100:
                 raise RuntimeError('Windows desktop launch did not render the GUI')
@@ -61,7 +61,7 @@ def smoke(artifact: Path, signed: bool = False) -> None:
             evidence.parent.mkdir(exist_ok=True)
             shutil.copy2(report, evidence)
             shutil.copy2(report.with_suffix('.console.json'), evidence.with_suffix('.console.json'))
-            print('PASS: Windows desktop GUI rendered with its console hidden', flush=True)
+            print('PASS: Windows desktop GUI rendered with no console window', flush=True)
         if app:
             # Match the documented symlink and LaunchServices/Finder entry points.
             link = root / 'vcf-telegraf-helper'

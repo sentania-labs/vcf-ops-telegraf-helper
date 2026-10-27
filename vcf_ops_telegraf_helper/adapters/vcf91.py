@@ -60,7 +60,7 @@ class VCF91OpenTelegrafIntegration(VCFOpsIntegration):
         self.env = env
         self.base_url = env.url.rstrip("/")
         self.session = session or requests.Session()
-        from vcf_ops_telegraf_helper.security.tls import NativeTrustAdapter, note_unverified_host
+        from vcf_ops_telegraf_helper.security.tls import NativeTrustAdapter
         self.session.mount("https://", NativeTrustAdapter())
         if not env.verify_ssl:
             self.session.verify = False

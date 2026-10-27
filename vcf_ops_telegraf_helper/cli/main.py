@@ -81,8 +81,7 @@ def _is_windows_double_click() -> bool:
 
         process_list = (ctypes.c_uint * 4)()
         count = ctypes.windll.kernel32.GetConsoleProcessList(process_list, 4)
-        owned_count = 2 if getattr(sys, "frozen", False) else 1
-        return 0 < count <= owned_count
+        return 0 < count <= 1
     except Exception:
         return False
 
