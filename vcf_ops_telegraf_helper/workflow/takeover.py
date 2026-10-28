@@ -37,6 +37,7 @@ from vcf_ops_telegraf_helper.workflow.managed_config import ImportedConfig, impo
 from vcf_ops_telegraf_helper.workflow.progress import ProgressReporter, SilentProgressReporter
 from vcf_ops_telegraf_helper.workflow.windows import (
     MANAGED_CERT_DIR,
+    MANAGED_DATA_ROOT,
     MANAGED_ROOT,
     ManagedInstallation,
     detect_managed_installation,
@@ -387,10 +388,12 @@ class TakeoverWorkflow:
                 files["mandatory_tags.bat"] = self.managed.mandatory_tags
             if self.managed.grains is not None:
                 files["grains"] = self.managed.grains
-            if "telegraf.conf" not in files:
-                raise RuntimeError("Could not read the managed telegraf.conf; refusing to retire an agent whose configuration is not backed up.")
+            if self.managed.plugins_config is not None:
+                files["plugins/telegraf"] = self.managed.plugins_config
             if self.managed.read_errors:
                 raise RuntimeError("Managed configuration could not be read completely: " + "; ".join(self.managed.read_errors))
+            if "telegraf.conf" not in files:
+                raise RuntimeError("The managed configuration could not be read. Restore it and try again.")
             files["agent-object-before.json"] = self.agent_before.model_dump_json(indent=2) if self.agent_before else "{}"
             target = self.journal.write_backup(self.record, files)
             self.record.state = "backed_up"
@@ -545,6 +548,18 @@ class TakeoverWorkflow:
                 if not res.success:
                     raise RuntimeError(f"Could not remove {MANAGED_CERT_DIR}: {res.stderr or res.stdout}")
                 removed.append(MANAGED_CERT_DIR)
+            if after.data_root_present:
+                res = self.executor.execute(
+                    f"$left = Get-ChildItem -Path '{MANAGED_DATA_ROOT}' -Recurse -File -Force -ErrorAction SilentlyContinue | Measure-Object | Select-Object -ExpandProperty Count; "
+                    f"if ($left -eq 0) {{ Remove-Item -Path '{MANAGED_DATA_ROOT}' -Recurse -Force -ErrorAction Stop; Write-Output 'REMOVED' }} else {{ Write-Output \"LEFT $left\" }}",
+                    timeout=60,
+                )
+                if not res.success:
+                    raise RuntimeError(f"Could not remove {MANAGED_DATA_ROOT}: {res.stderr or res.stdout}")
+                if "REMOVED" in res.stdout:
+                    removed.append(MANAGED_DATA_ROOT)
+                else:
+                    left.append(f"{MANAGED_DATA_ROOT} ({res.stdout.strip().replace('LEFT ', '') or '?'} files left by the uninstall)")
             self.verifications["Managed services absent"] = "PASS"
             if left:
                 self.verifications["Managed files removed"] = "LEFT IN PLACE (" + "; ".join(left) + ")"
