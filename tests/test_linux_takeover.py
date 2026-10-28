@@ -147,7 +147,9 @@ def test_stock_salt_is_not_managed_and_query_failure_is_not_absence():
     endpoint.services = {"salt-minion": unit("salt-minion", "/usr/bin/salt-minion")}
     assert not detect_linux_managed_installation(endpoint).present
     endpoint.query_fails = True
-    assert not detect_linux_managed_installation(endpoint).query_ok
+    failed = detect_linux_managed_installation(endpoint)
+    assert not failed.query_ok
+    assert "sudo rights" in failed.query_error and "detect the endpoint again" in failed.query_error
 
 
 def test_renamed_managed_service_is_detected():
@@ -170,6 +172,9 @@ def test_full_linux_takeover_and_backup(tmp_path):
     assert not list(backup.rglob("key.pem"))
     assert workflow.executor.vendor_called
     assert "arcuser" in result.verifications["Retained items"]
+    assert len(result.retained_items) == 2
+    assert workflow.record.retained_items == result.retained_items
+    assert all("by hand" in item for item in result.retained_items)
     assert workflow.adapter.uninstall_calls[0][1] == "operator"
     output = workflow.executor.uploaded_files["/etc/telegraf/telegraf.d/cloudproxy-http.conf"]
     assert workflow.target.vm_mor in output and workflow.target.vc_id in output
@@ -223,7 +228,7 @@ def test_registry_rejects_commands_outside_vendor_scope(command):
 
 def test_linux_gui_import_plan_and_confirmation(tmp_path, monkeypatch):
     pytest.importorskip("PySide6")
-    from test_takeover_ui import _managed_vm, _window
+    from test_takeover_ui import _managed_vm, _window, _wait_for_summary
     endpoint = ManagedLinuxEndpoint()
     window = _window(tmp_path, monkeypatch, endpoint)
     vm = _managed_vm().model_copy(update={"os_family": "LINUX", "os_name": "Ubuntu Linux", "name": "linux-demo"})
@@ -238,11 +243,34 @@ def test_linux_gui_import_plan_and_confirmation(tmp_path, monkeypatch):
     window.takeover_check.setChecked(True)
     assert window._takeover_active()
     assert window.cpu_check.isChecked() and not window.win_svc_check.isChecked()
+    window.step_list.setCurrentRow(window.STEP_MONITORING)
+    assert window.cpu_check.isEnabled() and not window.win_perf_check.isEnabled()
+    for index, (key, _, _, checkbox) in enumerate(window.catalog_items):
+        item = window.plugin_catalog_list.item(index)
+        if key in ("cpu", "mem", "disk", "net", "system", "processes"):
+            assert checkbox.isEnabled() and not item.isHidden()
+        if key in ("win_perf", "win_os", "win_svc"):
+            assert not checkbox.isEnabled() and item.isHidden()
+    window.cpu_check.click()
+    assert not window._get_monitoring_config().cpu.enabled
+    window.cpu_check.click()
+    assert window._get_monitoring_config().cpu.enabled
     assert not window._get_monitoring_config().win_services.enabled
     assert "--confirm-takeover linux-demo" in window._build_cli_command()
     window._update_preview()
     assert ROOT in window.review_summary_box.toPlainText()
     assert "http_response" in window._get_monitoring_config().custom_toml
+    adapter = LinuxOps(_env(), endpoint, polls_to_finish=1, flip_after_polls=0)
+    monkeypatch.setattr("vcf_ops_telegraf_helper.storage.journal.DEFAULT_JOURNAL_DIR", tmp_path / "journal")
+    monkeypatch.setattr("vcf_ops_telegraf_helper.gui.main_window.get_adapter", lambda env: adapter)
+    monkeypatch.setattr("vcf_ops_telegraf_helper.gui.main_window.QInputDialog.getText", lambda *a, **k: ("linux-demo", True))
+    window.step_list.setCurrentRow(window.STEP_EXECUTE)
+    window._run_workflow()
+    summary = _wait_for_summary(window)
+    assert summary is not None and summary.success, window.stage_list_box.toPlainText()
+    assert "2 items were left on the VM for you to review" in window.result_banner.text()
+    assert "#d95926" in window.result_banner.styleSheet()
+    assert "remove them by hand if nothing else uses them" in window.stage_list_box.toPlainText()
     window.close()
 
 
@@ -391,3 +419,31 @@ def test_linux_resume_rejects_windows_journal(tmp_path):
     result = resumed.run()
     assert not result.success and "different operating system" in result.stages[0].message
     assert not resumed.adapter.uninstall_calls
+
+
+def test_cleanup_scope_does_not_repeat_a_nested_directory():
+    from vcf_ops_telegraf_helper.workflow.managed import ManagedInstallation, WINDOWS_PATHS
+    linux = ManagedInstallation(P)
+    linux.root_present = linux.cert_dir_present = True
+    assert linux.cleanup_paths == [ROOT]
+    linux.root_present = False
+    assert linux.cleanup_paths == [P.cert_dir]
+    windows = ManagedInstallation(WINDOWS_PATHS)
+    windows.root_present = windows.data_root_present = windows.cert_dir_present = True
+    assert windows.cleanup_paths == [WINDOWS_PATHS.root, WINDOWS_PATHS.data_root]
+    windows.data_root_present = False
+    assert windows.cleanup_paths == [WINDOWS_PATHS.root, WINDOWS_PATHS.cert_dir]
+
+
+def test_retained_items_survive_continuity_resume(tmp_path):
+    endpoint = ManagedLinuxEndpoint()
+    workflow = linux_workflow(tmp_path, endpoint, continuity_wait_seconds=0)
+    workflow.adapter.flip_after_polls = 100
+    first = workflow.run()
+    assert first.success and workflow.record.state == "installed"
+    resumed = linux_workflow(tmp_path, endpoint, continuity_wait_seconds=0)
+    resumed.adapter.retired = True
+    resumed.adapter.flip_after_polls = 0
+    final = resumed.run()
+    assert final.success and final.retained_items == first.retained_items
+    assert final.verifications["Retained items"] == first.verifications["Retained items"]

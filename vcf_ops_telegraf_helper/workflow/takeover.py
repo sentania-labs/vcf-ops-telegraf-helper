@@ -79,6 +79,7 @@ class TakeoverSummary(BaseModel):
     agent_object_after: Optional[AgentObjectInfo] = None
     install_summary: Optional[RunSummary] = None
     import_summary: List[str] = Field(default_factory=list)
+    retained_items: List[str] = Field(default_factory=list)
 
     def to_json(self, indent: int = 2) -> str:
         return self.model_dump_json(indent=indent)
@@ -175,6 +176,7 @@ class TakeoverWorkflow:
         self.stage_results: List[StageResult] = []
         self.results: Dict[str, str] = {}
         self.verifications: Dict[str, str] = {}
+        self.retained_items: List[str] = []
         self.cutover_started: Optional[float] = None
         self._resumed = False
         self._already_installed = False
@@ -361,6 +363,9 @@ class TakeoverWorkflow:
             self._already_installed = True
             self.results[RESULT_INSTALL] = "PASS (before the interruption)"
         self.record = previous
+        self.retained_items = list(previous.retained_items)
+        if self.retained_items:
+            self.verifications["Retained items"] = "; ".join(self.retained_items)
         self.agent_before = previous.agent_object_before
         self.cutover_started = previous.cutover_started_epoch
         self._resumed = True
@@ -518,6 +523,8 @@ class TakeoverWorkflow:
                     if path.exists():
                         registry = path.read_text(encoding="utf-8")
                 removed, left = clean_linux_managed_installation(self.executor, registry)
+                self.retained_items = list(left)
+                self.record.retained_items = list(left)
                 self.verifications["Managed services absent"] = "PASS"
                 self.verifications["Managed files removed"] = "PASS"
                 if left:
@@ -584,8 +591,11 @@ class TakeoverWorkflow:
                     removed.append(MANAGED_DATA_ROOT)
                 else:
                     left.append(f"{MANAGED_DATA_ROOT} ({res.stdout.strip().replace('LEFT ', '') or '?'} files left by the uninstall)")
+            self.retained_items = list(left)
+            self.record.retained_items = list(left)
             self.verifications["Managed services absent"] = "PASS"
             if left:
+                self.verifications["Retained items"] = "; ".join(left)
                 self.verifications["Managed files removed"] = "LEFT IN PLACE (" + "; ".join(left) + ")"
             else:
                 self.verifications["Managed files removed"] = "PASS" if removed else "PASS (nothing left behind)"
@@ -731,4 +741,5 @@ class TakeoverWorkflow:
             agent_object_after=self.agent_after,
             install_summary=self.install_summary,
             import_summary=self.imported.summary_lines() if self.imported else [],
+            retained_items=list(self.retained_items),
         )

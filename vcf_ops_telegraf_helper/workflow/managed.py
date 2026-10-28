@@ -107,7 +107,9 @@ class ManagedInstallation:
             paths.append(self.paths.root)
         if self.data_root_present and self.paths.data_root != self.paths.root:
             paths.append(self.paths.data_root)
-        elif self.cert_dir_present:
+        elif self.cert_dir_present and not (
+            self.root_present and self.paths.cert_dir.startswith(self.paths.join(self.paths.root, ""))
+        ):
             paths.append(self.paths.cert_dir)
         return paths
 

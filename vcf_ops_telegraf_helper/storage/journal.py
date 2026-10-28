@@ -53,6 +53,7 @@ class TakeoverRecord(BaseModel):
     stages: List[Dict[str, Any]] = Field(default_factory=list)
     results: Dict[str, str] = Field(default_factory=dict)
     notes: List[str] = Field(default_factory=list)
+    retained_items: List[str] = Field(default_factory=list)
 
     @property
     def key(self) -> str:

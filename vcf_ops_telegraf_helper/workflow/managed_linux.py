@@ -27,14 +27,16 @@ if [ -n "$units" ]; then
     systemctl show --no-pager --property=Id,LoadState,ActiveState,SubState,ExecStart,FragmentPath $units
 fi""", timeout=30)
     if not result.success:
-        found.query_error = "Could not query systemd services"
+        found.query_error = ("Could not list systemd services. Check that the SSH account has passwordless sudo rights "
+                             "to run systemctl, then detect the endpoint again. This check made no changes.")
         return found
     for block in result.stdout.strip().split("\n\n"):
         if not block.strip():
             continue
         props = dict(line.split("=", 1) for line in block.splitlines() if "=" in line)
         if not props.get("Id") or not props.get("LoadState"):
-            found.query_error = "Incomplete systemd service response"
+            found.query_error = ("The systemd service response was incomplete. Check systemctl on the VM, then detect "
+                                 "the endpoint again. This check made no changes.")
             return found
         name = props["Id"].removesuffix(".service")
         command = props.get("ExecStart", "")
@@ -180,7 +182,7 @@ if [ -d {ROOT} ]; then find {ROOT} -depth -type d -empty -delete; fi
             raise RuntimeError(f"Managed files remain under {path}")
         removed.append(path)
     if executor.file_exists(ROOT):
-        left.append(ROOT + " (other files left by the uninstall)")
+        left.append(ROOT + " still holds files the Ops uninstall left; review and delete them by hand")
     # No known vendor artifact proves account creation, so even an idle account is not safe to delete.
     account = shell(executor, """set -e
 if getent passwd arcuser >/dev/null || getent group arcgroup >/dev/null; then echo RETAINED; fi
@@ -196,5 +198,6 @@ done""")
     if not account.success:
         raise RuntimeError("Could not check the managed account")
     if "RETAINED" in account.stdout:
-        left.append("arcuser/arcgroup and any sudoers entry (installer ownership cannot be proven)")
+        left.append("the arcuser account, arcgroup group and their sudoers rule were kept because the helper "
+                    "cannot prove the Ops installer created them; remove them by hand if nothing else uses them")
     return removed, left
