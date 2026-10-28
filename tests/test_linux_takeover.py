@@ -359,7 +359,7 @@ def test_generated_linux_shell_is_valid_bash():
             assert checked.returncode == 0, checked.stderr
 
 
-def _cleanup_sandbox(tmp_path, hook_body=None):
+def _cleanup_sandbox(tmp_path, hook_body=None, ghost=None):
     """Build a filesystem sandbox, fake systemctl and an endpoint that runs the emitted shell in it, without sudo."""
     import os
     import subprocess
@@ -374,7 +374,8 @@ def _cleanup_sandbox(tmp_path, hook_body=None):
         folder.mkdir(parents=True)
         (folder / "payload").write_text("synthetic")
     for name in ("ucp-minion", "ucp-telegraf"):
-        (units / (name + ".service")).write_text(unit(name, str(root / name / "payload")))
+        suffix = ".ghost" if name == ghost else ".service"
+        (units / (name + suffix)).write_text(unit(name, str(root / name / "payload")))
     (units / "salt-minion.service").write_text(unit("salt-minion", "/usr/bin/salt-minion"))
     (units / "ucp-other.service").write_text(unit("ucp-other", "/usr/bin/other"))
     (root / "unknown.txt").write_text("preserve me")
@@ -389,16 +390,23 @@ set -e
 case "$1" in
 list-unit-files|list-units)
     echo "getty@.service enabled"
-    for unit in "$FAKE_UNITS"/*.service; do [ -f "$unit" ] && echo "${unit##*/} enabled"; done ;;
+    for unit in "$FAKE_UNITS"/*.service "$FAKE_UNITS"/*.ghost; do
+        [ -f "$unit" ] || continue
+        name=${unit##*/}
+        echo "${name%.ghost}.service enabled" | sed 's/.service.service/.service/'
+    done ;;
 show)
     [[ "$*" != *getty@.service* ]] || exit 2
     if [[ "$*" == *--property=Id,LoadState* ]]; then
-        for unit in "$FAKE_UNITS"/*.service; do cat "$unit"; echo; done
+        for unit in "$FAKE_UNITS"/*.service "$FAKE_UNITS"/*.ghost; do if [ -f "$unit" ]; then cat "$unit"; echo; fi; done
     elif [[ "$*" == *--property=LoadState* ]]; then
-        if [ -f "$FAKE_UNITS/$2" ]; then echo loaded; else echo not-found; fi
+        if [ -f "$FAKE_UNITS/$2" ] || [ -f "$FAKE_UNITS/${2%.service}.ghost" ]; then echo loaded; else echo not-found; fi
     elif [[ "$*" == *--property=FragmentPath* ]]; then echo "$FAKE_UNITS/$2"
     else exit 2; fi ;;
-stop|disable|daemon-reload) : ;;
+disable)
+    [ -f "$FAKE_UNITS/$2" ] || { echo "Unit file $2 does not exist." >&2; exit 1; } ;;
+daemon-reload) rm -f "$FAKE_UNITS"/*.ghost ;;
+stop) : ;;
 *) exit 2 ;;
 esac
 ''')
@@ -437,6 +445,14 @@ def test_cleanup_shell_removes_synthetic_tree_and_preserves_stock_salt(tmp_path)
     assert any(ROOT in item for item in left)
     assert any("sudoers" in item for item in left)
     assert (tmp_path / "sudoers").exists()
+
+
+def test_cleanup_removes_loaded_unit_whose_fragment_is_gone(tmp_path):
+    root, units, marker, endpoint = _cleanup_sandbox(tmp_path, ghost="ucp-telegraf")
+    assert not (units / "ucp-telegraf.service").exists()
+    clean_linux_managed_installation(endpoint, json.dumps({"uninstallCommand": ROOT + "/tmp/hook"}))
+    assert sorted(path.name for path in units.iterdir()) == ["salt-minion.service", "ucp-other.service"]
+    assert not (root / "ucp-telegraf").exists()
 
 
 def test_cleanup_refuses_root_redirected_after_vendor_uninstall(tmp_path):

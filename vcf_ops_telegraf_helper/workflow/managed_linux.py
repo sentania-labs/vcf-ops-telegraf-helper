@@ -130,7 +130,7 @@ load=$(systemctl show "$unit" --property=LoadState --value)
 if [ "$load" != not-found ]; then
     systemctl stop "$unit"
     fragment=$(systemctl show "$unit" --property=FragmentPath --value)
-    systemctl disable "$unit"
+    if [ -n "$fragment" ] && [ -e "$fragment" ]; then systemctl disable "$unit"; fi
     case "$fragment" in
         /etc/systemd/system/*|/usr/lib/systemd/system/*|/lib/systemd/system/*) rm -f -- "$fragment" ;;
         {ROOT}/*|'') ;;
