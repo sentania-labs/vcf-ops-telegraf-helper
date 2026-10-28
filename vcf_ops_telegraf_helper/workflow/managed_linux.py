@@ -109,19 +109,14 @@ def clean_linux_managed_installation(executor, registry=None):
         raise RuntimeError("Managed root is redirected; cleanup cannot proceed safely")
     try:
         commands = vendor_uninstall_commands(registry)
-        if registry and not commands:
-            left.append("vendor uninstall manifest has no supported commands; checked cleanup used instead")
     except (ValueError, TypeError):
         commands = []
-        left.append("vendor uninstall manifest could not be used; checked cleanup used instead")
     for command in commands:
         # A successful Ops retirement may already have removed the hook.
         args = shlex.split(command)
         executable = args[1] if args[0] in ("sh", "bash", "/bin/sh", "/bin/bash") else args[0]
         if executor.file_exists(executable):
-            result = shell(executor, command, timeout=120)
-            if not result.success:
-                left.append("vendor uninstall command failed; checked cleanup used instead")
+            shell(executor, command, timeout=120)
     after_vendor = detect_linux_managed_installation(executor, read_config=False)
     if not after_vendor.query_ok:
         raise RuntimeError(after_vendor.query_error)
@@ -163,7 +158,7 @@ for proc in /proc/[0-9]*; do
     case "$exe $args" in *{ROOT}/*) echo 'Managed process remains'; exit 1 ;; esac
 done
 # Refuse redirected managed roots before recursive removal.
-[ ! -L /opt/vmware ] && [ ! -L {ROOT} ]
+if [ -L /opt/vmware ] || [ -L {ROOT} ]; then exit 1; fi
 for path in salt-minion ucp-salt-minion ucp-minion ucp-telegraf certkeys; do
     rm -rf -- "{ROOT}/$path"
 done
