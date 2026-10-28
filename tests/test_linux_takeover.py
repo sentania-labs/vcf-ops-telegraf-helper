@@ -310,8 +310,8 @@ def test_generated_linux_shell_is_valid_bash():
             assert checked.returncode == 0, checked.stderr
 
 
-def test_cleanup_shell_removes_synthetic_tree_and_preserves_stock_salt(tmp_path):
-    """Execute the emitted shell against a filesystem sandbox and a fake systemctl, without sudo."""
+def _cleanup_sandbox(tmp_path, hook_body=None):
+    """Build a filesystem sandbox, fake systemctl and an endpoint that runs the emitted shell in it, without sudo."""
     import os
     import subprocess
     root = tmp_path / "managed"
@@ -331,7 +331,7 @@ def test_cleanup_shell_removes_synthetic_tree_and_preserves_stock_salt(tmp_path)
     vendor = root / "tmp/hook"
     vendor.parent.mkdir()
     marker = tmp_path / "vendor-ran"
-    vendor.write_text("#!/bin/sh\ntouch " + shlex.quote(str(marker)) + "\n")
+    vendor.write_text("#!/bin/sh\ntouch " + shlex.quote(str(marker)) + "\n" + (hook_body or ""))
     vendor.chmod(0o700)
     systemctl = bins / "systemctl"
     systemctl.write_text('''#!/bin/bash
@@ -371,8 +371,12 @@ esac
         def file_exists(self, path):
             return Path(path.replace(ROOT, str(root))).exists()
 
-    removed, left = clean_linux_managed_installation(
-        SandboxEndpoint(), json.dumps({"uninstallCommand": ROOT + "/tmp/hook"}))
+    return root, units, marker, SandboxEndpoint()
+
+
+def test_cleanup_shell_removes_synthetic_tree_and_preserves_stock_salt(tmp_path):
+    root, units, marker, endpoint = _cleanup_sandbox(tmp_path)
+    removed, left = clean_linux_managed_installation(endpoint, json.dumps({"uninstallCommand": ROOT + "/tmp/hook"}))
     assert marker.exists()
     assert (units / "salt-minion.service").exists()
     assert not (units / "ucp-minion.service").exists()
@@ -382,6 +386,21 @@ esac
     assert ROOT + "/ucp-telegraf" in removed and any(ROOT in item for item in left)
     assert any("sudoers" in item for item in left)
     assert (tmp_path / "sudoers").exists()
+
+
+def test_cleanup_refuses_root_redirected_after_vendor_uninstall(tmp_path):
+    redirected = tmp_path / "redirected"
+    sentinel = redirected / "ucp-telegraf" / "payload"
+    sentinel.parent.mkdir(parents=True)
+    sentinel.write_text("outside the managed tree")
+    managed, original = tmp_path / "managed", tmp_path / "managed.orig"
+    hook = f"mv {shlex.quote(str(managed))} {shlex.quote(str(original))}\nln -s {shlex.quote(str(redirected))} {shlex.quote(str(managed))}\n"
+    _, _, marker, endpoint = _cleanup_sandbox(tmp_path, hook_body=hook)
+    with pytest.raises(RuntimeError, match="could not be removed safely"):
+        clean_linux_managed_installation(endpoint, json.dumps({"uninstallCommand": ROOT + "/tmp/hook"}))
+    assert marker.exists() and managed.is_symlink()
+    assert sentinel.read_text() == "outside the managed tree"
+    assert (original / "certkeys" / "payload").exists()
 
 
 def test_linux_cli_takeover(tmp_path, monkeypatch):
