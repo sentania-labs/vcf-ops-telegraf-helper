@@ -18,6 +18,7 @@ import requests
 
 from vcf_ops_telegraf_helper.adapters.base import IntegrationArtifacts, VCFOpsIntegration
 from vcf_ops_telegraf_helper.logger import get_logger
+from vcf_ops_telegraf_helper.security.tls import note_unverified_host
 from vcf_ops_telegraf_helper.models.vcf import (
     AgentObjectInfo,
     AgentTaskStatus,
@@ -63,6 +64,7 @@ class VCF91OpenTelegrafIntegration(VCFOpsIntegration):
         self.session.mount("https://", NativeTrustAdapter())
         if not env.verify_ssl:
             self.session.verify = False
+            note_unverified_host(self.base_url)
         else:
             self.session.verify = get_default_ca_bundle(env.ca_cert_path)
 
@@ -588,6 +590,7 @@ class VCF91OpenTelegrafIntegration(VCFOpsIntegration):
         script_name = "mandatory_tags.bat" if os_family.lower() == "windows" else "mandatory_tags.sh"
         url = f"https://{collector_address}/downloads/salt/{script_name}"
         try:
+            note_unverified_host(url)
             resp = self.session.get(url, verify=False, timeout=10)
             if resp.status_code == 200 and resp.text.strip():
                 content = resp.text

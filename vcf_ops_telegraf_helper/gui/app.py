@@ -28,7 +28,7 @@ def hide_console_window() -> None:
             # Leave that host alone, including unrelated tabs in its window.
             if hwnd and user.IsWindowVisible(hwnd):
                 user.ShowWindow(hwnd, 0)  # SW_HIDE
-            # Keep the console attached so startup diagnostics retain valid handles.
+                kernel.FreeConsole()
         except Exception:
             pass
 
@@ -93,6 +93,12 @@ def run_gui(theme: str = "dark") -> int:
         return 1
 
     app.setApplicationName("VCF Operations Open Telegraf Helper")
+    # Stylesheets size text in pixels, leaving the default font point size unset (-1),
+    # which Qt warns about whenever a widget derives a font from it.
+    default_font = app.font()
+    if default_font.pointSize() <= 0:
+        default_font.setPointSize(9)
+        app.setFont(default_font)
     hide_console_window()
 
 

@@ -53,7 +53,7 @@ def smoke(artifact: Path, signed: bool = False) -> None:
             subprocess.run([str(binary)], cwd=root, env=launch_env,
                            creationflags=subprocess.CREATE_NEW_CONSOLE, check=True, timeout=120)
             status = json.loads(report.with_suffix('.console.json').read_text())
-            if not status['attached'] or status['visible'] or not status['gui_visible']:
+            if status['attached'] or status['visible'] or not status['gui_visible']:
                 raise RuntimeError(f'Desktop console visibility check failed: {status}')
             if not report.is_file() or report.stat().st_size < 100:
                 raise RuntimeError('Windows desktop launch did not render the GUI')

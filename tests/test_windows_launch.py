@@ -43,7 +43,7 @@ def test_hide_owned_console_uses_pointer_sized_handle(monkeypatch):
     assert kernel.GetConsoleWindow.restype == ctypes.c_void_p
     assert user.ShowWindow.argtypes[0] == ctypes.c_void_p
     user.ShowWindow.assert_called_once_with(hwnd, 0)
-    kernel.FreeConsole.assert_not_called()
+    kernel.FreeConsole.assert_called_once_with()
 
 
 @pytest.mark.parametrize("frozen,count,expected", [(False, 2, False), (False, 1, True),
@@ -67,3 +67,29 @@ def test_hide_skips_windows_terminal_message_only_handle(monkeypatch):
     monkeypatch.setattr(ctypes, 'windll', SimpleNamespace(kernel32=kernel, user32=user), raising=False)
     app.hide_console_window()
     user.ShowWindow.assert_not_called()
+
+
+def test_hide_skips_windows_terminal_message_only_handle_keeps_console(monkeypatch):
+    kernel = SimpleNamespace(GetConsoleWindow=Mock(return_value=123),
+                             GetConsoleProcessList=Mock(return_value=2), FreeConsole=Mock())
+    user = SimpleNamespace(ShowWindow=Mock(), IsWindowVisible=Mock(return_value=False))
+    monkeypatch.setattr(app.sys, 'platform', 'win32')
+    monkeypatch.setattr(app.sys, 'frozen', True, raising=False)
+    monkeypatch.setattr(ctypes, 'windll', SimpleNamespace(kernel32=kernel, user32=user), raising=False)
+    app.hide_console_window()
+    kernel.FreeConsole.assert_not_called()
+
+
+def test_unverified_certificate_logged_once_per_host(caplog):
+    import warnings
+    from vcf_ops_telegraf_helper.security import tls
+    tls._unverified_hosts.clear()
+    with caplog.at_level('WARNING'):
+        tls.note_unverified_host('https://ops.example.com/suite-api')
+        tls.note_unverified_host('https://ops.example.com/ui')
+    assert [r.getMessage() for r in caplog.records if r.name.endswith('tls')] == [
+        'Certificate verification is disabled for ops.example.com']
+    import urllib3
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.warn('x', urllib3.exceptions.InsecureRequestWarning)
+    assert not caught
