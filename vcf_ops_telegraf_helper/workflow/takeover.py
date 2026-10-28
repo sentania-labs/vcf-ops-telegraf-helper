@@ -522,7 +522,7 @@ class TakeoverWorkflow:
                     path = Path(self.record.backup_dir) / "uaf/agents-registry.json"
                     if path.exists():
                         registry = path.read_text(encoding="utf-8")
-                removed, left = clean_linux_managed_installation(self.executor, registry)
+                left = clean_linux_managed_installation(self.executor, registry)
                 self.retained_items = list(left)
                 self.record.retained_items = list(left)
                 self.verifications["Managed services absent"] = "PASS"

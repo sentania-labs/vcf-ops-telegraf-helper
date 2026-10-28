@@ -8,7 +8,6 @@ from vcf_ops_telegraf_helper.workflow.managed import LINUX_PATHS, ManagedInstall
 
 ROOT = LINUX_PATHS.root
 REGISTRY = ROOT + "/uaf/agents-registry.json"
-SERVICE_NAMES = ("salt-minion", "ucp-salt-minion", "ucp-minion", "ucp-telegraf")
 
 
 def shell(executor, script, timeout=30):
@@ -99,8 +98,8 @@ def vendor_uninstall_commands(registry):
 
 
 def clean_linux_managed_installation(executor, registry=None):
-    """Return removed paths and retained items; fail before OSS install on surviving services/processes."""
-    removed, left = [], []
+    """Return retained items; fail before OSS install on surviving services/processes."""
+    left = []
     before = detect_linux_managed_installation(executor, read_config=False)
     if not before.query_ok:
         raise RuntimeError(before.query_error)
@@ -175,7 +174,6 @@ if [ -d {ROOT} ]; then find {ROOT} -depth -type d -empty -delete; fi
         path = ROOT + "/" + name
         if executor.file_exists(path):
             raise RuntimeError(f"Managed files remain under {path}")
-        removed.append(path)
     if executor.file_exists(ROOT):
         left.append(ROOT + " still holds files the Ops uninstall left; review and delete them by hand")
     # No known vendor artifact proves account creation, so even an idle account is not safe to delete.
@@ -195,4 +193,4 @@ done""")
     if "RETAINED" in account.stdout:
         left.append("the arcuser account, arcgroup group and their sudoers rule were kept because the helper "
                     "cannot prove the Ops installer created them; remove them by hand if nothing else uses them")
-    return removed, left
+    return left

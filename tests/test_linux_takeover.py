@@ -421,14 +421,14 @@ esac
 
 def test_cleanup_shell_removes_synthetic_tree_and_preserves_stock_salt(tmp_path):
     root, units, marker, endpoint = _cleanup_sandbox(tmp_path)
-    removed, left = clean_linux_managed_installation(endpoint, json.dumps({"uninstallCommand": ROOT + "/tmp/hook"}))
+    left = clean_linux_managed_installation(endpoint, json.dumps({"uninstallCommand": ROOT + "/tmp/hook"}))
     assert marker.exists()
     assert (units / "salt-minion.service").exists()
     assert not (units / "ucp-minion.service").exists()
     assert not (root / "ucp-telegraf").exists()
     assert not (root / "certkeys").exists()
     assert (root / "unknown.txt").read_text() == "preserve me"
-    assert ROOT + "/ucp-telegraf" in removed and any(ROOT in item for item in left)
+    assert any(ROOT in item for item in left)
     assert any("sudoers" in item for item in left)
     assert (tmp_path / "sudoers").exists()
 
