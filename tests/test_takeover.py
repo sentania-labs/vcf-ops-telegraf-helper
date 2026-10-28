@@ -45,6 +45,8 @@ class ManagedWindowsEndpoint(MockExecutor):
         self.managed = True
         self.remnant_root = False
         self.remnant_files = 0
+        self.remnant_data_root = False
+        self.remnant_data_files = 0
         self.install_fails = False
         self.service_query_fails = False
         self.files = {MANAGED_TELEGRAF_CONF: FIXTURE.read_text(), MANAGED_GRAINS: grains,
@@ -54,6 +56,7 @@ class ManagedWindowsEndpoint(MockExecutor):
     def retire(self) -> None:
         self.managed = False
         self.remnant_root = True
+        self.remnant_data_root = True
         self.files = {}
         self.telegraf_installed = False  # the Ops uninstall takes its telegraf with it
 
@@ -80,6 +83,14 @@ class ManagedWindowsEndpoint(MockExecutor):
             return CommandResult(exit_code=0, stdout="True\n" if (self.managed or self.remnant_root) else "False\n", command=command)
         if command.startswith("Test-Path -Path 'C:\\ProgramData\\VMware\\UCP\\certkeys'"):
             return CommandResult(exit_code=0, stdout="True\n" if self.managed else "False\n", command=command)
+        if command.startswith("Test-Path -Path 'C:\\ProgramData\\VMware\\UCP'"):
+            return CommandResult(exit_code=0, stdout="True\n" if (self.managed or self.remnant_data_root) else "False\n", command=command)
+        if "Remove-Item -Path 'C:\\ProgramData\\VMware\\UCP'" in command:
+            if self.remnant_data_files:
+                return CommandResult(exit_code=0, stdout=f"LEFT {self.remnant_data_files}\n", command=command)
+            self.removed.append("C:\\ProgramData\\VMware\\UCP")
+            self.remnant_data_root = False
+            return CommandResult(exit_code=0, stdout="REMOVED\n", command=command)
         if "Remove-Item -Path 'C:\\VMware\\UCP'" in command:
             if self.remnant_files:
                 return CommandResult(exit_code=0, stdout=f"LEFT {self.remnant_files}\n", command=command)
@@ -524,7 +535,23 @@ def test_non_empty_remnant_root_is_left_in_place(tmp_path):
     assert summary.success
     assert summary.stages[4].status == StageStatus.WARNING and "left in place" in summary.stages[4].message
     assert summary.verifications["Managed files removed"].startswith("LEFT IN PLACE")
-    assert endpoint.removed == []
+    assert "C:\\VMware\\UCP" not in endpoint.removed
+
+
+def test_empty_data_root_is_removed_and_a_non_empty_one_is_left(tmp_path):
+    wf = _workflow(tmp_path)
+    assert wf.run().success
+    assert "C:\\ProgramData\\VMware\\UCP" in wf.executor.removed
+    assert not wf.executor.remnant_data_root
+
+    endpoint = ManagedWindowsEndpoint()
+    endpoint.remnant_data_files = 3
+    wf = _workflow(tmp_path / "second", endpoint=endpoint)
+    summary = wf.run()
+    assert summary.success
+    assert summary.stages[4].status == StageStatus.WARNING and "ProgramData" in summary.stages[4].message
+    assert summary.verifications["Managed files removed"].startswith("LEFT IN PLACE")
+    assert endpoint.remnant_data_root
 
 
 def test_fresh_sample_without_type_flip_is_not_ingestion(tmp_path):

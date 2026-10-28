@@ -37,6 +37,7 @@ from vcf_ops_telegraf_helper.workflow.managed_config import ImportedConfig, impo
 from vcf_ops_telegraf_helper.workflow.progress import ProgressReporter, SilentProgressReporter
 from vcf_ops_telegraf_helper.workflow.windows import (
     MANAGED_CERT_DIR,
+    MANAGED_DATA_ROOT,
     MANAGED_ROOT,
     ManagedInstallation,
     detect_managed_installation,
@@ -547,6 +548,18 @@ class TakeoverWorkflow:
                 if not res.success:
                     raise RuntimeError(f"Could not remove {MANAGED_CERT_DIR}: {res.stderr or res.stdout}")
                 removed.append(MANAGED_CERT_DIR)
+            if after.data_root_present:
+                res = self.executor.execute(
+                    f"$left = Get-ChildItem -Path '{MANAGED_DATA_ROOT}' -Recurse -File -Force -ErrorAction SilentlyContinue | Measure-Object | Select-Object -ExpandProperty Count; "
+                    f"if ($left -eq 0) {{ Remove-Item -Path '{MANAGED_DATA_ROOT}' -Recurse -Force -ErrorAction Stop; Write-Output 'REMOVED' }} else {{ Write-Output \"LEFT $left\" }}",
+                    timeout=60,
+                )
+                if not res.success:
+                    raise RuntimeError(f"Could not remove {MANAGED_DATA_ROOT}: {res.stderr or res.stdout}")
+                if "REMOVED" in res.stdout:
+                    removed.append(MANAGED_DATA_ROOT)
+                else:
+                    left.append(f"{MANAGED_DATA_ROOT} ({res.stdout.strip().replace('LEFT ', '') or '?'} files left by the uninstall)")
             self.verifications["Managed services absent"] = "PASS"
             if left:
                 self.verifications["Managed files removed"] = "LEFT IN PLACE (" + "; ".join(left) + ")"
