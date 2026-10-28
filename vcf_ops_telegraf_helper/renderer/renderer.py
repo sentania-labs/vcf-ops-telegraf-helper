@@ -463,17 +463,19 @@ class TelegrafRenderer:
                 # script's own default line instead. Two quoted arguments would give cmd.exe four quote
                 # characters, and it strips the outer pair, so a path under C:\Program Files would run
                 # C:\Program and the Guest Info tags would never arrive.
+                # Telegraf 1.40+ deprecates the string command form in favor of array syntax (issue #71).
                 norm_script = mandatory_tags_path.replace("\\", "/")
-                cmd_str = f'cmd.exe /c "{norm_script}"'
+                commands_val = f'[["cmd.exe", "/c", {_escape_toml_str(norm_script)}]]'
             else:
                 cmd_pfx = "/bin/bash"
                 bin_path = telegraf_bin_path or "/usr/bin/telegraf"
                 cmd_str = f'{cmd_pfx} "{mandatory_tags_path}" "{bin_path}"'
+                commands_val = f"[{_escape_toml_str(cmd_str)}]"
             lines.extend([
                 "",
                 "# Mandatory tag telemetry required for VCF Operations agent status",
                 "[[inputs.exec]]",
-                f"  commands = [{_escape_toml_str(cmd_str)}]",
+                f"  commands = {commands_val}",
                 '  timeout = "5s"',
                 '  data_format = "influx"',
             ])

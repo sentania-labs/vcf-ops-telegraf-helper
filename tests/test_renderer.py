@@ -215,7 +215,7 @@ def test_render_vcf_output_ip_hostname_not_truncated():
 
 
 def test_render_vcf_output_windows_cmd_quoting():
-    """Verify Windows mandatory_tags command uses forward slashes to avoid backslash escaping issues."""
+    """Verify Windows mandatory_tags command uses array syntax and forward slashes to avoid backslash escaping issues."""
     rendered = TelegrafRenderer.render_vcf_output(
         collector_address="172.27.8.54",
         hostname="win-node",
@@ -225,11 +225,11 @@ def test_render_vcf_output_windows_cmd_quoting():
     )
     parsed = tomllib.loads(rendered)
     exec_cmd = parsed["inputs"]["exec"][0]["commands"][0]
-    assert exec_cmd == 'cmd.exe /c "C:/telegraf/telegraf.d/mandatory_tags.bat"'
+    assert exec_cmd == ["cmd.exe", "/c", "C:/telegraf/telegraf.d/mandatory_tags.bat"]
 
 
 def test_render_vcf_output_windows_cmd_quoting_with_spaces():
-    """Verify Windows mandatory_tags command quotes paths containing spaces."""
+    """Verify Windows mandatory_tags command preserves paths containing spaces in array form."""
     rendered = TelegrafRenderer.render_vcf_output(
         collector_address="172.27.8.54",
         hostname="win-node",
@@ -239,7 +239,7 @@ def test_render_vcf_output_windows_cmd_quoting_with_spaces():
     )
     parsed = tomllib.loads(rendered)
     exec_cmd = parsed["inputs"]["exec"][0]["commands"][0]
-    assert exec_cmd == 'cmd.exe /c "C:/Program Files/Telegraf/mandatory_tags.bat"'
+    assert exec_cmd == ["cmd.exe", "/c", "C:/Program Files/Telegraf/mandatory_tags.bat"]
 
 
 def test_render_vcf_output_omits_tls_cert_when_not_provided():
