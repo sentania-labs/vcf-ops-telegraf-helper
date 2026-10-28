@@ -33,6 +33,7 @@ class TakeoverRecord(BaseModel):
     vc_id: str
     vm_resource_id: Optional[str] = None
     target_hostname: str
+    os_family: str = "windows"  # records predating Linux support are Windows takeovers
     ops_url: str
     collector_address: Optional[str] = None
     state: str = "captured"  # captured, backed_up, retired, cleaned, installed, verified, failed
