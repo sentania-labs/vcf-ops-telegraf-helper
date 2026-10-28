@@ -291,7 +291,7 @@ MANAGED_GRAINS = MANAGED_ROOT + r"\salt\conf\grains"
 class ManagedInstallation:
     """What an Ops product-managed agent looks like on one Windows endpoint.
 
-    `present` is decided by the control services (salt-minion, ucp-minion, ucp-telegraf) or a
+    `present` is decided by the control services (salt-minion, ucp-salt-minion, ucp-minion, ucp-telegraf) or a
     telegraf service running from under C:\\VMware\\UCP. Directories alone are only cleanup scope:
     the Ops uninstall leaves an empty C:\\VMware\\UCP behind.
     """
