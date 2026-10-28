@@ -153,10 +153,14 @@ def test_stock_salt_is_not_managed_and_query_failure_is_not_absence():
     assert "sudo rights" in failed.query_error and "detect the endpoint again" in failed.query_error
 
 
-def test_renamed_managed_service_is_detected():
+def test_only_named_units_under_the_managed_root_are_detected():
     endpoint = ManagedLinuxEndpoint()
-    endpoint.services = {"custom": unit("custom", ROOT + "/ucp-minion/bin/ucp-minion", "inactive")}
-    assert "custom" in detect_linux_managed_installation(endpoint).services
+    endpoint.services = {
+        "custom": unit("custom", ROOT + "/ucp-minion/bin/ucp-minion", "inactive"),
+        "ucp-other": unit("ucp-other", "/usr/bin/other"),
+        "ucp-minion": unit("ucp-minion", ROOT + "/ucp-minion/bin/ucp-minion", "inactive"),
+    }
+    assert set(detect_linux_managed_installation(endpoint).services) == {"ucp-minion"}
 
 
 def test_full_linux_takeover_and_backup(tmp_path):
@@ -372,6 +376,7 @@ def _cleanup_sandbox(tmp_path, hook_body=None):
     for name in ("ucp-minion", "ucp-telegraf"):
         (units / (name + ".service")).write_text(unit(name, str(root / name / "payload")))
     (units / "salt-minion.service").write_text(unit("salt-minion", "/usr/bin/salt-minion"))
+    (units / "ucp-other.service").write_text(unit("ucp-other", "/usr/bin/other"))
     (root / "unknown.txt").write_text("preserve me")
     vendor = root / "tmp/hook"
     vendor.parent.mkdir()
@@ -424,6 +429,7 @@ def test_cleanup_shell_removes_synthetic_tree_and_preserves_stock_salt(tmp_path)
     left = clean_linux_managed_installation(endpoint, json.dumps({"uninstallCommand": ROOT + "/tmp/hook"}))
     assert marker.exists()
     assert (units / "salt-minion.service").exists()
+    assert (units / "ucp-other.service").exists()
     assert not (units / "ucp-minion.service").exists()
     assert not (root / "ucp-telegraf").exists()
     assert not (root / "certkeys").exists()

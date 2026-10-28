@@ -7,6 +7,7 @@ import shlex
 from vcf_ops_telegraf_helper.workflow.managed import LINUX_PATHS, ManagedInstallation, read_managed_config
 
 ROOT = LINUX_PATHS.root
+SERVICE_NAMES = ("salt-minion", "ucp-salt-minion", "ucp-minion", "ucp-telegraf")
 REGISTRY = ROOT + "/uaf/agents-registry.json"
 
 
@@ -42,7 +43,7 @@ fi""", timeout=30)
         fragment = props.get("FragmentPath", "")
         if props["LoadState"] == "not-found":
             continue
-        if ROOT + "/" in command or fragment.startswith(ROOT + "/") or name.startswith("ucp-"):
+        if name in SERVICE_NAMES and (ROOT + "/" in command or fragment.startswith(ROOT + "/")):
             state = "Running" if props.get("ActiveState") == "active" else props.get("ActiveState", "unknown")
             found.services[name] = (state, command)
     found.query_ok = True
