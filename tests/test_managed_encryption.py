@@ -13,9 +13,9 @@ from test_managed_agent_discovery import _ManagedEndpoint
 from vcf_ops_telegraf_helper.executors.base import CommandResult
 
 
-def encrypted(data, key=b"synthetic key"):
+def encrypted(data, key=b"synthetic key", pad=True):
     iv = bytes(range(16))
-    padded = data + b" " * (16 - len(data) % 16)
+    padded = data + b" " * (16 - len(data) % 16) if pad else data
     cipher = Cipher(algorithms.AES(hashlib.sha256(key).digest()), modes.CBC(iv)).encryptor()
     return len(data).to_bytes(8, "little") + iv + cipher.update(padded) + cipher.finalize()
 
@@ -25,8 +25,18 @@ def test_decryption_truncates_padding_and_preserves_spaces():
     assert decrypt_managed_config(b"synthetic key", encrypted(data)) == data
 
 
+def test_decryption_accepts_block_aligned_data_without_padding():
+    data = b"0123456789abcdef" * 2
+    assert decrypt_managed_config(b"synthetic key", encrypted(data, pad=False)) == data
+
+
+def test_decryption_truncates_to_the_saved_size_whatever_the_padding_length():
+    payload = encrypted(b"example" + b" " * 40)
+    assert decrypt_managed_config(b"synthetic key", (7).to_bytes(8, "little") + payload[8:]) == b"example"
+
+
 def test_decryption_rejects_wrong_key_and_bad_lengths():
-    payload = encrypted(b"example")
+    payload = encrypted(b"example configuration for a wrong key")
     with pytest.raises(ValueError, match="decryption failed"):
         decrypt_managed_config(b"wrong key", payload)
     with pytest.raises(ValueError, match="truncated"):
