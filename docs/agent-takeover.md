@@ -50,6 +50,8 @@ The Linux implementation uses the observed VCF Operations 9.1.1 layout on Ubuntu
 | 6. Install | Run the existing Linux OSS installation with the imported inputs, helper tags script, fresh certificate and the same `vmId`/`vcid` headers. | Apply, restart or verification fails; resume from the backup. |
 | 7. Continuity | Check the same Linux OS object (kind `linux`) for its original resource id, Open Source type and samples newer than cutover. | Uses the same pending/changed/unknown results and resume behavior as Windows. |
 
+Linux capture refuses a symbolic link in the `telegraf.d` directory path or any linked fragment, including a broken link. The error names the path and stops the takeover before retirement. Replace the link with the intended directory or regular file, then retry.
+
 The stock Linux `cpu`, `mem`, `disk`, `net`, `system` and `processes` inputs map to the catalog when their options can be expressed there. Extra options and unsupported inputs stay in the Custom TOML fragment. The vendor tags command is replaced by the helper's Linux script. Windows self-check inputs are not added to a Linux import, including on resume.
 
 `arcuser`, `arcgroup` and their sudoers entry may be removed only when there is reliable evidence the installer created them and no other files or processes use the account. The observed layout provides no reliable creation record, so the helper conservatively retains them and reports that decision. An idle account or the name alone is not proof of ownership. Review the retained account and any other reported leftovers after takeover.

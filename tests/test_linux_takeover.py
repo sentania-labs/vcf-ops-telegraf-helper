@@ -2,6 +2,7 @@
 import base64
 import json
 import shlex
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -196,6 +197,50 @@ def test_partial_capture_stops_before_retirement(tmp_path):
     result = workflow.run()
     assert not result.success and not workflow.adapter.uninstall_calls
     assert "key.pem" in result.stages[-1].message
+
+
+@pytest.mark.parametrize("entry", ["directory", "fragment"])
+@pytest.mark.parametrize("target_kind", ["inside", "outside", "missing"])
+def test_symlinked_fragments_stop_capture_before_retirement(tmp_path, entry, target_kind):
+    """Run the emitted listing shell against real symlinks, including dangling ones."""
+    root = tmp_path / "ucp"
+    directory = root / Path(P.fragments).relative_to(ROOT)
+    directory.parent.mkdir(parents=True)
+    target = (root if target_kind == "inside" else tmp_path) / "linked-config"
+    if target_kind != "missing":
+        if entry == "directory":
+            target.mkdir()
+            (target / "health.conf").write_text(FRAGMENT)
+        else:
+            target.write_text(FRAGMENT)
+    if entry == "directory":
+        link = directory
+    else:
+        directory.mkdir()
+        link = directory / "health.conf"
+    link.symlink_to(target, target_is_directory=entry == "directory")
+
+    class LocalListingEndpoint(ManagedLinuxEndpoint):
+        def execute(self, command, timeout=30):
+            if "-printf" in command:
+                completed = subprocess.run(
+                    shlex.split(command.replace(ROOT, str(root))),
+                    capture_output=True, text=True, timeout=timeout,
+                )
+                return CommandResult(exit_code=completed.returncode, stdout=completed.stdout,
+                                     stderr=completed.stderr, command=command)
+            return super().execute(command, timeout)
+
+    workflow = linux_workflow(tmp_path, LocalListingEndpoint())
+    result = workflow.run()
+    assert not result.success
+    assert not workflow.adapter.uninstall_calls
+    assert not workflow.executor.vendor_called
+    assert "symbolic link" in result.stages[-1].message
+    assert str(link) in result.stages[-1].message
+    assert link.is_symlink()
+    if target_kind != "missing":
+        assert (target / "health.conf" if entry == "directory" else target).read_text() == FRAGMENT
 
 
 def test_linux_resume_after_retirement_uses_linux_import(tmp_path):

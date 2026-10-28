@@ -177,11 +177,27 @@ def read_managed_config(executor, found):
     if paths.is_windows:
         command = f"Get-ChildItem -Path '{paths.fragments}' -File -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Name"
     else:
-        command = "bash -c " + shlex.quote(
-            f"if [ -d {shlex.quote(paths.fragments)} ]; then find {shlex.quote(paths.fragments)} -maxdepth 1 -type f -printf '%f\\n'; fi")
+        command = "bash -c " + shlex.quote(f"""set -e
+directory={shlex.quote(paths.fragments)}
+path="$directory"
+while [ "$path" != / ]; do
+    if [ -L "$path" ]; then
+        printf 'Cannot capture symbolic link: %s\\n' "$path" >&2
+        exit 1
+    fi
+    path=$(dirname -- "$path")
+done
+if [ -d "$directory" ]; then
+    links=$(find "$directory" -maxdepth 1 -type l -printf '%p\\n')
+    if [ -n "$links" ]; then
+        printf 'Cannot capture symbolic links:\\n%s\\n' "$links" >&2
+        exit 1
+    fi
+    find "$directory" -maxdepth 1 -type f -printf '%f\\n'
+fi""")
     listing = executor.execute(command, timeout=10)
     if not listing.success:
-        found.read_errors.append(f"Could not list {paths.fragments}")
+        found.read_errors.append(f"Could not list {paths.fragments}: {listing.stderr.strip()}")
     elif listing.stdout.strip():
         for name in listing.stdout.splitlines():
             if name in (".", "..") or "/" in name or "\\" in name:
