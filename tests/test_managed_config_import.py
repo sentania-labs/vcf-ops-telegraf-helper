@@ -313,7 +313,7 @@ def test_workflow_renders_exec_without_argument_and_patches_the_script():
     wf.artifacts.mandatory_tags_content = VCF91OpenTelegrafIntegration._get_windows_mandatory_tag_script()
     wf.render_inputs()
     cmd = tomllib.loads(wf.vcf_conf_content)["inputs"]["exec"][0]["commands"][0]
-    assert cmd == f'cmd.exe /c "{wf.discovery.config_dir.replace(chr(92), "/")}/mandatory_tags.bat"'
+    assert cmd == ["cmd.exe", "/c", f"{wf.discovery.config_dir.replace(chr(92), '/')}/mandatory_tags.bat"]
     assert f'set TELEGRAF_BIN_PATH="{wf.discovery.telegraf_bin_path}"' in wf.artifacts.mandatory_tags_content
 
 
@@ -364,8 +364,7 @@ def test_windows_exec_line_is_quoted_and_passes_no_argument():
         telegraf_bin_path=r"C:\Program Files\Telegraf\telegraf.exe", is_windows=True,
     )
     cmd = tomllib.loads(out)["inputs"]["exec"][0]["commands"][0]
-    assert cmd == 'cmd.exe /c "C:/Program Files/Telegraf/telegraf.d/mandatory_tags.bat"'
-    assert cmd.count('"') == 2
+    assert cmd == ["cmd.exe", "/c", "C:/Program Files/Telegraf/telegraf.d/mandatory_tags.bat"]
 
 
 def test_codex_review_disk_filters_and_narrow_instances():
