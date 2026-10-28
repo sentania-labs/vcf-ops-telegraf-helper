@@ -387,10 +387,12 @@ class TakeoverWorkflow:
                 files["mandatory_tags.bat"] = self.managed.mandatory_tags
             if self.managed.grains is not None:
                 files["grains"] = self.managed.grains
-            if "telegraf.conf" not in files:
-                raise RuntimeError("Could not read the managed telegraf.conf; refusing to retire an agent whose configuration is not backed up.")
+            if self.managed.plugins_config is not None:
+                files["plugins/telegraf"] = self.managed.plugins_config
             if self.managed.read_errors:
                 raise RuntimeError("Managed configuration could not be read completely: " + "; ".join(self.managed.read_errors))
+            if "telegraf.conf" not in files:
+                raise RuntimeError("The managed configuration could not be read. Restore it and try again.")
             files["agent-object-before.json"] = self.agent_before.model_dump_json(indent=2) if self.agent_before else "{}"
             target = self.journal.write_backup(self.record, files)
             self.record.state = "backed_up"

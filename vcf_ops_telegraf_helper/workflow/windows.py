@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import base64
 import ntpath
 import re
 from typing import Optional
 
 from vcf_ops_telegraf_helper.executors.base import EndpointExecutor
 from vcf_ops_telegraf_helper.logger import get_logger
+from vcf_ops_telegraf_helper.workflow.managed_encryption import decrypt_managed_config
 
 logger = get_logger("workflow.windows")
 
@@ -272,9 +274,13 @@ def detect_windows_telegraf(executor: EndpointExecutor) -> WindowsTelegrafDetect
 # Ops product-managed agent (VCF Operations 9.1 footprint, verified in the lab on 2026-10-09)
 # ---------------------------------------------------------------------------
 
-MANAGED_SERVICE_NAMES = ("salt-minion", "ucp-minion", "ucp-telegraf")
+MANAGED_SERVICE_NAMES = ("salt-minion", "ucp-salt-minion", "ucp-minion", "ucp-telegraf")
 MANAGED_ROOT = r"C:\VMware\UCP"
-MANAGED_CERT_DIR = r"C:\ProgramData\VMware\UCP\certkeys"
+MANAGED_DATA_ROOT = r"C:\ProgramData\VMware\UCP"
+MANAGED_CERT_DIR = MANAGED_DATA_ROOT + r"\certkeys"
+MANAGED_KEY = MANAGED_CERT_DIR + r"\key.pem"
+MANAGED_ENCRYPTED_CONF = MANAGED_ROOT + r"\plugins\telegraf.conf-encrypted"
+MANAGED_ENCRYPTED_PLUGINS = MANAGED_ROOT + r"\plugins\telegraf-encrypted"
 MANAGED_TELEGRAF_DIR = MANAGED_ROOT + r"\ucp-telegraf"
 MANAGED_TELEGRAF_CONF = MANAGED_TELEGRAF_DIR + r"\telegraf.conf"
 MANAGED_TELEGRAF_D = MANAGED_TELEGRAF_DIR + r"\telegraf.d"
@@ -294,6 +300,8 @@ class ManagedInstallation:
         self.services: dict[str, tuple[str, str]] = {}  # name -> (state, path)
         self.root_present: bool = False
         self.cert_dir_present: bool = False
+        self.data_root_present: bool = False
+        self.plugins_config: Optional[str] = None
         self.telegraf_conf: Optional[str] = None
         self.telegraf_d: dict[str, str] = {}
         self.mandatory_tags: Optional[str] = None
@@ -329,7 +337,9 @@ class ManagedInstallation:
         paths = []
         if self.root_present:
             paths.append(MANAGED_ROOT)
-        if self.cert_dir_present:
+        if self.data_root_present:
+            paths.append(MANAGED_DATA_ROOT)
+        elif self.cert_dir_present:
             paths.append(MANAGED_CERT_DIR)
         return paths
 
@@ -360,7 +370,7 @@ def detect_managed_installation(
 
     Services are read from the service control manager by name and by binary path. With
     read_config the managed telegraf.conf, telegraf.d fragments, mandatory_tags.bat and the salt
-    grains are downloaded (text only, never the key files) so they can be ported and backed up.
+    grains are downloaded so they can be ported and backed up. The key is read only for decryption.
     """
     found = ManagedInstallation()
     names = "', '".join(MANAGED_SERVICE_NAMES)
@@ -394,6 +404,7 @@ def detect_managed_installation(
     # Remnant directories are cleanup scope: the Ops uninstall leaves an empty C:\VMware\UCP behind.
     found.root_present = _managed_path_exists(executor, MANAGED_ROOT)
     found.cert_dir_present = _managed_path_exists(executor, MANAGED_CERT_DIR)
+    found.data_root_present = _managed_path_exists(executor, MANAGED_DATA_ROOT)
     if not found.present:
         return found
     if found.telegraf_version is None:
@@ -401,16 +412,45 @@ def detect_managed_installation(
         if _is_valid_stdout(ver):
             found.telegraf_version = ver.stdout.strip().splitlines()[0].strip()
 
-    def _read(path: str) -> Optional[str]:
+    def _read(path: str, required: bool = False) -> Optional[str]:
         try:
             if not executor.file_exists(path):
+                if required:
+                    found.read_errors.append(f"The file {path} is missing. Restore it and try again.")
                 return None
             return executor.download(path)
         except Exception as exc:
             found.read_errors.append(f"{path}: {exc}")
             return None
 
-    found.telegraf_conf = _read(MANAGED_TELEGRAF_CONF)
+    def _binary(path: str) -> bytes:
+        safe_path = path.replace("'", "''")
+        result = executor.execute(f"[Convert]::ToBase64String([IO.File]::ReadAllBytes('{safe_path}'))", timeout=30)
+        if not result.success:
+            raise ValueError(f"Could not read {path}: {result.stderr or result.stdout}")
+        return base64.b64decode("".join(result.stdout.split()), validate=True)
+
+    def _decrypt(path: str) -> Optional[str]:
+        try:
+            if not executor.file_exists(MANAGED_KEY):
+                raise ValueError(f"The key file {MANAGED_KEY} is missing")
+            return decrypt_managed_config(_binary(MANAGED_KEY), _binary(path)).decode("utf-8")
+        except Exception as exc:
+            found.read_errors.append(f"Could not read {path}: {exc}. Check the file and key, then try again.")
+            return None
+
+    source = "plain file"
+    if executor.file_exists(MANAGED_TELEGRAF_CONF):
+        found.telegraf_conf = _read(MANAGED_TELEGRAF_CONF, required=True)
+    elif executor.file_exists(MANAGED_ENCRYPTED_CONF):
+        source = "encrypted file"
+        found.telegraf_conf = _decrypt(MANAGED_ENCRYPTED_CONF)
+    else:
+        found.read_errors.append(f"The managed configuration is missing: neither {MANAGED_TELEGRAF_CONF} nor {MANAGED_ENCRYPTED_CONF} exists. Restore the configuration and try again.")
+    if found.telegraf_conf is None:
+        source = "unavailable: " + "; ".join(found.read_errors)
+    if executor.file_exists(MANAGED_ENCRYPTED_PLUGINS):
+        found.plugins_config = _decrypt(MANAGED_ENCRYPTED_PLUGINS)
     found.mandatory_tags = _read(MANAGED_TAGS_SCRIPT)
     found.grains = _read(MANAGED_GRAINS)
     listing = executor.execute(
@@ -424,7 +464,7 @@ def detect_managed_installation(
                 content = _read(f"{MANAGED_TELEGRAF_D}\\{name}")
                 if content is not None:
                     found.telegraf_d[name] = content
-    logger.info("Managed agent inspection: %r, %d telegraf.d fragments", found, len(found.telegraf_d))
+    logger.info("Managed agent inspection: %r, configuration: %s, %d telegraf.d fragments", found, source, len(found.telegraf_d))
     return found
 
 

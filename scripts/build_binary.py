@@ -82,7 +82,7 @@ def build(platform: str) -> None:
         '--name', name,
         '--copy-metadata', 'vcf-ops-telegraf-helper',
         '--collect-all', 'vcf_ops_telegraf_helper', '--collect-all', 'tzdata',
-        '--collect-all', 'winrm', '--collect-all', 'truststore',
+        '--collect-all', 'winrm', '--collect-all', 'truststore', '--collect-all', 'cryptography',
         '--hidden-import', 'PySide6.QtCore', '--hidden-import', 'PySide6.QtGui',
         '--hidden-import', 'PySide6.QtSvg', '--hidden-import', 'PySide6.QtWidgets', 'vcf_ops_telegraf_helper/cli/main.py',
     ], check=True)
