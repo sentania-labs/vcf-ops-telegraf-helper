@@ -646,3 +646,39 @@ def test_endpoint_verification_runs_shell_and_checks_tree_and_result(tmp_path, m
     (root / "ucp-minion").mkdir()
     with pytest.raises(RuntimeError, match="Managed tree remains"):
         linux.verify_linux_retired_endpoint(executor, [])
+
+
+def retired_linux_resume(tmp_path, stage):
+    from vcf_ops_telegraf_helper.storage.journal import TakeoverJournal
+    endpoint = ManagedLinuxEndpoint(encrypted_only=False)
+    wf = linux_workflow(tmp_path, endpoint)
+    assert wf.capture().status != StageStatus.FAIL
+    assert wf.backup().status != StageStatus.FAIL
+    journal = TakeoverJournal(tmp_path / "journal")
+    record = journal.load(wf.target.vc_id, wf.target.vm_mor)
+    record.state = "retired"
+    record.uninstall_task_id = "done-task"
+    record.uninstall_task_stage = stage
+    record.cutover_started_epoch = 1
+    journal.save(record)
+    resumed = linux_workflow(tmp_path, RetiredLinuxEndpoint())
+
+    def unavailable(task_id):
+        raise RuntimeError("HTTP 404")
+
+    resumed.adapter.get_agent_task_status = unavailable
+    return resumed
+
+
+def test_retired_linux_resume_does_not_need_ops_status(tmp_path):
+    wf = retired_linux_resume(tmp_path, "FINISHED")
+    assert wf.capture().status == StageStatus.WARNING
+    assert wf.record.state == "retired"
+
+
+def test_unconfirmed_retired_linux_resume_accepts_clean_endpoint_when_status_unavailable(tmp_path):
+    wf = retired_linux_resume(tmp_path, "SUBMITTING")
+    wf.takeover.accept_endpoint_state = True
+    wf.takeover.uninstall_timeout_seconds = 0
+    assert wf.capture().status == StageStatus.WARNING
+    assert any("Ops never confirmed" in note for note in wf.record.notes)

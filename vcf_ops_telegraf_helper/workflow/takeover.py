@@ -21,7 +21,7 @@ from vcf_ops_telegraf_helper.executors.base import EndpointExecutor
 from vcf_ops_telegraf_helper.logger import get_logger
 from vcf_ops_telegraf_helper.models.endpoint import EndpointTarget, OSFamily
 from vcf_ops_telegraf_helper.models.monitoring import MonitoringConfig
-from vcf_ops_telegraf_helper.models.vcf import AgentObjectInfo, VCFEnvironment
+from vcf_ops_telegraf_helper.models.vcf import AgentObjectInfo, AgentTaskStatus, VCFEnvironment
 from vcf_ops_telegraf_helper.models.workflow import (
     RunSummary,
     StageResult,
@@ -332,6 +332,13 @@ class TakeoverWorkflow:
             logger.exception("Takeover capture failed")
             return self._result(TakeoverStage.CAPTURE, StageStatus.FAIL, f"Capture failed: {exc}", start)
 
+    def _task_status_or_unchanged(self, previous: TakeoverRecord, unchanged: AgentTaskStatus) -> AgentTaskStatus:
+        try:
+            return self.adapter.get_agent_task_status(previous.uninstall_task_id)
+        except Exception:
+            logger.warning("Could not read uninstall task %s; treating it as unchanged", previous.uninstall_task_id)
+            return unchanged
+
     def _resume_from(self, previous: TakeoverRecord, start: float) -> StageResult:
         """Continue a takeover whose managed agent is already gone, from the journal and the backup."""
         if previous.os_family != ("windows" if self._is_windows() else "linux"):
@@ -347,8 +354,10 @@ class TakeoverWorkflow:
                 f"The journaled backup under {backup or 'the journal'} no longer holds telegraf.conf; "
                 "the managed inputs cannot be ported. Enroll the endpoint with the ordinary workflow instead."
             )
-        if (previous.state == "retire_failed" or (previous.state == "retired" and not self._is_windows())) and previous.uninstall_task_id:
-            status = self.adapter.get_agent_task_status(previous.uninstall_task_id)
+        unconfirmed_retired = (previous.state == "retired" and not self._is_windows()
+                               and bool(previous.uninstall_task_stage) and previous.uninstall_task_stage.upper() != "FINISHED")
+        if (previous.state == "retire_failed" or unconfirmed_retired) and previous.uninstall_task_id:
+            status = self._task_status_or_unchanged(previous, AgentTaskStatus(task_id=previous.uninstall_task_id, stage=previous.uninstall_task_stage))
             previous.uninstall_task_stage = status.stage
             if not status.finished:
                 stage = (status.stage or "").upper()
@@ -365,7 +374,7 @@ class TakeoverWorkflow:
                 if self.accept_endpoint_callback and not self.accept_endpoint_callback(checks, stage):
                     raise RuntimeError("Endpoint-state acceptance was not confirmed")
                 checks = verify_linux_retired_endpoint(self.executor, previous.managed_services)
-                status = self.adapter.get_agent_task_status(previous.uninstall_task_id)
+                status = self._task_status_or_unchanged(previous, status)
                 previous.uninstall_task_stage = status.stage
                 if status.finished:
                     previous.notes.append(f"Ops uninstall task {previous.uninstall_task_id} finished at acceptance")
