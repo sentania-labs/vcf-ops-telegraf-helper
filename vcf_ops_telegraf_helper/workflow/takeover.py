@@ -433,6 +433,9 @@ class TakeoverWorkflow:
                 environment=self.env, target=target, monitoring=self.monitoring, executor=self.executor,
                 adapter=self.adapter, options=self._install_options(), reporter=self.reporter,
             )
+            self.install_workflow.allow_resume_stock_sample = (
+                self._resumed and self._is_windows() and self.record.state in ("cleaned", "installed")
+            )
             self.install_workflow.preview_callback = self.preview_callback
             ok = self.install_workflow.run_stages(ConfigureEndpointWorkflow.PREPARE_STAGES)
             if not ok:
@@ -454,9 +457,11 @@ class TakeoverWorkflow:
             return self._result(TakeoverStage.PREFLIGHT, StageStatus.PASS, msg, start)
         except Exception as exc:
             logger.exception("Takeover preflight failed")
+            consequence = ("The managed agent is already gone; monitoring stays interrupted until the resume succeeds."
+                           if self._resumed else "The managed agent was not touched.")
             return self._result(
                 TakeoverStage.PREFLIGHT, StageStatus.FAIL,
-                f"Replacement cannot be prepared: {exc}. The managed agent was not touched.", start,
+                f"Replacement cannot be prepared: {exc}. {consequence}", start,
             )
 
     def retire(self) -> StageResult:

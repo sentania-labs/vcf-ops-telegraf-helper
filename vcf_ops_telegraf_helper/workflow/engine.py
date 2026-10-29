@@ -10,6 +10,11 @@ import difflib
 import shlex
 import socket
 import time
+try:
+    import tomllib
+except ImportError:
+    import tomli as tomllib
+
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
@@ -50,6 +55,28 @@ from vcf_ops_telegraf_helper.workflow.managed_linux import detect_linux_managed_
 logger = get_logger("workflow.engine")
 
 
+def _is_stock_windows_sample(content: str) -> bool:
+    """Recognize the release sample only when every active setting is unchanged."""
+    if not content.lstrip("\ufeff").startswith("# Telegraf Configuration\n"):
+        return False
+    try:
+        parsed = tomllib.loads(content.lstrip("\ufeff"))
+    except (ValueError, TypeError):
+        return False
+    return parsed == {
+        "global_tags": {},
+        "agent": {"interval": "10s", "round_interval": True, "metric_batch_size": 1000,
+                  "metric_buffer_limit": 10000, "collection_jitter": "0s", "flush_interval": "10s",
+                  "flush_jitter": "0s", "precision": "0s"},
+        "inputs": {
+            "cpu": [{"percpu": True, "totalcpu": True, "collect_cpu_time": False,
+                     "report_active": False, "core_tags": False}],
+            "disk": [{"ignore_fs": ["tmpfs", "devtmpfs", "devfs", "iso9660", "overlay", "aufs", "squashfs"]}],
+            "diskio": [{}], "kernel": [{}], "mem": [{}], "processes": [{}], "swap": [{}], "system": [{}],
+        },
+    }
+
+
 class ConfigureEndpointWorkflow:
     """Orchestrates the 8-stage sequence to inspect, configure, and verify an endpoint."""
 
@@ -66,6 +93,7 @@ class ConfigureEndpointWorkflow:
         self.started_at = time.time()
         self.preview_callback = None
         self.input_diff = ""
+        self.allow_resume_stock_sample = False
         self.env = environment
         self.target = target
         self.monitoring = monitoring
@@ -576,7 +604,8 @@ class ConfigureEndpointWorkflow:
             self.base_stub_content = TelegrafRenderer.render_base_stub()
             if self.discovery and self.executor.file_exists(self.discovery.main_config_path):
                 existing_base = self.executor.download(self.discovery.main_config_path)
-                if "[[inputs." in existing_base and "Managed by VCF Operations Open Telegraf Helper" not in existing_base:
+                if ("[[inputs." in existing_base and "Managed by VCF Operations Open Telegraf Helper" not in existing_base
+                        and not (is_win and self.allow_resume_stock_sample and _is_stock_windows_sample(existing_base.replace("\r\n", "\n")))):
                     raise RuntimeError("Existing main configuration contains unmanaged inputs. Migrate/review those inputs before onboarding; no files have been changed.")
 
             # Validate syntax locally
