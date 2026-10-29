@@ -1,5 +1,5 @@
 # Release workflow for VCF Operations Open Telegraf Helper.
-# Builds multi-platform standalone executables (Linux, Windows, macOS ARM64 and x86_64).
+# Builds multi-platform standalone executables (Linux, Windows, macOS ARM64).
 #
 # Signing is the org's shared actions in sentania-labs/.github (pinned by commit
 # below; onboarding checklist in that repo's README): Developer ID signing and
@@ -152,7 +152,6 @@ jobs:
             dist/*.tar.gz
             binaries/vcf-telegraf-helper-linux
             binaries/vcf-telegraf-helper-macos-arm64.zip
-            binaries/vcf-telegraf-helper-macos-x86_64.zip
             binaries/vcf-telegraf-helper-windows.exe
 
       - name: Publish GitHub Release
@@ -162,7 +161,7 @@ jobs:
           chmod +x binaries/vcf-telegraf-helper-linux
           ls -l binaries/
           TAG="$GITHUB_REF_NAME"
-          ASSETS=(SHA256SUMS dist/*.whl dist/*.tar.gz binaries/vcf-telegraf-helper-linux binaries/vcf-telegraf-helper-macos-arm64.zip binaries/vcf-telegraf-helper-macos-x86_64.zip binaries/vcf-telegraf-helper-windows.exe)
+          ASSETS=(SHA256SUMS dist/*.whl dist/*.tar.gz binaries/vcf-telegraf-helper-linux binaries/vcf-telegraf-helper-macos-arm64.zip binaries/vcf-telegraf-helper-windows.exe)
           if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             gh release upload "$TAG" "${ASSETS[@]}" --clobber --repo "$GITHUB_REPOSITORY"
           else
@@ -170,5 +169,5 @@ jobs:
               --repo "$GITHUB_REPOSITORY" \
               --title "vcf-ops-telegraf-helper $TAG" \
               --generate-notes \
-              --notes "Standalone binaries are the primary downloads. Windows is Authenticode signed; macOS downloads are zipped apps for Apple Silicon (arm64) or Intel (x86_64), Developer ID signed, notarized and stapled. Extract the matching ZIP, move VCF Telegraf Helper.app to Applications, and double-click it. See the README for bundled CLI access. Verify downloads against SHA256SUMS. Uploaded release assets have build provenance attestations (GitHub-generated Source code archives are not covered). Verify with gh attestation verify FILE --repo sentania-labs/vcf-ops-telegraf-helper. SmartScreen may still show an unrecognized-app prompt while the publisher builds reputation. Python packages are secondary; on managed Windows use python -m vcf_ops_telegraf_helper to avoid the unsigned pip launcher."
+              --notes "Standalone binaries are the primary downloads. Windows is Authenticode signed; macOS downloads are zipped apps for Apple Silicon (arm64), Developer ID signed, notarized and stapled. Extract the matching ZIP, move VCF Telegraf Helper.app to Applications, and double-click it. See the README for bundled CLI access. Verify downloads against SHA256SUMS. Uploaded release assets have build provenance attestations (GitHub-generated Source code archives are not covered). Verify with gh attestation verify FILE --repo sentania-labs/vcf-ops-telegraf-helper. SmartScreen may still show an unrecognized-app prompt while the publisher builds reputation. Python packages are secondary; on managed Windows use python -m vcf_ops_telegraf_helper to avoid the unsigned pip launcher."
           fi
