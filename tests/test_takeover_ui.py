@@ -431,3 +431,20 @@ def test_cli_takeover_refuses_ignored_flags_resolves_vc_id_and_exit_codes(monkey
         res = CliRunner().invoke(cli, base + ["--vc-id", VC_ID])
         assert res.exit_code == 0 and "CONFIRMATION PENDING" in res.output and "Takeover: COMPLETED" not in res.output
         assert "VCF Ops ingestion" not in res.output
+
+
+@pytest.mark.parametrize("typed,ok,expected", [("dbdemo01", True, True), ("other", True, False), ("", False, False)])
+def test_gui_endpoint_state_confirmation(tmp_path, monkeypatch, typed, ok, expected):
+    from queue import Queue
+    window = _window(tmp_path, monkeypatch, ManagedWindowsEndpoint())
+    prompts = []
+    def dialog(*args):
+        prompts.append(args)
+        return typed, ok
+    monkeypatch.setattr("vcf_ops_telegraf_helper.gui.main_window.QInputDialog.getText", dialog)
+    answer = Queue()
+    window._confirm_endpoint_state(["managed units absent", "bootstrap result SUCCESS"], "SUBMITTING", answer)
+    assert answer.get_nowait() is expected
+    assert "dbdemo01" in prompts[0][2] and "managed units absent" in prompts[0][2]
+    assert "SUBMITTING" in prompts[0][2] and "bootstrap result SUCCESS" in prompts[0][2]
+    window.close()

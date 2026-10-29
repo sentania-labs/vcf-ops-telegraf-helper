@@ -180,6 +180,7 @@ class TakeoverWorker(QObject):
 
     message = Signal(str)
     prepared = Signal(str, str)
+    endpoint_acceptance = Signal(object, str, object)
     stage_updated = Signal(object)  # StageResult
     finished = Signal(object)  # TakeoverSummary
     failed = Signal(str)
@@ -212,6 +213,12 @@ class TakeoverWorker(QObject):
             self.workflow.preview_callback = lambda: self.prepared.emit(
                 self.workflow.install_workflow.system_conf_content, self.workflow.install_workflow.vcf_conf_content
             )
+            from queue import Queue
+            def confirm_endpoint(checks, stage):
+                answer = Queue(maxsize=1)
+                self.endpoint_acceptance.emit(checks, stage, answer)
+                return answer.get()
+            self.workflow.accept_endpoint_callback = confirm_endpoint
             summary = self.workflow.run()
             self.finished.emit(summary)
         except Exception as exc:
@@ -1961,6 +1968,20 @@ class MainWindow(QMainWindow):
             return None
         return f"Typed '{typed.strip()}' to confirm the takeover of {vm_name} at {local_now_formatted()}"
 
+    def _confirm_endpoint_state(self, checks, stage, answer) -> None:
+        vm_name = self.bound_vm.name if self.bound_vm else (self.selected_vm_name or self.ep_host_input.text().strip())
+        state = ("has remained SUBMITTING without messages" if stage == "SUBMITTING"
+                 else "is still RUNNING")
+        prompt = (f"VCF Operations {state} and has not confirmed the uninstall of {vm_name}.\n\n"
+                  "The endpoint checks passed:\n" + "\n".join("• " + check for check in checks) +
+                  f"\n\nContinue with installation despite the unconfirmed task? Type {vm_name} to accept:")
+        try:
+            typed, ok = QInputDialog.getText(self, "Accept endpoint state", prompt)
+            answer.put(bool(ok and typed.strip() == vm_name))
+        except Exception:
+            answer.put(False)
+            raise
+
     def _run_takeover(self) -> None:
         confirmation = self._confirm_takeover()
         if confirmation is None:
@@ -1985,6 +2006,7 @@ class MainWindow(QMainWindow):
         self.takeover_worker_thread.started.connect(self.takeover_worker.run)
         self.takeover_worker.message.connect(self.stage_list_box.appendPlainText)
         self.takeover_worker.prepared.connect(self._show_prepared_config)
+        self.takeover_worker.endpoint_acceptance.connect(self._confirm_endpoint_state)
         self.takeover_worker.stage_updated.connect(self._on_worker_stage)
         self.takeover_worker.finished.connect(self._on_takeover_finished)
         self.takeover_worker.failed.connect(self._on_worker_failed)

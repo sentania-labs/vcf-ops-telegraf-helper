@@ -533,3 +533,210 @@ def test_retained_items_survive_continuity_resume(tmp_path):
     final = resumed.run()
     assert final.success and final.retained_items == first.retained_items
     assert final.verifications["Retained items"] == first.verifications["Retained items"]
+
+
+class RetiredLinuxEndpoint(ManagedLinuxEndpoint):
+    def __init__(self):
+        super().__init__(encrypted_only=False)
+        self.services = {}
+        self.files = {}
+        self.check_error = ""
+        self.bootstrap = 'PRESENT\n{"status":"SUCCESS","message":"Success - uninstall","stage":"7"}'
+
+    def execute(self, command, timeout=30):
+        script = shlex.split(command)[2] if command.startswith("bash -c ") else command
+        if 'for unit in ' in script and 'Unit loaded:' in script:
+            return CommandResult(command=command, exit_code=1 if self.check_error else 0, stdout=self.check_error)
+        if "uaf-bootstrap-results" in script:
+            return CommandResult(command=command, exit_code=0, stdout=self.bootstrap)
+        return super().execute(command, timeout)
+
+
+def pending_linux_resume(tmp_path, stage="SUBMITTING", messages=None):
+    from vcf_ops_telegraf_helper.models.vcf import AgentTaskStatus
+    from vcf_ops_telegraf_helper.storage.journal import TakeoverJournal
+    endpoint = ManagedLinuxEndpoint(encrypted_only=False)
+    wf = linux_workflow(tmp_path, endpoint, uninstall_timeout_seconds=0)
+    assert wf.capture().status != StageStatus.FAIL
+    assert wf.backup().status != StageStatus.FAIL
+    record = TakeoverJournal(tmp_path / "journal").load(wf.target.vc_id, wf.target.vm_mor)
+    record.state = "retire_failed"
+    record.uninstall_task_id = "stuck-task"
+    record.cutover_started_epoch = 1
+    TakeoverJournal(tmp_path / "journal").save(record)
+    endpoint = RetiredLinuxEndpoint()
+    resumed = linux_workflow(tmp_path, endpoint, accept_endpoint_state=True)
+    resumed.adapter.get_agent_task_status = lambda task_id: AgentTaskStatus(task_id=task_id, stage=stage, messages=messages or [])
+    return resumed
+
+
+@pytest.mark.parametrize("stage", ["SUBMITTING", "RUNNING"])
+def test_accepts_clean_linux_endpoint_with_pending_task(tmp_path, stage):
+    wf = pending_linux_resume(tmp_path, stage)
+    result = wf.capture()
+    assert result.status == StageStatus.WARNING
+    assert "Ops never confirmed" in wf.record.notes[-2]
+    assert "stuck-task" in wf.record.notes[-2]
+    assert "bootstrap result SUCCESS" in wf.record.notes[-2]
+
+
+@pytest.mark.parametrize("reason", ["Unit loaded", "Unit on disk", "Managed tree remains", "Managed process remains"])
+def test_pending_task_refuses_failed_endpoint_checks(tmp_path, reason):
+    wf = pending_linux_resume(tmp_path)
+    wf.executor.check_error = reason
+    result = wf.capture()
+    assert result.status == StageStatus.FAIL and reason in result.message
+    assert wf.install_summary is None
+
+
+@pytest.mark.parametrize("result", ['PRESENT\n{"status":"FAILED"}', 'PRESENT\nnot json'])
+def test_pending_task_refuses_bad_bootstrap_result(tmp_path, result):
+    wf = pending_linux_resume(tmp_path)
+    wf.executor.bootstrap = result
+    assert wf.capture().status == StageStatus.FAIL
+
+
+def test_pending_task_accepts_absent_result_and_records_late_completion(tmp_path):
+    from vcf_ops_telegraf_helper.models.vcf import AgentTaskStatus
+    wf = pending_linux_resume(tmp_path)
+    wf.executor.bootstrap = "ABSENT\n"
+    statuses = iter([AgentTaskStatus(task_id="stuck-task", stage="SUBMITTING"),
+                     AgentTaskStatus(task_id="stuck-task", stage="FINISHED")])
+    wf.adapter.get_agent_task_status = lambda _: next(statuses)
+    assert wf.capture().status == StageStatus.WARNING
+    assert wf.record.uninstall_task_stage == "FINISHED"
+    assert any("finished at acceptance" in note for note in wf.record.notes)
+    assert not any("never confirmed" in note for note in wf.record.notes)
+
+
+def test_pending_task_requires_acceptance_and_empty_submitting_messages(tmp_path):
+    wf = pending_linux_resume(tmp_path, messages=["Guest credentials rejected"])
+    assert wf.capture().status == StageStatus.FAIL
+    wf = pending_linux_resume(tmp_path / "second")
+    wf.takeover.accept_endpoint_state = False
+    assert wf.capture().status == StageStatus.FAIL
+
+
+def test_endpoint_verification_runs_shell_and_checks_tree_and_result(tmp_path, monkeypatch):
+    import os
+    import vcf_ops_telegraf_helper.workflow.managed_linux as linux
+    root = tmp_path / "ucp"
+    bootstrap = root / "bootstrap"
+    bootstrap.mkdir(parents=True)
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    systemctl = bin_dir / "systemctl"
+    systemctl.write_text("#!/bin/sh\nprintf 'not-found\\n'\n")
+    systemctl.chmod(0o755)
+    monkeypatch.setattr(linux, "ROOT", str(root))
+    class LocalExecutor:
+        def execute(self, command, timeout=30):
+            env = dict(os.environ, PATH=str(bin_dir) + ":" + os.environ["PATH"])
+            proc = subprocess.run(command, shell=True, text=True, capture_output=True, timeout=timeout, env=env)
+            return CommandResult(command=command, exit_code=proc.returncode, stdout=proc.stdout, stderr=proc.stderr)
+    executor = LocalExecutor()
+    assert linux.verify_linux_retired_endpoint(executor, [])[-1] == "bootstrap result absent"
+    result = bootstrap / "uaf-bootstrap-results"
+    result.write_text('{"status":"SUCCESS"}')
+    assert linux.verify_linux_retired_endpoint(executor, [])[-1] == "bootstrap result SUCCESS"
+    result.write_text('{"status":"FAILED"}')
+    with pytest.raises(RuntimeError, match="not SUCCESS"):
+        linux.verify_linux_retired_endpoint(executor, [])
+    result.write_text('{"status":"SUCCESS"}')
+    (root / "ucp-minion").mkdir()
+    with pytest.raises(RuntimeError, match="Managed tree remains"):
+        linux.verify_linux_retired_endpoint(executor, [])
+
+
+def retired_linux_resume(tmp_path, stage):
+    from vcf_ops_telegraf_helper.storage.journal import TakeoverJournal
+    endpoint = ManagedLinuxEndpoint(encrypted_only=False)
+    wf = linux_workflow(tmp_path, endpoint)
+    assert wf.capture().status != StageStatus.FAIL
+    assert wf.backup().status != StageStatus.FAIL
+    journal = TakeoverJournal(tmp_path / "journal")
+    record = journal.load(wf.target.vc_id, wf.target.vm_mor)
+    record.state = "retired"
+    record.uninstall_task_id = "done-task"
+    record.uninstall_task_stage = stage
+    record.uninstall_unconfirmed = stage != "FINISHED"
+    record.cutover_started_epoch = 1
+    journal.save(record)
+    resumed = linux_workflow(tmp_path, RetiredLinuxEndpoint())
+
+    def unavailable(task_id):
+        raise RuntimeError("HTTP 404")
+
+    resumed.adapter.get_agent_task_status = unavailable
+    return resumed
+
+
+def test_retired_linux_resume_does_not_need_ops_status(tmp_path):
+    wf = retired_linux_resume(tmp_path, "FINISHED")
+    assert wf.capture().status == StageStatus.WARNING
+    assert wf.record.state == "retired"
+
+
+def test_unconfirmed_retired_linux_resume_survives_unavailable_status(tmp_path):
+    from vcf_ops_telegraf_helper.workflow.takeover import RESULT_RETIREMENT
+    wf = retired_linux_resume(tmp_path, "SUBMITTING")
+    assert wf.capture().status == StageStatus.WARNING
+    assert "Ops never confirmed" in wf.results[RESULT_RETIREMENT]
+    assert wf.record.uninstall_unconfirmed
+
+
+def test_endpoint_verification_ignores_unmanaged_salt_unit(tmp_path, monkeypatch):
+    import os
+    import vcf_ops_telegraf_helper.workflow.managed_linux as linux
+    root = tmp_path / "ucp"
+    (root / "bootstrap").mkdir(parents=True)
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    systemctl = bin_dir / "systemctl"
+    systemctl.write_text('#!/bin/sh\ncase "$*" in *salt-minion.service*--value*) printf "loaded\\n" ;; *--value*) printf "not-found\\n" ;; esac\n')
+    systemctl.chmod(0o755)
+    monkeypatch.setattr(linux, "ROOT", str(root))
+
+    class LocalExecutor:
+        def execute(self, command, timeout=30):
+            env = dict(os.environ, PATH=str(bin_dir) + ":" + os.environ["PATH"])
+            proc = subprocess.run(command, shell=True, text=True, capture_output=True, timeout=timeout, env=env)
+            return CommandResult(command=command, exit_code=proc.returncode, stdout=proc.stdout, stderr=proc.stderr)
+
+    assert linux.verify_linux_retired_endpoint(LocalExecutor(), ["ucp-minion"])[-1] == "bootstrap result absent"
+    with pytest.raises(RuntimeError, match="Unit loaded: salt-minion"):
+        linux.verify_linux_retired_endpoint(LocalExecutor(), ["salt-minion"])
+
+
+def test_eligible_pending_task_without_consent_points_at_the_flag(tmp_path):
+    wf = pending_linux_resume(tmp_path)
+    wf.takeover.accept_endpoint_state = False
+    result = wf.capture()
+    assert result.status == StageStatus.FAIL
+    assert "--accept-endpoint-state" in result.message
+
+
+@pytest.mark.parametrize("state", ["retired", "cleaned", "installed"])
+def test_accepted_retirement_warning_persists_until_ops_finishes(tmp_path, state):
+    from vcf_ops_telegraf_helper.models.vcf import AgentTaskStatus
+    from vcf_ops_telegraf_helper.storage.journal import TakeoverJournal
+    from vcf_ops_telegraf_helper.workflow.takeover import RESULT_RETIREMENT
+    first = pending_linux_resume(tmp_path)
+    assert first.capture().status == StageStatus.WARNING
+    journal = TakeoverJournal(tmp_path / "journal")
+    record = journal.load(first.target.vc_id, first.target.vm_mor)
+    assert record.uninstall_unconfirmed
+    record.state = state
+    journal.save(record)
+    resumed = linux_workflow(tmp_path, RetiredLinuxEndpoint())
+    resumed.adapter.get_agent_task_status = lambda task_id: AgentTaskStatus(task_id=task_id, stage="RUNNING")
+    assert resumed.capture().status == StageStatus.WARNING
+    assert "Ops never confirmed" in resumed.results[RESULT_RETIREMENT]
+    assert journal.load(first.target.vc_id, first.target.vm_mor).uninstall_unconfirmed
+    assert "Ops never confirmed" in resumed.retire().message or "Ops never confirmed" in resumed.results[RESULT_RETIREMENT]
+    finished = linux_workflow(tmp_path, RetiredLinuxEndpoint())
+    finished.adapter.get_agent_task_status = lambda task_id: AgentTaskStatus(task_id=task_id, stage="FINISHED")
+    assert finished.capture().status == StageStatus.WARNING
+    record = journal.load(first.target.vc_id, first.target.vm_mor)
+    assert not record.uninstall_unconfirmed and record.uninstall_task_stage == "FINISHED"
+    assert finished.results[RESULT_RETIREMENT].startswith("PASS")
