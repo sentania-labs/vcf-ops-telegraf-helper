@@ -48,6 +48,7 @@ class TakeoverRecord(BaseModel):
     cutover_started_epoch: Optional[float] = None
     uninstall_task_id: Optional[str] = None
     uninstall_task_stage: Optional[str] = None
+    uninstall_unconfirmed: bool = False
     backup_dir: Optional[str] = None
     backup_files: List[str] = Field(default_factory=list)
     stages: List[Dict[str, Any]] = Field(default_factory=list)

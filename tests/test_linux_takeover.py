@@ -713,3 +713,29 @@ def test_eligible_pending_task_without_consent_points_at_the_flag(tmp_path):
     result = wf.capture()
     assert result.status == StageStatus.FAIL
     assert "--accept-endpoint-state" in result.message
+
+
+@pytest.mark.parametrize("state", ["retired", "cleaned", "installed"])
+def test_accepted_retirement_warning_persists_until_ops_finishes(tmp_path, state):
+    from vcf_ops_telegraf_helper.models.vcf import AgentTaskStatus
+    from vcf_ops_telegraf_helper.storage.journal import TakeoverJournal
+    from vcf_ops_telegraf_helper.workflow.takeover import RESULT_RETIREMENT
+    first = pending_linux_resume(tmp_path)
+    assert first.capture().status == StageStatus.WARNING
+    journal = TakeoverJournal(tmp_path / "journal")
+    record = journal.load(first.target.vc_id, first.target.vm_mor)
+    assert record.uninstall_unconfirmed
+    record.state = state
+    journal.save(record)
+    resumed = linux_workflow(tmp_path, RetiredLinuxEndpoint())
+    resumed.adapter.get_agent_task_status = lambda task_id: AgentTaskStatus(task_id=task_id, stage="RUNNING")
+    assert resumed.capture().status == StageStatus.WARNING
+    assert "Ops never confirmed" in resumed.results[RESULT_RETIREMENT]
+    assert journal.load(first.target.vc_id, first.target.vm_mor).uninstall_unconfirmed
+    assert "Ops never confirmed" in resumed.retire().message or "Ops never confirmed" in resumed.results[RESULT_RETIREMENT]
+    finished = linux_workflow(tmp_path, RetiredLinuxEndpoint())
+    finished.adapter.get_agent_task_status = lambda task_id: AgentTaskStatus(task_id=task_id, stage="FINISHED")
+    assert finished.capture().status == StageStatus.WARNING
+    record = journal.load(first.target.vc_id, first.target.vm_mor)
+    assert not record.uninstall_unconfirmed and record.uninstall_task_stage == "FINISHED"
+    assert finished.results[RESULT_RETIREMENT].startswith("PASS")
