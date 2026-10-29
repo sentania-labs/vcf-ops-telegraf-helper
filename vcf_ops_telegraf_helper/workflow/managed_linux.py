@@ -195,3 +195,70 @@ done""")
         left.append("the arcuser account, arcgroup group and their sudoers rule were kept because the helper "
                     "cannot prove the Ops installer created them; remove them by hand if nothing else uses them")
     return left
+
+
+def verify_linux_retired_endpoint(executor, managed_services):
+    """Read-only evidence for accepting an unconfirmed Linux uninstall."""
+    names = set(SERVICE_NAMES) | set(managed_services)
+    if any(not name or any(c not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.-" for c in name) for name in names):
+        raise RuntimeError("Invalid service name in takeover journal")
+    units = " ".join(shlex.quote(name + ".service") for name in sorted(names))
+    result = shell(executor, f'''set -e
+[ ! -L /opt/vmware ] && [ ! -L {ROOT} ]
+files=$(systemctl list-unit-files --type=service --no-legend --no-pager)
+loaded=$(systemctl list-units --all --type=service --no-legend --no-pager --plain)
+all_units=$(printf '%s\\n%s\\n' "$files" "$loaded" | awk '$1 ~ /\\.service$/ && $1 !~ /@\\.service$/ {{print $1}}' | sort -u)
+if [ -n "$all_units" ]; then
+    properties=$(systemctl show --no-pager --property=ExecStart,FragmentPath $all_units)
+    case "$properties" in *{ROOT}/*) echo 'Managed unit remains'; exit 1 ;; esac
+fi
+for unit in {units}; do
+    load=$(systemctl show "$unit" --property=LoadState --value)
+    [ "$load" = not-found ] || {{ echo "Unit loaded: $unit"; exit 1; }}
+    for base in /etc/systemd/system /usr/lib/systemd/system /lib/systemd/system /run/systemd/system; do
+        [ ! -e "$base/$unit" ] && [ ! -L "$base/$unit" ] && [ ! -e "$base/$unit.d" ] && [ ! -L "$base/$unit.d" ] || {{ echo "Unit on disk: $unit"; exit 1; }}
+    done
+done
+if [ -e {ROOT} ]; then
+    [ -d {ROOT} ] || exit 1
+    for path in {ROOT}/* {ROOT}/.[!.]* {ROOT}/..?*; do
+        [ ! -e "$path" ] && [ ! -L "$path" ] && continue
+        [ "$path" = {ROOT}/bootstrap ] && [ -d "$path" ] && [ ! -L "$path" ] || {{ echo "Managed tree remains: $path"; exit 1; }}
+    done
+fi
+ancestors=" $$ "
+p=$PPID
+while [ "$p" -gt 1 ]; do
+    ancestors="$ancestors$p "
+    p=$(awk '/^PPid:/ {{print $2}}' /proc/$p/status) || exit 1
+done
+for proc in /proc/[0-9]*; do
+    pid=${{proc##*/}}
+    case "$ancestors" in *" $pid "*) continue ;; esac
+    exe=$(readlink "$proc/exe" 2>/dev/null) || continue
+    args=$(tr '\\0' ' ' < "$proc/cmdline" 2>/dev/null) || continue
+    case "$exe $args" in *{ROOT}/*) echo 'Managed process remains'; exit 1 ;; esac
+done
+''')
+    if not result.success:
+        raise RuntimeError("Endpoint verification failed: " + (result.stdout or result.stderr or "check failed"))
+    path = ROOT + "/bootstrap/uaf-bootstrap-results"
+    # Check presence and read in one command so a failed existence query is never treated as absence.
+    result = shell(executor, f'''set -e
+if [ -L {path} ]; then exit 1; fi
+if [ -e {path} ]; then [ -f {path} ]; printf 'PRESENT\\n'; cat -- {path}; else printf 'ABSENT\\n'; fi''')
+    if not result.success:
+        raise RuntimeError("Could not read bootstrap result")
+    if result.stdout == "ABSENT\n":
+        result_check = "bootstrap result absent"
+    elif result.stdout.startswith("PRESENT\n"):
+        try:
+            data = json.loads(result.stdout[len("PRESENT\n"):])
+            if not isinstance(data, dict) or data.get("status") != "SUCCESS":
+                raise ValueError("status is not SUCCESS")
+        except (ValueError, TypeError) as exc:
+            raise RuntimeError(f"Invalid bootstrap result: {exc}") from exc
+        result_check = "bootstrap result SUCCESS"
+    else:
+        raise RuntimeError("Could not determine bootstrap result presence")
+    return ["managed units absent from systemd and disk", "managed tree absent", "managed processes absent", result_check]

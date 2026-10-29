@@ -44,7 +44,7 @@ from vcf_ops_telegraf_helper.workflow.windows import (
     detect_windows_telegraf,
 )
 
-from vcf_ops_telegraf_helper.workflow.managed_linux import detect_linux_managed_installation, clean_linux_managed_installation
+from vcf_ops_telegraf_helper.workflow.managed_linux import detect_linux_managed_installation, clean_linux_managed_installation, verify_linux_retired_endpoint
 
 logger = get_logger("workflow.takeover")
 
@@ -59,6 +59,7 @@ class TakeoverOptions(BaseModel):
     continuity_poll_seconds: int = 60
     journal_dir: Optional[Path] = None
     resume: bool = True
+    accept_endpoint_state: bool = False
 
 
 class TakeoverSummary(BaseModel):
@@ -164,6 +165,7 @@ class TakeoverWorkflow:
         else:
             self.journal = TakeoverJournal(takeover.journal_dir)
         self._sleep = sleep
+        self.accept_endpoint_callback: Optional[Callable[[List[str], str], bool]] = None
         self.preview_callback: Optional[Callable[[], None]] = None
 
         self.record: Optional[TakeoverRecord] = None
@@ -345,20 +347,41 @@ class TakeoverWorkflow:
                 f"The journaled backup under {backup or 'the journal'} no longer holds telegraf.conf; "
                 "the managed inputs cannot be ported. Enroll the endpoint with the ordinary workflow instead."
             )
-        if previous.state == "retire_failed":
-            # Ops may have finished the uninstall after the app gave up on it; ask before trusting the endpoint
-            if not previous.uninstall_task_id:
-                raise RuntimeError("The journaled retirement failed without a task id; reconcile in VCF Operations first.")
+        if (previous.state == "retire_failed" or (previous.state == "retired" and not self._is_windows())) and previous.uninstall_task_id:
             status = self.adapter.get_agent_task_status(previous.uninstall_task_id)
             previous.uninstall_task_stage = status.stage
             if not status.finished:
-                raise RuntimeError(
-                    f"Ops uninstall task {previous.uninstall_task_id} is {status.stage}"
-                    + (f" ({'; '.join(status.messages)})" if status.messages else "")
-                    + "; the managed agent is gone from the endpoint but Ops has not finished. Reconcile in VCF Operations first."
-                )
+                stage = (status.stage or "").upper()
+                eligible = (not self._is_windows() and (stage == "RUNNING" or (stage == "SUBMITTING" and not status.messages))
+                            and previous.cutover_started_epoch is not None
+                            and time.time() >= previous.cutover_started_epoch + self.takeover.uninstall_timeout_seconds)
+                if not eligible or not (self.takeover.accept_endpoint_state or self.accept_endpoint_callback):
+                    raise RuntimeError(
+                        f"Ops uninstall task {previous.uninstall_task_id} is {status.stage}"
+                        + (f" ({'; '.join(status.messages)})" if status.messages else "")
+                        + "; the managed agent is gone from the endpoint but Ops has not finished. Reconcile in VCF Operations first."
+                    )
+                checks = verify_linux_retired_endpoint(self.executor, previous.managed_services)
+                if self.accept_endpoint_callback and not self.accept_endpoint_callback(checks, stage):
+                    raise RuntimeError("Endpoint-state acceptance was not confirmed")
+                checks = verify_linux_retired_endpoint(self.executor, previous.managed_services)
+                status = self.adapter.get_agent_task_status(previous.uninstall_task_id)
+                previous.uninstall_task_stage = status.stage
+                if status.finished:
+                    previous.notes.append(f"Ops uninstall task {previous.uninstall_task_id} finished at acceptance")
+                    self.results[RESULT_RETIREMENT] = "PASS (task finished after the interruption)"
+                elif ((status.stage or "").upper() == "RUNNING" or
+                      ((status.stage or "").upper() == "SUBMITTING" and not status.messages)):
+                    previous.notes.append(f"Ops never confirmed uninstall task {previous.uninstall_task_id} ({status.stage}); "
+                                          "operator accepted endpoint state: " + "; ".join(checks))
+                    self.results[RESULT_RETIREMENT] = "WARNING (Ops never confirmed; endpoint state accepted)"
+                else:
+                    raise RuntimeError(f"Ops uninstall task {previous.uninstall_task_id} changed to {status.stage}; refusing acceptance")
+            else:
+                self.results[RESULT_RETIREMENT] = "PASS (task finished after the interruption)"
             previous.state = "retired"
-            self.results[RESULT_RETIREMENT] = "PASS (task finished after the interruption)"
+        elif previous.state == "retire_failed":
+            raise RuntimeError("The journaled retirement failed without a task id; reconcile in VCF Operations first.")
         if previous.state == "installed":
             self._already_installed = True
             self.results[RESULT_INSTALL] = "PASS (before the interruption)"

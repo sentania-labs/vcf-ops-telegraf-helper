@@ -321,7 +321,8 @@ def resolve_monitoring_config(
 @click.option("--vm-id", default=None, help="Target vCenter virtual machine MOR (e.g. vm-1042)")
 @click.option("--vc-id", default=None, help="vCenter instance UUID for --vm-id (resolved from inventory if omitted)")
 @click.option("--force-new-cert", is_flag=True, default=False, help="Force minting a new client certificate even if existing cert is valid")
-@click.option("--take-over-managed-agent", is_flag=True, default=False, help="Retire the VCF Operations product-managed agent on the VM and replace it with open-source Telegraf (Windows, requires --vm-id)")
+@click.option("--take-over-managed-agent", is_flag=True, default=False, help="Retire the VCF Operations product-managed agent on the VM and replace it with open-source Telegraf (Windows or Linux, requires --vm-id)")
+@click.option("--accept-endpoint-state", is_flag=True, help="Accept verified Linux endpoint state when an uninstall task remains pending after the wait")
 @click.option("--confirm-takeover", default=None, help="Type the VM name (or MOR) to confirm the takeover; monitoring is interrupted for about 15 minutes")
 @click.option("--continuity-wait", type=int, default=900, show_default=True, help="Seconds to wait for VCF Operations to show the object as Open Source with fresh samples")
 def run_cmd(
@@ -379,11 +380,14 @@ def run_cmd(
     force_new_cert: bool = False,
     take_over_managed_agent: bool = False,
     confirm_takeover: Optional[str] = None,
+    accept_endpoint_state: bool = False,
     continuity_wait: int = 900,
 ) -> None:
     """Execute the guided workflow via command-line options."""
     display_banner(console)
 
+    if accept_endpoint_state and not take_over_managed_agent:
+        raise click.UsageError("--accept-endpoint-state requires --take-over-managed-agent")
     if vc_id and not vm_id:
         raise click.UsageError("--vc-id requires --vm-id")
     if take_over_managed_agent:
@@ -552,6 +556,7 @@ def run_cmd(
             adapter=adapter,
             takeover=TakeoverOptions(
                 confirmation_text=f"--confirm-takeover {confirm_takeover}",
+                accept_endpoint_state=accept_endpoint_state,
                 continuity_wait_seconds=max(0, continuity_wait),
             ),
             options=wf_options,
