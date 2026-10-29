@@ -5,7 +5,56 @@ from __future__ import annotations
 import base64
 from unittest.mock import MagicMock, patch
 
+import pytest
+from requests.exceptions import ReadTimeout
+
 from vcf_ops_telegraf_helper.executors.winrm import WinRMExecutor
+
+
+@pytest.mark.parametrize("timeout,operation_timeout", [(180, 180), (10, 10), (1, 5)])
+def test_winrm_execute_updates_cached_transport_timeout(timeout, operation_timeout):
+    executor = WinRMExecutor(hostname="win-host.local")
+    session = executor._get_session()
+    assert session.protocol.transport.read_timeout_sec == 30
+    response = MagicMock(status_code=0, std_out=b"ok", std_err=b"")
+
+    with patch.object(session, "run_ps", return_value=response):
+        assert executor.execute("hostname", timeout=180).success
+        assert executor.execute("hostname", timeout=timeout).success
+
+    assert executor._get_session() is session
+    assert session.protocol.operation_timeout_sec == operation_timeout
+    assert session.protocol.read_timeout_sec == operation_timeout + 15
+    assert session.protocol.transport.read_timeout_sec == operation_timeout + 15
+
+
+def test_winrm_execute_slow_response_uses_per_call_transport_timeout():
+    """A simulated 60-second receive survives the old 30-second read limit."""
+    executor = WinRMExecutor(hostname="win-host.local")
+    protocol = executor._get_session().protocol
+    transport = protocol.transport
+
+    def slow_receive(message):
+        if transport.read_timeout_sec <= 60:
+            raise ReadTimeout(f"Read timed out. (read timeout={transport.read_timeout_sec})")
+        return (
+            '<Envelope><Body><Stream Name="stdout">aW5zdGFsbGVk</Stream>'
+            '<CommandState State="http://schemas.microsoft.com/wbem/wsman/1/windows/shell/CommandState/Done">'
+            '<ExitCode>0</ExitCode></CommandState></Body></Envelope>'
+        )
+
+    with (
+        patch.object(protocol, "open_shell", return_value="shell"),
+        patch.object(protocol, "run_command", return_value="command"),
+        patch.object(protocol, "cleanup_command"),
+        patch.object(protocol, "close_shell"),
+        patch.object(transport, "send_message", side_effect=slow_receive) as receive,
+    ):
+        result = executor.execute("Install-Telegraf", timeout=180)
+
+    receive.assert_called_once()
+    assert result.success, result.stderr
+    assert result.stdout == "installed"
 
 
 def test_winrm_executor_init():

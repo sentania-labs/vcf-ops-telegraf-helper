@@ -97,6 +97,8 @@ class WinRMExecutor(EndpointExecutor):
             op_timeout = max(5, timeout)
             session.protocol.operation_timeout_sec = op_timeout
             session.protocol.read_timeout_sec = op_timeout + 15
+            # pywinrm copies the read timeout into its transport at construction.
+            session.protocol.transport.read_timeout_sec = op_timeout + 15
             response = session.run_ps(command)
             return CommandResult(
                 exit_code=response.status_code,
