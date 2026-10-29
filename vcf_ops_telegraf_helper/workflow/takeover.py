@@ -1,4 +1,4 @@
-"""Take over a VCF Operations product-managed Telegraf agent with open-source Telegraf (Windows).
+"""Take over a VCF Operations product-managed Telegraf agent with open-source Telegraf (Windows and Linux).
 
 Sequence proven in the lab on October 9, 2026 (issue #61): capture the Ops identity and the
 managed configuration, back it up, prepare and validate the replacement without touching
@@ -44,6 +44,8 @@ from vcf_ops_telegraf_helper.workflow.windows import (
     detect_windows_telegraf,
 )
 
+from vcf_ops_telegraf_helper.workflow.managed_linux import detect_linux_managed_installation, clean_linux_managed_installation
+
 logger = get_logger("workflow.takeover")
 
 
@@ -77,6 +79,7 @@ class TakeoverSummary(BaseModel):
     agent_object_after: Optional[AgentObjectInfo] = None
     install_summary: Optional[RunSummary] = None
     import_summary: List[str] = Field(default_factory=list)
+    retained_items: List[str] = Field(default_factory=list)
 
     def to_json(self, indent: int = 2) -> str:
         return self.model_dump_json(indent=indent)
@@ -173,6 +176,7 @@ class TakeoverWorkflow:
         self.stage_results: List[StageResult] = []
         self.results: Dict[str, str] = {}
         self.verifications: Dict[str, str] = {}
+        self.retained_items: List[str] = []
         self.cutover_started: Optional[float] = None
         self._resumed = False
         self._already_installed = False
@@ -213,8 +217,6 @@ class TakeoverWorkflow:
         start = time.monotonic()
         self.reporter.on_stage_start(TakeoverStage.CAPTURE)
         try:
-            if not self._is_windows():
-                raise RuntimeError("Takeover is only supported for Windows endpoints in this release.")
             if not self.target.vm_mor or not self.target.vc_id:
                 raise RuntimeError("Takeover needs the VM selected from VCF Operations inventory (vCenter id and MOR).")
             if not self.target.username or not self.target.password:
@@ -223,11 +225,14 @@ class TakeoverWorkflow:
                 raise RuntimeError(f"Failed to connect to {self.target.hostname}: "
                                    f"{getattr(self.executor, 'connection_error', None) or 'connection unavailable'}")
 
-            win_det = detect_windows_telegraf(self.executor)
-            self.managed = detect_managed_installation(self.executor, win_det, read_config=True)
+            if self._is_windows():
+                win_det = detect_windows_telegraf(self.executor)
+                self.managed = detect_managed_installation(self.executor, win_det, read_config=True)
+            else:
+                self.managed = detect_linux_managed_installation(self.executor)
             if not self.managed.query_ok:
                 raise RuntimeError(
-                    "Could not query Windows services for the Ops-managed agent; refusing to continue without that answer: "
+                    "Could not query services for the Ops-managed agent; refusing to continue without that answer: "
                     + self.managed.query_error
                 )
 
@@ -292,7 +297,7 @@ class TakeoverWorkflow:
                 )
 
             self.imported = merge_additions(
-                import_managed_config(self.managed.telegraf_conf, self.managed.telegraf_d, is_windows=True), self.additions
+                import_managed_config(self.managed.telegraf_conf, self.managed.telegraf_d, is_windows=self._is_windows()), self.additions
             )
             if not self.imported.ok:
                 raise RuntimeError("The managed configuration cannot be ported safely: " + "; ".join(self.imported.blocked))
@@ -305,6 +310,7 @@ class TakeoverWorkflow:
                 vc_id=self.target.vc_id,
                 vm_resource_id=vm_resource_id,
                 target_hostname=self.target.hostname,
+                os_family="windows" if self._is_windows() else "linux",
                 ops_url=self.env.url,
                 collector_address=self.env.collector.address,
                 confirmation_text=self.takeover.confirmation_text,
@@ -326,6 +332,8 @@ class TakeoverWorkflow:
 
     def _resume_from(self, previous: TakeoverRecord, start: float) -> StageResult:
         """Continue a takeover whose managed agent is already gone, from the journal and the backup."""
+        if previous.os_family != ("windows" if self._is_windows() else "linux"):
+            raise RuntimeError("The journaled takeover belongs to a different operating system.")
         if previous.target_hostname != self.target.hostname:
             raise RuntimeError(
                 f"The journaled takeover for this VM was run against {previous.target_hostname}, not {self.target.hostname}. "
@@ -355,6 +363,9 @@ class TakeoverWorkflow:
             self._already_installed = True
             self.results[RESULT_INSTALL] = "PASS (before the interruption)"
         self.record = previous
+        self.retained_items = list(previous.retained_items)
+        if self.retained_items:
+            self.verifications["Retained items"] = "; ".join(self.retained_items)
         self.agent_before = previous.agent_object_before
         self.cutover_started = previous.cutover_started_epoch
         self._resumed = True
@@ -364,7 +375,7 @@ class TakeoverWorkflow:
         fragments = {}
         if (backup / "telegraf.d").is_dir():
             fragments = {p.name: p.read_text(encoding="utf-8") for p in (backup / "telegraf.d").iterdir() if p.is_file()}
-        self.imported = merge_additions(import_managed_config(conf, fragments, is_windows=True), self.additions)
+        self.imported = merge_additions(import_managed_config(conf, fragments, is_windows=self._is_windows()), self.additions)
         if not self.imported.ok:
             raise RuntimeError("The backed-up configuration cannot be ported safely: " + "; ".join(self.imported.blocked))
         if self.monitoring is None:
@@ -385,11 +396,12 @@ class TakeoverWorkflow:
             for name, content in self.managed.telegraf_d.items():
                 files[f"telegraf.d/{name}"] = content
             if self.managed.mandatory_tags is not None:
-                files["mandatory_tags.bat"] = self.managed.mandatory_tags
+                files["mandatory_tags.bat" if self._is_windows() else "mandatory_tags.sh"] = self.managed.mandatory_tags
             if self.managed.grains is not None:
                 files["grains"] = self.managed.grains
             if self.managed.plugins_config is not None:
                 files["plugins/telegraf"] = self.managed.plugins_config
+            files.update(self.managed.extra_files)
             if self.managed.read_errors:
                 raise RuntimeError("Managed configuration could not be read completely: " + "; ".join(self.managed.read_errors))
             if "telegraf.conf" not in files:
@@ -429,11 +441,11 @@ class TakeoverWorkflow:
             free_mb = None
             if hasattr(self.executor, "get_free_disk_space_mb"):
                 try:
-                    free_mb = self.executor.get_free_disk_space_mb("C:")
+                    free_mb = self.executor.get_free_disk_space_mb("C:" if self._is_windows() else "/")
                 except Exception:
                     free_mb = None
             if isinstance(free_mb, (int, float)) and free_mb < 500:
-                raise RuntimeError(f"Only {free_mb} MB free on C:; the open-source install needs 500 MB")
+                raise RuntimeError(f"Only {free_mb} MB free on the install filesystem; the open-source install needs 500 MB")
             self.record.state = "preflight_ok" if not self._resumed else self.record.state
             self.journal.save(self.record)
             artifacts = self.install_workflow.artifacts
@@ -504,6 +516,25 @@ class TakeoverWorkflow:
             return self._result(TakeoverStage.CLEAN, StageStatus.SKIPPED, "Endpoint was cleaned before the interruption", start)
         try:
             assert self.record is not None
+            if not self._is_windows():
+                registry = None
+                if self.record.backup_dir:
+                    path = Path(self.record.backup_dir) / "uaf/agents-registry.json"
+                    if path.exists():
+                        registry = path.read_text(encoding="utf-8")
+                left = clean_linux_managed_installation(self.executor, registry)
+                self.retained_items = list(left)
+                self.record.retained_items = list(left)
+                self.verifications["Managed services absent"] = "PASS"
+                self.verifications["Managed files removed"] = "PASS"
+                if left:
+                    self.verifications["Retained items"] = "; ".join(left)
+                self.record.state = "cleaned"
+                self.journal.save(self.record)
+                message = "Endpoint clean: no managed services or processes; removed managed agent files"
+                if left:
+                    message += "; left in place: " + "; ".join(left)
+                return self._result(TakeoverStage.CLEAN, StageStatus.WARNING if left else StageStatus.PASS, message, start)
             after = detect_managed_installation(self.executor, read_config=True)
             if not after.query_ok:
                 raise RuntimeError(
@@ -560,8 +591,11 @@ class TakeoverWorkflow:
                     removed.append(MANAGED_DATA_ROOT)
                 else:
                     left.append(f"{MANAGED_DATA_ROOT} ({res.stdout.strip().replace('LEFT ', '') or '?'} files left by the uninstall)")
+            self.retained_items = list(left)
+            self.record.retained_items = list(left)
             self.verifications["Managed services absent"] = "PASS"
             if left:
+                self.verifications["Retained items"] = "; ".join(left)
                 self.verifications["Managed files removed"] = "LEFT IN PLACE (" + "; ".join(left) + ")"
             else:
                 self.verifications["Managed files removed"] = "PASS" if removed else "PASS (nothing left behind)"
@@ -649,7 +683,7 @@ class TakeoverWorkflow:
                     self.verifications["Stat keys"] = (
                         f"PASS ({after.stat_key_count} of {self.agent_before.stat_key_count})"
                         if after.stat_key_count >= self.agent_before.stat_key_count
-                        else f"PENDING ({after.stat_key_count} of {self.agent_before.stat_key_count}; the win. inputs need a second interval)"
+                        else f"PENDING ({after.stat_key_count} of {self.agent_before.stat_key_count}; collection may need a second interval)"
                     )
                 self.results[RESULT_REGISTRATION] = ("PASS" if same and flipped else ("CHANGED OBJECT" if not same and flipped else "PENDING"))
                 # Ops computes some stats itself every cycle, so a fresh timestamp alone proves nothing;
@@ -707,4 +741,5 @@ class TakeoverWorkflow:
             agent_object_after=self.agent_after,
             install_summary=self.install_summary,
             import_summary=self.imported.summary_lines() if self.imported else [],
+            retained_items=list(self.retained_items),
         )

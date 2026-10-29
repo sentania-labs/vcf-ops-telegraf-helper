@@ -1285,6 +1285,7 @@ class MainWindow(QMainWindow):
         det_row.addWidget(self.ep_uninstall_btn)
 
         self.ep_status_label = QLabel("Not detected yet")
+        self.ep_status_label.setWordWrap(True)
         self.ep_status_label.setProperty("class", "lattice-caption")
         det_row.addWidget(self.ep_status_label)
         det_row.addStretch()
@@ -1692,7 +1693,8 @@ class MainWindow(QMainWindow):
             record = TakeoverJournal().load(self.selected_vc_id, self.selected_vm_mor)
         except Exception:
             return None
-        if record is not None and record.state in RESUMABLE_STATES and record.backup_dir:
+        expected_os = "windows" if self._get_endpoint_target().os_family == OSFamily.WINDOWS else "linux"
+        if record is not None and record.os_family == expected_os and record.state in RESUMABLE_STATES and record.backup_dir:
             return record
         return None
 
@@ -1739,8 +1741,9 @@ class MainWindow(QMainWindow):
             self.takeover_check.setEnabled(True)
         self.ep_details_box.setPlainText("\n".join(details))
         self.state_store.record_endpoint(self.ep_host_input.text().strip())
-        self._update_catalog_os_compatibility(True)
-        self._last_detected_os = "windows"
+        is_win = self._get_endpoint_target().os_family == OSFamily.WINDOWS
+        self._update_catalog_os_compatibility(is_win)
+        self._last_detected_os = "windows" if is_win else "linux"
         if self.takeover_check.isChecked() and (mismatch or self.imported_config is None):
             if mismatch:
                 self.takeover_check.setChecked(False)
@@ -1808,7 +1811,7 @@ class MainWindow(QMainWindow):
     def _on_takeover_toggled(self, checked: bool) -> None:
         if checked and self.managed_installation is not None:
             imported = import_managed_config(
-                self.managed_installation.telegraf_conf, self.managed_installation.telegraf_d, is_windows=True
+                self.managed_installation.telegraf_conf, self.managed_installation.telegraf_d, is_windows=self._get_endpoint_target().os_family == OSFamily.WINDOWS
             )
             if not imported.ok:
                 QMessageBox.warning(
@@ -1831,7 +1834,7 @@ class MainWindow(QMainWindow):
             try:
                 conf = conf_path.read_text(encoding="utf-8") if conf_path.exists() else None
                 fragments = {f.name: f.read_text(encoding="utf-8") for f in fragments_dir.iterdir() if f.is_file()} if fragments_dir.is_dir() else {}
-                imported = import_managed_config(conf, fragments, is_windows=True)
+                imported = import_managed_config(conf, fragments, is_windows=self._get_endpoint_target().os_family == OSFamily.WINDOWS)
                 if imported.ok:
                     self.imported_config = imported
                     self._apply_monitoring_config(imported.monitoring)
@@ -2003,8 +2006,12 @@ class MainWindow(QMainWindow):
             outcome = "TAKEOVER APPLIED: VCF Operations confirmation pending"
         else:
             outcome = "TAKEOVER COMPLETE: same Ops object, open-source agent reporting"
+        if summary.retained_items:
+            count = len(summary.retained_items)
+            items = "1 item was" if count == 1 else f"{count} items were"
+            outcome += f". {items} left on the VM for you to review (see Retained items)."
         self.result_banner.setText(outcome)
-        self.result_banner.setStyleSheet("font-weight: 700; color: " + ("#d95926" if not summary.success or pending or changed else "#199e70") + ";")
+        self.result_banner.setStyleSheet("font-weight: 700; color: " + ("#d95926" if not summary.success or pending or changed or summary.retained_items else "#199e70") + ";")
         self.last_summary = summary
         self.execute_btn.setEnabled(not summary.success)
         self.export_md_btn.setEnabled(True)

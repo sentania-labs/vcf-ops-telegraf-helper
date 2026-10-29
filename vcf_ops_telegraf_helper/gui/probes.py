@@ -1,4 +1,5 @@
 """Endpoint inspection without reading or changing GUI widgets."""
+from vcf_ops_telegraf_helper.workflow.managed_linux import detect_linux_managed_installation
 from vcf_ops_telegraf_helper.models.endpoint import OSFamily
 from vcf_ops_telegraf_helper.workflow.windows import detect_managed_installation, detect_windows_telegraf
 
@@ -18,6 +19,9 @@ def probe_endpoint(target, executor):
                       os=caption.stdout.strip().splitlines()[0] if caption.success and caption.stdout.strip() else 'Microsoft Windows',
                       arch='x86_64', managed=managed if managed.present else None)
     else:
+        managed = detect_linux_managed_installation(executor)
+        if not managed.query_ok:
+            raise RuntimeError(managed.query_error)
         arch = executor.execute('uname -m', timeout=5)
         release = executor.execute('cat /etc/os-release', timeout=5)
         os_name = 'Unknown Linux'
@@ -37,7 +41,7 @@ def probe_endpoint(target, executor):
         result = dict(installed=installed, version=version.stdout.strip() if version and version.success else 'N/A',
                       running=running.success and running.stdout.strip() == 'active', config_dir='/etc/telegraf/telegraf.d',
                       binary=None, service=None, os=os_name, arch=arch.stdout.strip() if arch.success else 'x86_64',
-                      managed=None)
+                      managed=managed if managed.present else None)
     names = hostname.stdout.strip().splitlines() if hostname.success else []
     result['hostname'] = names[-1].split('.')[0] if names else target.hostname
     return result

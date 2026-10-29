@@ -84,7 +84,7 @@ def test_main_window_endpoint_detection_linux(qapp, tmp_path):
     mock_exec.test_connection.return_value = True
     mock_exec.execute.side_effect = lambda cmd, **kw: CommandResult(
         exit_code=0,
-        stdout='PRETTY_NAME="Ubuntu 22.04 LTS"' if "os-release" in cmd else ("active" if "systemctl" in cmd else "x86_64"),
+        stdout="" if "--property=Id,LoadState" in cmd else ('PRETTY_NAME="Ubuntu 22.04 LTS"' if "os-release" in cmd else ("active" if "systemctl" in cmd else "x86_64")),
         command=cmd,
     )
     window._create_executor = lambda target: mock_exec
@@ -137,7 +137,7 @@ def test_main_window_endpoint_detection_preserves_auto_install_opt_out(qapp, tmp
     mock_exec = MagicMock()
     mock_exec.test_connection.return_value = True
     mock_exec.file_exists.return_value = False
-    mock_exec.execute.return_value = MagicMock(success=False, stdout="")
+    mock_exec.execute.side_effect = lambda cmd, **kw: MagicMock(success="--property=Id,LoadState" in cmd, stdout="")
     window._create_executor = lambda target: mock_exec
 
     window.ep_user_input.setText("operator")
@@ -385,7 +385,7 @@ def test_main_window_endpoint_detection_installed_hides_banner(qapp, tmp_path):
     mock_exec.test_connection.return_value = True
     mock_exec.execute.side_effect = lambda cmd, **kw: CommandResult(
         exit_code=0,
-        stdout="/usr/bin/telegraf" if "which telegraf" in cmd else "active",
+        stdout="" if "--property=Id,LoadState" in cmd else ("/usr/bin/telegraf" if "which telegraf" in cmd else "active"),
         command=cmd,
     )
     window._create_executor = lambda target: mock_exec

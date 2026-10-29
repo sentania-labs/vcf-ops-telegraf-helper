@@ -2,14 +2,13 @@
 
 from __future__ import annotations
 
-import base64
 import ntpath
 import re
 from typing import Optional
 
 from vcf_ops_telegraf_helper.executors.base import EndpointExecutor
 from vcf_ops_telegraf_helper.logger import get_logger
-from vcf_ops_telegraf_helper.workflow.managed_encryption import decrypt_managed_config
+from vcf_ops_telegraf_helper.workflow.managed import ManagedInstallation, WINDOWS_PATHS, read_managed_config
 
 logger = get_logger("workflow.windows")
 
@@ -275,83 +274,18 @@ def detect_windows_telegraf(executor: EndpointExecutor) -> WindowsTelegrafDetect
 # ---------------------------------------------------------------------------
 
 MANAGED_SERVICE_NAMES = ("salt-minion", "ucp-salt-minion", "ucp-minion", "ucp-telegraf")
-MANAGED_ROOT = r"C:\VMware\UCP"
-MANAGED_DATA_ROOT = r"C:\ProgramData\VMware\UCP"
-MANAGED_CERT_DIR = MANAGED_DATA_ROOT + r"\certkeys"
-MANAGED_KEY = MANAGED_CERT_DIR + r"\key.pem"
-MANAGED_ENCRYPTED_CONF = MANAGED_ROOT + r"\plugins\telegraf.conf-encrypted"
-MANAGED_ENCRYPTED_PLUGINS = MANAGED_ROOT + r"\plugins\telegraf-encrypted"
+MANAGED_ROOT = WINDOWS_PATHS.root
+MANAGED_DATA_ROOT = WINDOWS_PATHS.data_root
+MANAGED_CERT_DIR = WINDOWS_PATHS.cert_dir
+MANAGED_KEY = WINDOWS_PATHS.key
+MANAGED_ENCRYPTED_CONF = WINDOWS_PATHS.encrypted_conf
+MANAGED_ENCRYPTED_PLUGINS = WINDOWS_PATHS.encrypted_plugins
 MANAGED_TELEGRAF_DIR = MANAGED_ROOT + r"\ucp-telegraf"
-MANAGED_TELEGRAF_CONF = MANAGED_TELEGRAF_DIR + r"\telegraf.conf"
-MANAGED_TELEGRAF_D = MANAGED_TELEGRAF_DIR + r"\telegraf.d"
-MANAGED_TAGS_SCRIPT = MANAGED_TELEGRAF_DIR + r"\mandatory_tags.bat"
-MANAGED_GRAINS = MANAGED_ROOT + r"\salt\conf\grains"
+MANAGED_TELEGRAF_CONF = WINDOWS_PATHS.conf
+MANAGED_TELEGRAF_D = WINDOWS_PATHS.fragments
+MANAGED_TAGS_SCRIPT = WINDOWS_PATHS.tags
+MANAGED_GRAINS = WINDOWS_PATHS.grains
 
-
-class ManagedInstallation:
-    """What an Ops product-managed agent looks like on one Windows endpoint.
-
-    `present` is decided by the control services (salt-minion, ucp-salt-minion, ucp-minion, ucp-telegraf) or a
-    telegraf service running from under C:\\VMware\\UCP. Directories alone are only cleanup scope:
-    the Ops uninstall leaves an empty C:\\VMware\\UCP behind.
-    """
-
-    def __init__(self) -> None:
-        self.services: dict[str, tuple[str, str]] = {}  # name -> (state, path)
-        self.root_present: bool = False
-        self.cert_dir_present: bool = False
-        self.data_root_present: bool = False
-        self.plugins_config: Optional[str] = None
-        self.telegraf_conf: Optional[str] = None
-        self.telegraf_d: dict[str, str] = {}
-        self.mandatory_tags: Optional[str] = None
-        self.grains: Optional[str] = None
-        self.telegraf_version: Optional[str] = None
-        self.read_errors: list[str] = []
-        self.query_ok: bool = False  # the service query itself succeeded (an empty result is only trusted then)
-        self.query_error: str = ""
-
-    @property
-    def present(self) -> bool:
-        return bool(self.services)
-
-    @property
-    def running_services(self) -> list[str]:
-        return [n for n, (state, _) in self.services.items() if "running" in state.lower()]
-
-    @property
-    def grain_values(self) -> dict[str, str]:
-        """Flat key: value pairs from the salt grains file (vm_id, vc_id, arc_virtual_ip, ...)."""
-        values: dict[str, str] = {}
-        for line in (self.grains or "").splitlines():
-            if ":" not in line or line.lstrip().startswith("#"):
-                continue
-            key, _, val = line.partition(":")
-            key, val = key.strip(), val.strip().strip("'\"")
-            if key and val and not key.startswith("-"):
-                values[key] = val
-        return values
-
-    @property
-    def cleanup_paths(self) -> list[str]:
-        paths = []
-        if self.root_present:
-            paths.append(MANAGED_ROOT)
-        if self.data_root_present:
-            paths.append(MANAGED_DATA_ROOT)
-        elif self.cert_dir_present:
-            paths.append(MANAGED_CERT_DIR)
-        return paths
-
-    def summary(self) -> str:
-        if not self.present:
-            return "No Ops-managed agent"
-        svc = ", ".join(f"{n} ({st})" for n, (st, _) in sorted(self.services.items()))
-        ver = f", {self.telegraf_version}" if self.telegraf_version else ""
-        return f"Ops-managed agent: services {svc}{ver}"
-
-    def __repr__(self) -> str:
-        return f"ManagedInstallation(services={sorted(self.services)}, root={self.root_present}, certs={self.cert_dir_present})"
 
 
 def is_managed_detection(found: WindowsTelegrafDetection) -> bool:
@@ -412,59 +346,7 @@ def detect_managed_installation(
         if _is_valid_stdout(ver):
             found.telegraf_version = ver.stdout.strip().splitlines()[0].strip()
 
-    def _read(path: str, required: bool = False) -> Optional[str]:
-        try:
-            if not executor.file_exists(path):
-                if required:
-                    found.read_errors.append(f"The file {path} is missing. Restore it and try again.")
-                return None
-            return executor.download(path)
-        except Exception as exc:
-            found.read_errors.append(f"{path}: {exc}")
-            return None
-
-    def _binary(path: str) -> bytes:
-        safe_path = path.replace("'", "''")
-        result = executor.execute(f"[Convert]::ToBase64String([IO.File]::ReadAllBytes('{safe_path}'))", timeout=30)
-        if not result.success:
-            raise ValueError(f"Could not read {path}: {result.stderr or result.stdout}")
-        return base64.b64decode("".join(result.stdout.split()), validate=True)
-
-    def _decrypt(path: str) -> Optional[str]:
-        try:
-            if not executor.file_exists(MANAGED_KEY):
-                raise ValueError(f"The key file {MANAGED_KEY} is missing")
-            return decrypt_managed_config(_binary(MANAGED_KEY), _binary(path)).decode("utf-8")
-        except Exception as exc:
-            found.read_errors.append(f"Could not read {path}: {exc}. Check the file and key, then try again.")
-            return None
-
-    source = "plain file"
-    if executor.file_exists(MANAGED_TELEGRAF_CONF):
-        found.telegraf_conf = _read(MANAGED_TELEGRAF_CONF, required=True)
-    elif executor.file_exists(MANAGED_ENCRYPTED_CONF):
-        source = "encrypted file"
-        found.telegraf_conf = _decrypt(MANAGED_ENCRYPTED_CONF)
-    else:
-        found.read_errors.append(f"The managed configuration is missing: neither {MANAGED_TELEGRAF_CONF} nor {MANAGED_ENCRYPTED_CONF} exists. Restore the configuration and try again.")
-    if found.telegraf_conf is None:
-        source = "unavailable: " + "; ".join(found.read_errors)
-    if executor.file_exists(MANAGED_ENCRYPTED_PLUGINS):
-        found.plugins_config = _decrypt(MANAGED_ENCRYPTED_PLUGINS)
-    found.mandatory_tags = _read(MANAGED_TAGS_SCRIPT)
-    found.grains = _read(MANAGED_GRAINS)
-    listing = executor.execute(
-        f"Get-ChildItem -Path '{MANAGED_TELEGRAF_D}' -File -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Name",
-        timeout=10,
-    )
-    if _is_valid_stdout(listing):
-        for name in listing.stdout.strip().splitlines():
-            name = name.strip()
-            if name:
-                content = _read(f"{MANAGED_TELEGRAF_D}\\{name}")
-                if content is not None:
-                    found.telegraf_d[name] = content
-    logger.info("Managed agent inspection: %r, configuration: %s, %d telegraf.d fragments", found, source, len(found.telegraf_d))
+    read_managed_config(executor, found)
     return found
 
 

@@ -32,7 +32,7 @@ def test_missing_telegraf_without_auto_install_fails_push():
     mock_exec = MagicMock()
     mock_exec.execute.side_effect = lambda cmd, **kw: CommandResult(
         exit_code=1 if "which telegraf" in cmd else 0,
-        stdout="" if "which telegraf" in cmd else "x86_64",
+        stdout="" if "which telegraf" in cmd or "--property=Id,LoadState" in cmd else "x86_64",
         command=cmd,
     )
     mock_adapter = MagicMock()
@@ -65,7 +65,7 @@ def test_missing_telegraf_with_auto_install_warns_and_proceeds():
     mock_exec = MagicMock()
     mock_exec.execute.side_effect = lambda cmd, **kw: CommandResult(
         exit_code=1 if "which telegraf" in cmd else 0,
-        stdout="" if "which telegraf" in cmd else "x86_64",
+        stdout="" if "which telegraf" in cmd or "--property=Id,LoadState" in cmd else "x86_64",
         command=cmd,
     )
     mock_adapter = MagicMock()

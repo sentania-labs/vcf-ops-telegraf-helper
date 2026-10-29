@@ -361,10 +361,10 @@ def test_new_object_is_reported_as_changed(tmp_path):
     assert summary.verifications["Same Ops object"].startswith("CHANGED")
 
 
-def test_linux_target_is_refused(tmp_path):
+def test_linux_target_without_managed_services_is_refused(tmp_path):
     wf = _workflow(tmp_path, target=_target(os_family=OSFamily.LINUX, connection_method=ConnectionMethod.SSH))
     summary = wf.run()
-    assert not summary.success and "Windows" in summary.stages[0].message
+    assert not summary.success and "No Ops-managed agent" in summary.stages[0].message
 
 
 def test_journal_backup_rejects_path_escapes(tmp_path):
@@ -614,7 +614,7 @@ def test_service_query_failure_fails_closed_before_and_after_retire(tmp_path):
     endpoint.service_query_fails = True
     wf = _workflow(tmp_path, endpoint=endpoint)
     summary = wf.run()
-    assert not summary.success and "Could not query Windows services" in summary.stages[0].message
+    assert not summary.success and "Could not query services" in summary.stages[0].message
     assert wf.adapter.uninstall_calls == []
 
     endpoint = ManagedWindowsEndpoint()

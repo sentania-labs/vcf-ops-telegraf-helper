@@ -33,6 +33,7 @@ class TakeoverRecord(BaseModel):
     vc_id: str
     vm_resource_id: Optional[str] = None
     target_hostname: str
+    os_family: str = "windows"  # records predating Linux support are Windows takeovers
     ops_url: str
     collector_address: Optional[str] = None
     state: str = "captured"  # captured, backed_up, retired, cleaned, installed, verified, failed
@@ -52,6 +53,7 @@ class TakeoverRecord(BaseModel):
     stages: List[Dict[str, Any]] = Field(default_factory=list)
     results: Dict[str, str] = Field(default_factory=dict)
     notes: List[str] = Field(default_factory=list)
+    retained_items: List[str] = Field(default_factory=list)
 
     @property
     def key(self) -> str:

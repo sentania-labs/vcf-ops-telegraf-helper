@@ -45,6 +45,8 @@ from vcf_ops_telegraf_helper.workflow.windows import (
 )
 from vcf_ops_telegraf_helper.logger import get_logger
 
+from vcf_ops_telegraf_helper.workflow.managed_linux import detect_linux_managed_installation
+
 logger = get_logger("workflow.engine")
 
 
@@ -279,6 +281,11 @@ class ConfigureEndpointWorkflow:
                     host_ip=host_ip,
                 )
             else:
+                self.managed_installation = detect_linux_managed_installation(self.executor, read_config=False)
+                if not self.managed_installation.query_ok:
+                    raise RuntimeError("Could not query services for an Ops-managed agent: " + self.managed_installation.query_error)
+                if self.managed_installation.present and not self.options.allow_managed_agent:
+                    raise RuntimeError("This agent is managed by VCF Operations. Use the takeover option to replace it.")
                 os_name = "Linux"
                 arch_res = self.executor.execute("uname -m", timeout=5)
                 arch = arch_res.stdout.strip() if arch_res.success else "x86_64"
@@ -296,7 +303,7 @@ class ConfigureEndpointWorkflow:
                         os_version = os_rel.stdout.strip().splitlines()[0]
 
                 which_res = self.executor.execute("which telegraf", timeout=5)
-                installed = which_res.success
+                installed = which_res.success and not self.managed_installation.present
                 telegraf_bin = which_res.stdout.strip() if installed else "/usr/bin/telegraf"
 
                 version_str = None

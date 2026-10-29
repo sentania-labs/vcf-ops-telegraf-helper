@@ -89,6 +89,9 @@ class MockExecutor(EndpointExecutor):
                 return CommandResult(exit_code=0, stdout="active\n", command=command)
             return CommandResult(exit_code=3, stdout="inactive\n", command=command)
 
+        if "--property=Id,LoadState,ActiveState,SubState,ExecStart,FragmentPath" in command:
+            return CommandResult(exit_code=0, stdout="", command=command)
+
         if "systemctl list-unit-files" in cmd_lower:
             out = "telegraf.service enabled\n" if self.telegraf_installed else ""
             return CommandResult(exit_code=0, stdout=out, command=command)
