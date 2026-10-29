@@ -659,6 +659,7 @@ def retired_linux_resume(tmp_path, stage):
     record.state = "retired"
     record.uninstall_task_id = "done-task"
     record.uninstall_task_stage = stage
+    record.uninstall_unconfirmed = stage != "FINISHED"
     record.cutover_started_epoch = 1
     journal.save(record)
     resumed = linux_workflow(tmp_path, RetiredLinuxEndpoint())
@@ -676,12 +677,12 @@ def test_retired_linux_resume_does_not_need_ops_status(tmp_path):
     assert wf.record.state == "retired"
 
 
-def test_unconfirmed_retired_linux_resume_accepts_clean_endpoint_when_status_unavailable(tmp_path):
+def test_unconfirmed_retired_linux_resume_survives_unavailable_status(tmp_path):
+    from vcf_ops_telegraf_helper.workflow.takeover import RESULT_RETIREMENT
     wf = retired_linux_resume(tmp_path, "SUBMITTING")
-    wf.takeover.accept_endpoint_state = True
-    wf.takeover.uninstall_timeout_seconds = 0
     assert wf.capture().status == StageStatus.WARNING
-    assert any("Ops never confirmed" in note for note in wf.record.notes)
+    assert "Ops never confirmed" in wf.results[RESULT_RETIREMENT]
+    assert wf.record.uninstall_unconfirmed
 
 
 def test_endpoint_verification_ignores_unmanaged_salt_unit(tmp_path, monkeypatch):

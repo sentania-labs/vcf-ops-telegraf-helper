@@ -356,15 +356,7 @@ class TakeoverWorkflow:
                 f"The journaled backup under {backup or 'the journal'} no longer holds telegraf.conf; "
                 "the managed inputs cannot be ported. Enroll the endpoint with the ordinary workflow instead."
             )
-        # Preserve an operator-accepted retirement across cleanup and installation resumes.
-        # Older accepted journals recorded the evidence in notes before the flag existed.
-        accepted_before = previous.uninstall_unconfirmed or (
-            previous.state in ("retired", "cleaned", "installed")
-            and (previous.uninstall_task_stage or "").upper() != "FINISHED"
-            and any("Ops never confirmed uninstall task " in note for note in previous.notes)
-        )
-        if accepted_before:
-            previous.uninstall_unconfirmed = True
+        if previous.uninstall_unconfirmed:
             status = self._task_status_or_unchanged(
                 previous, AgentTaskStatus(task_id=previous.uninstall_task_id or "", stage=previous.uninstall_task_stage)
             ) if previous.uninstall_task_id else None
@@ -375,9 +367,7 @@ class TakeoverWorkflow:
                 self.results[RESULT_RETIREMENT] = "PASS (task finished after endpoint acceptance)"
             else:
                 self.results[RESULT_RETIREMENT] = "WARNING (Ops never confirmed; endpoint state accepted)"
-        unconfirmed_retired = (not accepted_before and previous.state == "retired" and not self._is_windows()
-                               and bool(previous.uninstall_task_stage) and previous.uninstall_task_stage.upper() != "FINISHED")
-        if (previous.state == "retire_failed" or unconfirmed_retired) and previous.uninstall_task_id:
+        if previous.state == "retire_failed" and previous.uninstall_task_id:
             status = self._task_status_or_unchanged(previous, AgentTaskStatus(task_id=previous.uninstall_task_id, stage=previous.uninstall_task_stage))
             previous.uninstall_task_stage = status.stage
             if not status.finished:
