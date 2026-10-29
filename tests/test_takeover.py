@@ -62,6 +62,10 @@ class ManagedWindowsEndpoint(MockExecutor):
 
     def execute(self, command, timeout=30):
         self.executed_commands.append(command)
+        if command.startswith("Remove-Item -Path ") and "*.bak" in command:
+            return CommandResult(exit_code=0, stdout="", command=command)
+        if not self.managed and command.startswith("Test-Path -Path 'C:\\Program Files\\Telegraf\\telegraf.exe'"):
+            return CommandResult(exit_code=0, stdout="False\n", command=command)
         if "Invoke-WebRequest" in command and "telegraf" in command:
             if self.install_fails:
                 return CommandResult(exit_code=1, stderr="download failed: 404", command=command)
@@ -697,3 +701,53 @@ def test_retired_journal_with_services_back_refuses_a_second_uninstall(tmp_path)
     summary = second.run()
     assert not summary.success and "second uninstall" in summary.stages[0].message
     assert len(first.adapter.uninstall_calls) == 1
+
+
+def test_cleaned_resume_over_stock_windows_sample(tmp_path):
+    first = _workflow(tmp_path)
+    for stage in (first.capture, first.backup, first.preflight, first.retire, first.clean):
+        assert stage().status in (StageStatus.PASS, StageStatus.WARNING)
+    assert first.record.state == "cleaned"
+    endpoint = first.executor
+    endpoint.telegraf_installed = True
+    endpoint.files[r"C:\telegraf\telegraf.conf"] = (Path(__file__).parent / "fixtures" / "influxdata-windows-sample-active.conf").read_text()
+    second = _workflow(tmp_path, endpoint=endpoint, adapter=first.adapter)
+    summary = second.run()
+    assert summary.success, [(s.stage, s.message) for s in summary.stages]
+    assert r"C:\telegraf\telegraf.conf" in endpoint.uploaded_files, (endpoint.uploaded_files.keys(), [(s.stage, s.message) for s in second.install_workflow.stage_results])
+    assert "Managed by VCF Operations Open Telegraf Helper" in endpoint.uploaded_files[r"C:\telegraf\telegraf.conf"]
+    assert summary.verifications["Same Ops object"] == "PASS"
+    assert len(first.adapter.uninstall_calls) == 1
+
+
+def test_cleaned_resume_refuses_modified_sample_and_reports_outage(tmp_path):
+    first = _workflow(tmp_path)
+    for stage in (first.capture, first.backup, first.preflight, first.retire, first.clean):
+        assert stage().status in (StageStatus.PASS, StageStatus.WARNING)
+    endpoint = first.executor
+    endpoint.telegraf_installed = True
+    path = r"C:\telegraf\telegraf.conf"
+    sample = (Path(__file__).parent / "fixtures" / "influxdata-windows-sample-active.conf").read_text()
+    endpoint.files[path] = sample + '\n[[inputs.exec]]\n  commands = ["custom"]\n'
+    second = _workflow(tmp_path, endpoint=endpoint, adapter=first.adapter)
+    summary = second.run()
+    assert not summary.success
+    assert "unmanaged inputs" in summary.stages[2].message
+    assert "managed agent is already gone" in summary.stages[2].message
+    assert "monitoring stays interrupted until the resume succeeds" in summary.stages[2].message
+    assert "managed agent was not touched" not in summary.stages[2].message
+    assert path not in endpoint.uploaded_files
+    assert len(first.adapter.uninstall_calls) == 1
+
+
+def test_stock_sample_does_not_bypass_guard_before_retirement(tmp_path):
+    endpoint = ManagedWindowsEndpoint()
+    path = r"C:\telegraf\telegraf.conf"
+    endpoint.files[path] = (Path(__file__).parent / "fixtures" / "influxdata-windows-sample-active.conf").read_text()
+    wf = _workflow(tmp_path, endpoint=endpoint)
+    summary = wf.run()
+    assert not summary.success
+    assert "unmanaged inputs" in summary.stages[2].message
+    assert "managed agent was not touched" in summary.stages[2].message
+    assert "monitoring stays interrupted" not in summary.stages[2].message
+    assert endpoint.managed and wf.adapter.uninstall_calls == []
