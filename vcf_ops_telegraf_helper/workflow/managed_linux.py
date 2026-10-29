@@ -199,7 +199,7 @@ done""")
 
 def verify_linux_retired_endpoint(executor, managed_services):
     """Read-only evidence for accepting an unconfirmed Linux uninstall."""
-    names = set(SERVICE_NAMES) | set(managed_services)
+    names = set(managed_services)
     if any(not name or any(c not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.-" for c in name) for name in names):
         raise RuntimeError("Invalid service name in takeover journal")
     units = " ".join(shlex.quote(name + ".service") for name in sorted(names))

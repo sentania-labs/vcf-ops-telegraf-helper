@@ -336,7 +336,9 @@ class TakeoverWorkflow:
         try:
             return self.adapter.get_agent_task_status(previous.uninstall_task_id)
         except Exception:
-            logger.warning("Could not read uninstall task %s; treating it as unchanged", previous.uninstall_task_id)
+            if self._is_windows():
+                raise
+            logger.warning("Could not read uninstall task %s; treating it as unchanged", previous.uninstall_task_id, exc_info=True)
             return unchanged
 
     def _resume_from(self, previous: TakeoverRecord, start: float) -> StageResult:
@@ -364,7 +366,13 @@ class TakeoverWorkflow:
                 eligible = (not self._is_windows() and (stage == "RUNNING" or (stage == "SUBMITTING" and not status.messages))
                             and previous.cutover_started_epoch is not None
                             and time.time() >= previous.cutover_started_epoch + self.takeover.uninstall_timeout_seconds)
-                if not eligible or not (self.takeover.accept_endpoint_state or self.accept_endpoint_callback):
+                if eligible and not (self.takeover.accept_endpoint_state or self.accept_endpoint_callback):
+                    raise RuntimeError(
+                        f"Ops uninstall task {previous.uninstall_task_id} is still {status.stage} after the {self.takeover.uninstall_timeout_seconds}s wait. "
+                        "Ops cannot cancel or acknowledge it. If the endpoint is clean, re-run with --accept-endpoint-state "
+                        "(or confirm in the GUI) to proceed without Ops confirmation."
+                    )
+                if not eligible:
                     raise RuntimeError(
                         f"Ops uninstall task {previous.uninstall_task_id} is {status.stage}"
                         + (f" ({'; '.join(status.messages)})" if status.messages else "")

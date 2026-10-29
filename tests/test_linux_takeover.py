@@ -682,3 +682,34 @@ def test_unconfirmed_retired_linux_resume_accepts_clean_endpoint_when_status_una
     wf.takeover.uninstall_timeout_seconds = 0
     assert wf.capture().status == StageStatus.WARNING
     assert any("Ops never confirmed" in note for note in wf.record.notes)
+
+
+def test_endpoint_verification_ignores_unmanaged_salt_unit(tmp_path, monkeypatch):
+    import os
+    import vcf_ops_telegraf_helper.workflow.managed_linux as linux
+    root = tmp_path / "ucp"
+    (root / "bootstrap").mkdir(parents=True)
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    systemctl = bin_dir / "systemctl"
+    systemctl.write_text('#!/bin/sh\ncase "$*" in *salt-minion.service*--value*) printf "loaded\\n" ;; *--value*) printf "not-found\\n" ;; esac\n')
+    systemctl.chmod(0o755)
+    monkeypatch.setattr(linux, "ROOT", str(root))
+
+    class LocalExecutor:
+        def execute(self, command, timeout=30):
+            env = dict(os.environ, PATH=str(bin_dir) + ":" + os.environ["PATH"])
+            proc = subprocess.run(command, shell=True, text=True, capture_output=True, timeout=timeout, env=env)
+            return CommandResult(command=command, exit_code=proc.returncode, stdout=proc.stdout, stderr=proc.stderr)
+
+    assert linux.verify_linux_retired_endpoint(LocalExecutor(), ["ucp-minion"])[-1] == "bootstrap result absent"
+    with pytest.raises(RuntimeError, match="Unit loaded: salt-minion"):
+        linux.verify_linux_retired_endpoint(LocalExecutor(), ["salt-minion"])
+
+
+def test_eligible_pending_task_without_consent_points_at_the_flag(tmp_path):
+    wf = pending_linux_resume(tmp_path)
+    wf.takeover.accept_endpoint_state = False
+    result = wf.capture()
+    assert result.status == StageStatus.FAIL
+    assert "--accept-endpoint-state" in result.message
