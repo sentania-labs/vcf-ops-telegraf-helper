@@ -204,7 +204,7 @@ def verify_linux_retired_endpoint(executor, managed_services):
         raise RuntimeError("Invalid service name in takeover journal")
     units = " ".join(shlex.quote(name + ".service") for name in sorted(names))
     result = shell(executor, f'''set -e
-[ ! -L /opt/vmware ] && [ ! -L {ROOT} ]
+if [ -L /opt/vmware ] || [ -L {ROOT} ]; then exit 1; fi
 files=$(systemctl list-unit-files --type=service --no-legend --no-pager)
 loaded=$(systemctl list-units --all --type=service --no-legend --no-pager --plain)
 all_units=$(printf '%s\\n%s\\n' "$files" "$loaded" | awk '$1 ~ /\\.service$/ && $1 !~ /@\\.service$/ {{print $1}}' | sort -u)
