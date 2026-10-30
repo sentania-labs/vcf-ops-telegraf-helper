@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import base64
+import re
 import shlex
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from typing import Optional
 
@@ -125,6 +127,22 @@ class ManagedInstallation:
 
 
 
+def _command_failure_reason(result) -> str:
+    """Keep PowerShell's serialized progress stream out of capture errors."""
+    reason = (result.stderr or result.stdout).strip()
+    if "#< CLIXML" in reason or reason.startswith("<Objs"):
+        try:
+            root = ET.fromstring(reason[reason.index("<Objs"):])
+            reason = "\n".join(
+                re.sub(r"_x([0-9a-fA-F]{4})_", lambda m: chr(int(m[1], 16)), node.text or "").strip()
+                for node in root.iter()
+                if node.tag.rsplit("}", 1)[-1] == "S" and node.get("S", "").lower() == "error"
+            ).strip()
+        except (ET.ParseError, ValueError):
+            reason = ""
+    return reason or f"command failed (exit {result.exit_code})"
+
+
 def read_managed_config(executor, found):
     paths = found.paths
 
@@ -148,7 +166,7 @@ def read_managed_config(executor, found):
         safe_path = path.replace("'", "''")
         result = executor.execute(f"[Convert]::ToBase64String([IO.File]::ReadAllBytes('{safe_path}'))", timeout=30)
         if not result.success:
-            raise ValueError(f"Could not read {path}: {result.stderr or result.stdout}")
+            raise ValueError(f"Could not read {path}: {_command_failure_reason(result)}")
         return base64.b64decode("".join(result.stdout.split()), validate=True)
 
     def _decrypt(path: str) -> Optional[str]:
@@ -175,7 +193,8 @@ def read_managed_config(executor, found):
     found.mandatory_tags = _read(paths.tags)
     found.grains = _read(paths.grains)
     if paths.is_windows:
-        command = f"Get-ChildItem -Path '{paths.fragments}' -File -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Name"
+        directory = paths.fragments.replace("'", "''")
+        command = f"if (Test-Path '{directory}') {{ Get-ChildItem -Path '{directory}' -File | Select-Object -ExpandProperty Name }}"
     else:
         command = "bash -c " + shlex.quote(f"""set -e
 directory={shlex.quote(paths.fragments)}
@@ -197,7 +216,7 @@ if [ -d "$directory" ]; then
 fi""")
     listing = executor.execute(command, timeout=10)
     if not listing.success:
-        found.read_errors.append(f"Could not list {paths.fragments}: {listing.stderr.strip()}")
+        found.read_errors.append(f"Could not list {paths.fragments}: {_command_failure_reason(listing)}")
     elif listing.stdout.strip():
         for name in listing.stdout.splitlines():
             if name in (".", "..") or "/" in name or "\\" in name:
