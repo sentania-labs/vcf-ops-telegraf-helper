@@ -854,6 +854,12 @@ class ConfigureEndpointWorkflow:
 
                 arch_str = (getattr(self.discovery, "arch", "") or getattr(self.discovery, "architecture", "") or "").lower()
                 is_arm = "arm" in arch_str or "aarch" in arch_str
+                win_dest_dir = "C:\\telegraf"
+                if is_win and should_upgrade:
+                    existing_bin = getattr(self.discovery, "telegraf_bin_path", None) or ""
+                    if "\\" in existing_bin:
+                        win_dest_dir = existing_bin.rsplit("\\", 1)[0] or win_dest_dir
+                win_dest_ps = win_dest_dir.replace("'", "''")
                 if is_win:
                     win_arch = "arm64" if is_arm else "amd64"
                     zip_url = f"https://dl.influxdata.com/telegraf/releases/telegraf-{telegraf_ver}_windows_{win_arch}.zip"
@@ -862,11 +868,19 @@ class ConfigureEndpointWorkflow:
                         "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; "
                         f"$zipUrl = '{zip_url}'; "
                         "$destZip = \"$env:TEMP\\telegraf.zip\"; "
-                        "$destDir = 'C:\\telegraf'; "
-                        "$hadConf = Test-Path \"$destDir\\telegraf.conf\"; "
-                        "if (-not (Test-Path $destDir)) { New-Item -ItemType Directory -Path $destDir -Force | Out-Null }; "
-                        "if (-not (Test-Path \"$destDir\\telegraf.d\")) { New-Item -ItemType Directory -Path \"$destDir\\telegraf.d\" -Force | Out-Null }; "
-                        "Invoke-WebRequest -Uri $zipUrl -OutFile $destZip -UseBasicParsing; "
+                        f"$destDir = '{win_dest_ps}'; "
+                        + (
+                            "$hadConf = $true; "
+                            if should_upgrade
+                            else "$hadConf = Test-Path \"$destDir\\telegraf.conf\"; "
+                        )
+                        + "if (-not (Test-Path $destDir)) { New-Item -ItemType Directory -Path $destDir -Force | Out-Null }; "
+                        + (
+                            ""
+                            if should_upgrade
+                            else "if (-not (Test-Path \"$destDir\\telegraf.d\")) { New-Item -ItemType Directory -Path \"$destDir\\telegraf.d\" -Force | Out-Null }; "
+                        )
+                        + "Invoke-WebRequest -Uri $zipUrl -OutFile $destZip -UseBasicParsing; "
                         "Expand-Archive -Path $destZip -DestinationPath \"$env:TEMP\\telegraf_extract\" -Force; "
                         "$bin = Get-ChildItem -Path \"$env:TEMP\\telegraf_extract\" -Filter 'telegraf.exe' -Recurse | Select-Object -First 1; "
                         "if (-not $bin) { throw 'telegraf.exe binary not found in extracted archive' }; "
@@ -885,16 +899,22 @@ class ConfigureEndpointWorkflow:
                         "Remove-Item -Path \"$env:TEMP\\telegraf_extract\" -Recurse -Force -ErrorAction SilentlyContinue; "
                         "Remove-Item -Path $destZip -Force -ErrorAction SilentlyContinue; "
                         "if ($svc) { "
-                        "$img = (Get-ItemProperty 'HKLM:\\SYSTEM\\CurrentControlSet\\Services\\telegraf' -ErrorAction SilentlyContinue).ImagePath; "
-                        "if (-not $img -or $img -notlike \"*$destDir\\telegraf.exe*\" -or $img -notlike '*--config-directory*') { "
-                        "$binArgs = \"`\"$destDir\\telegraf.exe`\" --config `\"$destDir\\telegraf.conf`\" --config-directory `\"$destDir\\telegraf.d`\"\"; "
-                        "Set-ItemProperty -Path 'HKLM:\\SYSTEM\\CurrentControlSet\\Services\\telegraf' -Name ImagePath -Value $binArgs -Force; "
-                        "& sc.exe config telegraf binPath= $binArgs | Out-Null; "
-                        "Write-Output 'Service image path updated to managed directory' "
-                        "} else { "
-                        "Write-Output 'Service already registered' "
-                        "} "
-                        "} else { "
+                        + (
+                            "Write-Output 'Service registration unchanged' "
+                            if should_upgrade
+                            else (
+                                "$img = (Get-ItemProperty 'HKLM:\\SYSTEM\\CurrentControlSet\\Services\\telegraf' -ErrorAction SilentlyContinue).ImagePath; "
+                                "if (-not $img -or $img -notlike \"*$destDir\\telegraf.exe*\" -or $img -notlike '*--config-directory*') { "
+                                "$binArgs = \"`\"$destDir\\telegraf.exe`\" --config `\"$destDir\\telegraf.conf`\" --config-directory `\"$destDir\\telegraf.d`\"\"; "
+                                "Set-ItemProperty -Path 'HKLM:\\SYSTEM\\CurrentControlSet\\Services\\telegraf' -Name ImagePath -Value $binArgs -Force; "
+                                "& sc.exe config telegraf binPath= $binArgs | Out-Null; "
+                                "Write-Output 'Service image path updated to managed directory' "
+                                "} else { "
+                                "Write-Output 'Service already registered' "
+                                "} "
+                            )
+                        )
+                        + "} else { "
                         "& \"$destDir\\telegraf.exe\" --service install --config \"$destDir\\telegraf.conf\" --config-directory \"$destDir\\telegraf.d\" "
                         "}"
                     )
@@ -960,7 +980,7 @@ class ConfigureEndpointWorkflow:
                     self.reporter.on_stage_complete(res)
                     return res
 
-                expected_bin = "C:\\telegraf\\telegraf.exe" if is_win else "/usr/bin/telegraf"
+                expected_bin = f"{win_dest_dir}\\telegraf.exe" if is_win else "/usr/bin/telegraf"
                 bin_exists = self.executor.file_exists(expected_bin)
                 if not bin_exists and type(self.executor).__name__ in ("SSHExecutor", "WinRMExecutor", "LocalExecutor"):
                     dur = int((time.monotonic() - start) * 1000)
@@ -973,7 +993,9 @@ class ConfigureEndpointWorkflow:
                     self.reporter.on_stage_complete(res)
                     return res
                 self.discovery.telegraf_installed = True
-                if is_win:
+                if is_win and should_upgrade:
+                    pass
+                elif is_win:
                     self.discovery.telegraf_bin_path = "C:\\telegraf\\telegraf.exe"
                     self.discovery.main_config_path = "C:\\telegraf\\telegraf.conf"
                     self.discovery.config_dir = "C:\\telegraf\\telegraf.d"
@@ -989,10 +1011,16 @@ class ConfigureEndpointWorkflow:
                     self.discovery.telegraf_version = ver_res.stdout.strip().splitlines()[0].strip()
 
                 if should_upgrade:
-                    self.telegraf_upgraded = True
-                    self.reporter.on_message(
-                        f"Telegraf agent upgraded to {self.discovery.telegraf_version or telegraf_ver}"
-                    )
+                    v_now = parse_telegraf_version(self.discovery.telegraf_version)
+                    v_req = parse_telegraf_version(telegraf_ver)
+                    if v_now and v_req and v_now >= v_req:
+                        self.telegraf_upgraded = True
+                        self.reporter.on_message(f"Telegraf agent upgraded to {self.discovery.telegraf_version}")
+                    else:
+                        self.reporter.on_message(
+                            f"Telegraf agent upgrade to {telegraf_ver} did not take effect: "
+                            f"installed version is {self.discovery.telegraf_version or 'unknown'}"
+                        )
 
             # SHA-256 Idempotency Comparison
             self.is_idempotent = False

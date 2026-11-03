@@ -275,6 +275,101 @@ def test_apply_reads_upgraded_version_from_installed_binary_not_old_path():
     assert wf.discovery.telegraf_version == "Telegraf 1.40.2"
 
 
+def _upgrade_workflow(os_family, method, discovery, version_for):
+    env = VCFEnvironment(name="test", url="https://vcf.local", username="admin", collector=CollectorInfo(address="10.10.10.50"))
+    target = EndpointTarget(
+        hostname="node.local",
+        os_family=os_family,
+        connection_method=method,
+        install_telegraf=True,
+        telegraf_version="1.40.2",
+    )
+    mock_exec = MagicMock()
+
+    def _exec_handler(cmd, **kw):
+        out = version_for(cmd)
+        return CommandResult(exit_code=0, stdout=out if out is not None else "success", command=cmd)
+
+    mock_exec.execute.side_effect = _exec_handler
+    mock_exec.file_exists.return_value = False
+    mock_adapter = MagicMock()
+    mock_adapter.prepare_telegraf_integration.return_value = IntegrationArtifacts(
+        collector_address="10.10.10.50",
+        script_url="https://10.10.10.50/downloads/salt/telegraf-utils.ps1",
+        output_url="https://10.10.10.50/opensource/default/metric",
+        token="test-token-xyz",
+    )
+    wf = ConfigureEndpointWorkflow(
+        environment=env,
+        target=target,
+        monitoring=MonitoringConfig(),
+        executor=mock_exec,
+        adapter=mock_adapter,
+        options=WorkflowOptions(mode=DeploymentMode.PUSH, install_telegraf=True, telegraf_version="1.40.2"),
+    )
+    wf.artifacts = mock_adapter.prepare_telegraf_integration()
+    wf.discovery = discovery
+    return wf, mock_exec
+
+
+def test_windows_upgrade_replaces_binary_in_place_for_custom_install_dir():
+    """A Windows agent outside C:\\telegraf is upgraded where it lives; its service and config stay put."""
+    custom_dir = "C:\\Program Files\\Telegraf"
+    wf, mock_exec = _upgrade_workflow(
+        OSFamily.WINDOWS,
+        ConnectionMethod.WINRM,
+        EndpointDiscoveryResult(
+            hostname="node.local",
+            os_name="Windows",
+            os_version="Microsoft Windows Server 2025",
+            telegraf_installed=True,
+            telegraf_version="Telegraf 1.32.1",
+            architecture="x86_64",
+            telegraf_bin_path=f"{custom_dir}\\telegraf.exe",
+            main_config_path=f"{custom_dir}\\telegraf.conf",
+            config_dir=f"{custom_dir}\\telegraf.d",
+        ),
+        lambda cmd: "Telegraf 1.40.2\n" if f'& "{custom_dir}\\telegraf.exe" version' == cmd else None,
+    )
+
+    res = wf.apply()
+    assert res.status == StageStatus.PASS
+    assert wf.telegraf_upgraded is True
+    assert wf.discovery.telegraf_version == "Telegraf 1.40.2"
+    assert wf.discovery.telegraf_bin_path == f"{custom_dir}\\telegraf.exe"
+    assert wf.discovery.config_dir == f"{custom_dir}\\telegraf.d"
+
+    win_cmd = next(c[0][0] for c in mock_exec.execute.call_args_list if "Expand-Archive" in c[0][0])
+    assert f"$destDir = '{custom_dir}'" in win_cmd
+    assert "Set-ItemProperty" not in win_cmd
+    assert "sc.exe config" not in win_cmd
+
+
+def test_upgrade_that_leaves_old_version_is_not_reported_as_upgraded():
+    """If the installed version is still older after the upgrade script, do not claim success."""
+    wf, mock_exec = _upgrade_workflow(
+        OSFamily.LINUX,
+        ConnectionMethod.SSH,
+        EndpointDiscoveryResult(
+            hostname="node.local",
+            os_name="Linux",
+            os_version="Ubuntu 24.04",
+            telegraf_installed=True,
+            telegraf_version="Telegraf 1.32.1",
+            architecture="x86_64",
+        ),
+        lambda cmd: "Telegraf 1.32.1\n" if cmd == '"/usr/bin/telegraf" version' else None,
+    )
+    messages = []
+    wf.reporter = MagicMock()
+    wf.reporter.on_message.side_effect = messages.append
+
+    wf.apply()
+    assert getattr(wf, "telegraf_upgraded", False) is False
+    assert not any("upgraded to" in m for m in messages)
+    assert any("did not take effect" in m and "1.32.1" in m for m in messages)
+
+
 def test_apply_skips_upgrade_when_installed_is_equal():
     """Verify apply stage does not run upgrade commands when installed equals requested."""
     env = VCFEnvironment(name="test", url="https://vcf.local", username="admin", collector=CollectorInfo(address="10.10.10.50"))
