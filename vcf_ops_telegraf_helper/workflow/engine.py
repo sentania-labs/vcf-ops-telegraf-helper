@@ -970,13 +970,6 @@ class ConfigureEndpointWorkflow:
                         "sed -i \"s|^[[:space:]]*urls = \\[\\\"http://127\\.0\\.0\\.1:8086\\\"\\]|  # urls = [\\\"http://127.0.0.1:8086\\\"]|\" /etc/telegraf/telegraf.conf; "
                         "fi && "
                         "if command -v systemctl >/dev/null 2>&1; then "
-                        "svc_file=$(systemctl show telegraf -p FragmentPath --value 2>/dev/null || true); "
-                        "if [ -n \"$svc_file\" ] && [ -f \"$svc_file\" ]; then "
-                        "unit_bin=$(awk -F= \"/^ExecStart=/ {print \\$2}\" \"$svc_file\" 2>/dev/null | awk \"{print \\$1}\" | tr -d \"-\"); "
-                        f"if [ -n \"$unit_bin\" ] && [ -f \"$unit_bin\" ] && [ \"$unit_bin\" != \"/usr/bin/telegraf\" ] && [ \"$unit_bin\" != \"{linux_discovered_esc}\" ]; then "
-                        "cp -f /usr/bin/telegraf \"$unit_bin\" 2>/dev/null || true; "
-                        "fi; "
-                        "fi; "
                         "systemctl daemon-reload || true; "
                         "systemctl enable telegraf || true; "
                         "fi'"
@@ -1227,6 +1220,27 @@ class ConfigureEndpointWorkflow:
         self.reporter.on_stage_complete(res)
         return res
 
+    def _query_running_telegraf_version(self, is_win: bool) -> Optional[str]:
+        """Return the version reported by the executable the Telegraf service is running."""
+        if is_win:
+            cmd = (
+                "$p = (Get-Process telegraf -ErrorAction SilentlyContinue | Select-Object -First 1).Path; "
+                "if ($p) { & \"$p\" version } else { '' }"
+            )
+        else:
+            cmd = (
+                "pid=$(systemctl show telegraf.service -p MainPID --value 2>/dev/null || pgrep -o -x telegraf 2>/dev/null); "
+                "if [ -n \"$pid\" ] && [ \"$pid\" != \"0\" ] && [ -e \"/proc/$pid/exe\" ]; then "
+                "  /proc/$pid/exe version 2>/dev/null || true; "
+                "fi"
+            )
+            if getattr(self.executor, "use_sudo", False):
+                cmd = f"sudo -n bash -c '{cmd}'"
+        chk = self.executor.execute(cmd, timeout=5)
+        if chk.success and chk.stdout.strip():
+            return chk.stdout.strip().splitlines()[0].strip()
+        return None
+
     def _rollback_configs(self, config_dir: str, is_win: bool) -> None:
         """Restore previous configuration from .bak files if apply/restart fails."""
         files_to_restore = [
@@ -1415,25 +1429,7 @@ class ConfigureEndpointWorkflow:
             if restart_res.success:
                 # If an upgrade was attempted/performed, verify the running service executable
                 if (getattr(self, "telegraf_upgraded", False) or getattr(self, "should_upgrade_telegraf", False)) and not (self.options.dry_run or self.options.preview_only):
-                    running_ver = None
-                    if is_win:
-                        chk = self.executor.execute(
-                            "$p = (Get-Process telegraf -ErrorAction SilentlyContinue | Select-Object -First 1).Path; "
-                            "if ($p) { & \"$p\" version } else { '' }",
-                            timeout=5,
-                        )
-                        if chk.success and chk.stdout.strip():
-                            running_ver = chk.stdout.strip().splitlines()[0].strip()
-                    else:
-                        chk = self.executor.execute(
-                            "pid=$(systemctl show telegraf.service -p MainPID --value 2>/dev/null || pgrep -o -x telegraf 2>/dev/null); "
-                            "if [ -n \"$pid\" ] && [ \"$pid\" != \"0\" ] && [ -e \"/proc/$pid/exe\" ]; then "
-                            "  /proc/$pid/exe version 2>/dev/null || true; "
-                            "fi",
-                            timeout=5,
-                        )
-                        if chk.success and chk.stdout.strip():
-                            running_ver = chk.stdout.strip().splitlines()[0].strip()
+                    running_ver = self._query_running_telegraf_version(is_win)
 
                     if running_ver:
                         v_running = parse_telegraf_version(running_ver)
@@ -1516,24 +1512,7 @@ class ConfigureEndpointWorkflow:
                 # Re-query running service binary if possible
                 running_ver = None
                 if not (self.options.dry_run or self.options.preview_only):
-                    if is_win:
-                        chk = self.executor.execute(
-                            "$p = (Get-Process telegraf -ErrorAction SilentlyContinue | Select-Object -First 1).Path; "
-                            "if ($p) { & \"$p\" version } else { '' }",
-                            timeout=5,
-                        )
-                        if chk.success and chk.stdout.strip():
-                            running_ver = chk.stdout.strip().splitlines()[0].strip()
-                    else:
-                        chk = self.executor.execute(
-                            "pid=$(systemctl show telegraf.service -p MainPID --value 2>/dev/null || pgrep -o -x telegraf 2>/dev/null); "
-                            "if [ -n \"$pid\" ] && [ \"$pid\" != \"0\" ] && [ -e \"/proc/$pid/exe\" ]; then "
-                            "  /proc/$pid/exe version 2>/dev/null || true; "
-                            "fi",
-                            timeout=5,
-                        )
-                        if chk.success and chk.stdout.strip():
-                            running_ver = chk.stdout.strip().splitlines()[0].strip()
+                    running_ver = self._query_running_telegraf_version(is_win)
 
                 active_ver_str = (
                     running_ver
