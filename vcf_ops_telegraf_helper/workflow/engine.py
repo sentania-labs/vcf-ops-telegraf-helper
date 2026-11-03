@@ -49,6 +49,11 @@ from vcf_ops_telegraf_helper.workflow.windows import (
     set_windows_tags_binary,
 )
 from vcf_ops_telegraf_helper.logger import get_logger
+from vcf_ops_telegraf_helper.utils import (
+    UpgradeDecision,
+    evaluate_telegraf_upgrade,
+    parse_telegraf_version,
+)
 
 from vcf_ops_telegraf_helper.workflow.managed_linux import detect_linux_managed_installation
 
@@ -112,6 +117,8 @@ class ConfigureEndpointWorkflow:
         self.stage_results: List[StageResult] = []
         self.verifications: Dict[str, str] = {}
         self.managed_files: List[str] = []
+        self.telegraf_upgraded: bool = False
+        self.should_upgrade_telegraf: bool = False
 
         # Collect secrets for redaction
         self._secrets: List[str] = []
@@ -397,7 +404,20 @@ class ConfigureEndpointWorkflow:
                 )
             else:
                 status = StageStatus.PASS if installed else StageStatus.WARNING
-                msg_suffix = f" (will auto-install official InfluxData agent {telegraf_ver})" if (not installed and auto_install) else ""
+                if not installed:
+                    msg_suffix = f" (will auto-install official InfluxData agent {telegraf_ver})" if auto_install else ""
+                elif auto_install:
+                    decision, reason = evaluate_telegraf_upgrade(version_str, telegraf_ver)
+                    if decision == UpgradeDecision.UPGRADE:
+                        msg_suffix = f" (will upgrade to {telegraf_ver})"
+                    elif decision == UpgradeDecision.UNCHANGED_EQUAL:
+                        msg_suffix = f" (version unchanged: matches requested {telegraf_ver})"
+                    elif decision == UpgradeDecision.UNCHANGED_NEWER:
+                        msg_suffix = f" (version unchanged: installed version is newer than requested {telegraf_ver}; downgrade not permitted)"
+                    else:
+                        msg_suffix = f" (version unchanged: {reason})"
+                else:
+                    msg_suffix = ""
                 msg = f"{os_version} ({arch}), Telegraf: {version_str or 'Not installed'}{msg_suffix}"
                 res = StageResult(
                     stage=WorkflowStage.DETECT,
@@ -767,9 +787,38 @@ class ConfigureEndpointWorkflow:
                     self.reporter.on_stage_complete(res)
                     return res
 
-            # Auto-install Telegraf if missing and requested
+            # Auto-install or upgrade Telegraf if requested
             auto_install = self.target.install_telegraf or self.options.install_telegraf
-            if self.discovery and not self.discovery.telegraf_installed and auto_install:
+            telegraf_ver = (
+                getattr(self.options, "telegraf_version", None)
+                or getattr(self.target, "telegraf_version", None)
+                or "1.40.1"
+            )
+            should_install = False
+            should_upgrade = False
+
+            if self.discovery and auto_install:
+                if not self.discovery.telegraf_installed:
+                    should_install = True
+                else:
+                    decision, reason = evaluate_telegraf_upgrade(
+                        self.discovery.telegraf_version, telegraf_ver
+                    )
+                    if decision == UpgradeDecision.UPGRADE:
+                        should_upgrade = True
+                    elif decision == UpgradeDecision.UNCHANGED_EQUAL:
+                        msg = f"Telegraf agent version unchanged: installed version ({self.discovery.telegraf_version}) matches requested {telegraf_ver}."
+                        self.reporter.on_message(msg)
+                    elif decision == UpgradeDecision.UNCHANGED_NEWER:
+                        msg = f"Telegraf agent version unchanged: installed version ({self.discovery.telegraf_version}) is newer than requested {telegraf_ver}; downgrade not permitted."
+                        self.reporter.on_message(msg)
+                    else:
+                        msg = f"Telegraf agent version unchanged: {reason}."
+                        self.reporter.on_message(msg)
+
+            if should_install or should_upgrade:
+                action_name = "upgrade" if should_upgrade else "auto-install"
+                action_verb = "Upgrade" if should_upgrade else "Auto-install"
                 # Pre-flight disk space check: require at least 500 MB free
                 if is_win:
                     disk_chk = self.executor.execute(
@@ -782,7 +831,7 @@ class ConfigureEndpointWorkflow:
                         res = StageResult(
                             stage=WorkflowStage.APPLY,
                             status=StageStatus.FAIL,
-                            message=f"Insufficient disk space on target C: drive ({free_val} MB free, minimum 500 MB required). Auto-install aborted.",
+                            message=f"Insufficient disk space on target C: drive ({free_val} MB free, minimum 500 MB required). {action_verb} aborted.",
                             duration_ms=dur,
                         )
                         self.reporter.on_stage_complete(res)
@@ -799,19 +848,20 @@ class ConfigureEndpointWorkflow:
                         res = StageResult(
                             stage=WorkflowStage.APPLY,
                             status=StageStatus.FAIL,
-                            message=f"Insufficient disk space on target filesystem ({free_val} MB free on / or /var, minimum 500 MB required). Auto-install aborted.",
+                            message=f"Insufficient disk space on target filesystem ({free_val} MB free on / or /var, minimum 500 MB required). {action_verb} aborted.",
                             duration_ms=dur,
                         )
                         self.reporter.on_stage_complete(res)
                         return res
 
-                telegraf_ver = (
-                    getattr(self.options, "telegraf_version", None)
-                    or getattr(self.target, "telegraf_version", None)
-                    or "1.40.1"
-                )
                 arch_str = (getattr(self.discovery, "arch", "") or getattr(self.discovery, "architecture", "") or "").lower()
                 is_arm = "arm" in arch_str or "aarch" in arch_str
+                win_dest_dir = "C:\\telegraf"
+                if is_win and should_upgrade:
+                    existing_bin = getattr(self.discovery, "telegraf_bin_path", None) or ""
+                    if "\\" in existing_bin:
+                        win_dest_dir = existing_bin.rsplit("\\", 1)[0] or win_dest_dir
+                win_dest_ps = win_dest_dir.replace("'", "''")
                 if is_win:
                     win_arch = "arm64" if is_arm else "amd64"
                     zip_url = f"https://dl.influxdata.com/telegraf/releases/telegraf-{telegraf_ver}_windows_{win_arch}.zip"
@@ -820,14 +870,25 @@ class ConfigureEndpointWorkflow:
                         "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; "
                         f"$zipUrl = '{zip_url}'; "
                         "$destZip = \"$env:TEMP\\telegraf.zip\"; "
-                        "$destDir = 'C:\\telegraf'; "
-                        "$hadConf = Test-Path \"$destDir\\telegraf.conf\"; "
-                        "if (-not (Test-Path $destDir)) { New-Item -ItemType Directory -Path $destDir -Force | Out-Null }; "
-                        "if (-not (Test-Path \"$destDir\\telegraf.d\")) { New-Item -ItemType Directory -Path \"$destDir\\telegraf.d\" -Force | Out-Null }; "
-                        "Invoke-WebRequest -Uri $zipUrl -OutFile $destZip -UseBasicParsing; "
+                        f"$destDir = '{win_dest_ps}'; "
+                        + (
+                            "$hadConf = $true; "
+                            if should_upgrade
+                            else "$hadConf = Test-Path \"$destDir\\telegraf.conf\"; "
+                        )
+                        + "if (-not (Test-Path $destDir)) { New-Item -ItemType Directory -Path $destDir -Force | Out-Null }; "
+                        + (
+                            ""
+                            if should_upgrade
+                            else "if (-not (Test-Path \"$destDir\\telegraf.d\")) { New-Item -ItemType Directory -Path \"$destDir\\telegraf.d\" -Force | Out-Null }; "
+                        )
+                        + "Invoke-WebRequest -Uri $zipUrl -OutFile $destZip -UseBasicParsing; "
                         "Expand-Archive -Path $destZip -DestinationPath \"$env:TEMP\\telegraf_extract\" -Force; "
                         "$bin = Get-ChildItem -Path \"$env:TEMP\\telegraf_extract\" -Filter 'telegraf.exe' -Recurse | Select-Object -First 1; "
                         "if (-not $bin) { throw 'telegraf.exe binary not found in extracted archive' }; "
+                        "$svc = Get-Service -Name telegraf -ErrorAction SilentlyContinue; "
+                        "if ($svc -and $svc.Status -eq 'Running') { Stop-Service -Name telegraf -Force -ErrorAction SilentlyContinue }; "
+                        "Get-Process telegraf -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue; "
                         "Copy-Item -Path $bin.FullName -Destination \"$destDir\\telegraf.exe\" -Force; "
                         "$cfg = Get-ChildItem -Path \"$env:TEMP\\telegraf_extract\" -Filter 'telegraf.conf' -Recurse | Select-Object -First 1; "
                         "if ($cfg -and -not $hadConf) { Copy-Item -Path $cfg.FullName -Destination \"$destDir\\telegraf.conf\" -Force }; "
@@ -839,18 +900,23 @@ class ConfigureEndpointWorkflow:
                         "}; "
                         "Remove-Item -Path \"$env:TEMP\\telegraf_extract\" -Recurse -Force -ErrorAction SilentlyContinue; "
                         "Remove-Item -Path $destZip -Force -ErrorAction SilentlyContinue; "
-                        "$svc = Get-Service -Name telegraf -ErrorAction SilentlyContinue; "
                         "if ($svc) { "
-                        "$img = (Get-ItemProperty 'HKLM:\\SYSTEM\\CurrentControlSet\\Services\\telegraf' -ErrorAction SilentlyContinue).ImagePath; "
-                        "if (-not $img -or $img -notlike \"*$destDir\\telegraf.exe*\" -or $img -notlike '*--config-directory*') { "
-                        "$binArgs = \"`\"$destDir\\telegraf.exe`\" --config `\"$destDir\\telegraf.conf`\" --config-directory `\"$destDir\\telegraf.d`\"\"; "
-                        "Set-ItemProperty -Path 'HKLM:\\SYSTEM\\CurrentControlSet\\Services\\telegraf' -Name ImagePath -Value $binArgs -Force; "
-                        "& sc.exe config telegraf binPath= $binArgs | Out-Null; "
-                        "Write-Output 'Service image path updated to managed directory' "
-                        "} else { "
-                        "Write-Output 'Service already registered' "
-                        "} "
-                        "} else { "
+                        + (
+                            "Write-Output 'Service registration unchanged' "
+                            if should_upgrade
+                            else (
+                                "$img = (Get-ItemProperty 'HKLM:\\SYSTEM\\CurrentControlSet\\Services\\telegraf' -ErrorAction SilentlyContinue).ImagePath; "
+                                "if (-not $img -or $img -notlike \"*$destDir\\telegraf.exe*\" -or $img -notlike '*--config-directory*') { "
+                                "$binArgs = \"`\"$destDir\\telegraf.exe`\" --config `\"$destDir\\telegraf.conf`\" --config-directory `\"$destDir\\telegraf.d`\"\"; "
+                                "Set-ItemProperty -Path 'HKLM:\\SYSTEM\\CurrentControlSet\\Services\\telegraf' -Name ImagePath -Value $binArgs -Force; "
+                                "& sc.exe config telegraf binPath= $binArgs | Out-Null; "
+                                "Write-Output 'Service image path updated to managed directory' "
+                                "} else { "
+                                "Write-Output 'Service already registered' "
+                                "} "
+                            )
+                        )
+                        + "} else { "
                         "& \"$destDir\\telegraf.exe\" --service install --config \"$destDir\\telegraf.conf\" --config-directory \"$destDir\\telegraf.d\" "
                         "}"
                     )
@@ -858,6 +924,8 @@ class ConfigureEndpointWorkflow:
                     linux_arch = "arm64" if is_arm else "amd64"
                     tar_url = f"https://dl.influxdata.com/telegraf/releases/telegraf-{telegraf_ver}_linux_{linux_arch}.tar.gz"
                     sudo_pfx = "sudo -n " if getattr(self.executor, "use_sudo", False) else ""
+                    linux_discovered_bin = getattr(self.discovery, "telegraf_bin_path", None) or "/usr/bin/telegraf"
+                    linux_discovered_esc = linux_discovered_bin.replace("'", "'\\''")
                     install_cmd = (
                         f"{sudo_pfx}bash -c '"
                         "had_conf=0; if [ -f /etc/telegraf/telegraf.conf ]; then had_conf=1; fi; "
@@ -877,15 +945,20 @@ class ConfigureEndpointWorkflow:
                         "(echo \"[influxdata]\"; echo \"name = InfluxData Repository\"; echo \"baseurl = https://repos.influxdata.com/rhel/\\$releasever/\\$basearch/stable\"; echo \"enabled = 1\"; echo \"gpgcheck = 1\"; echo \"gpgkey = https://repos.influxdata.com/influxdata-archive_compat.key\") > /etc/yum.repos.d/influxdata.repo && "
                         f"(dnf install -y -q telegraf-{telegraf_ver} 2>/dev/null || yum install -y -q telegraf-{telegraf_ver} 2>/dev/null) || true; "
                         "fi; "
-                        "if ! command -v telegraf >/dev/null 2>&1; then "
+                        "if ! command -v telegraf >/dev/null 2>&1 || ! telegraf version 2>/dev/null | grep -q \""
+                        f"{telegraf_ver}"
+                        "\"; then "
                         "td=$(mktemp -d /tmp/telegraf.XXXXXX) && "
                         f"curl -fsSL \"{tar_url}\" | tar -xz -C \"$td\" && "
-                        "cp \"$td\"/telegraf-*/usr/bin/telegraf /usr/bin/telegraf && "
+                        "cp -f \"$td\"/telegraf-*/usr/bin/telegraf /usr/bin/telegraf && "
                         "mkdir -p /etc/telegraf/telegraf.d && "
                         "if [ ! -f /etc/telegraf/telegraf.conf ]; then cp \"$td\"/telegraf-*/etc/telegraf/telegraf.conf /etc/telegraf/telegraf.conf; fi && "
                         "mkdir -p /lib/systemd/system && "
                         "if [ -f \"$td\"/telegraf-*/usr/lib/telegraf/scripts/telegraf.service ]; then cp \"$td\"/telegraf-*/usr/lib/telegraf/scripts/telegraf.service /lib/systemd/system/telegraf.service; fi && "
                         "rm -rf \"$td\"; "
+                        "fi && "
+                        f"if [ -n \"{linux_discovered_esc}\" ] && [ \"{linux_discovered_esc}\" != \"/usr/bin/telegraf\" ]; then "
+                        f"cp -f /usr/bin/telegraf \"{linux_discovered_esc}\" 2>/dev/null || true; "
                         "fi && "
                         "getent group telegraf >/dev/null 2>&1 || groupadd -r telegraf 2>/dev/null || addgroup --system telegraf 2>/dev/null || true; "
                         "id -u telegraf >/dev/null 2>&1 || useradd -r -U -s /bin/false telegraf 2>/dev/null || adduser --system --group --no-create-home telegraf 2>/dev/null || true; "
@@ -907,34 +980,77 @@ class ConfigureEndpointWorkflow:
                     res = StageResult(
                         stage=WorkflowStage.APPLY,
                         status=StageStatus.FAIL,
-                        message=f"Failed to auto-install Telegraf agent: {inst_res.stderr or inst_res.stdout or 'Installation script failed'}",
+                        message=f"Failed to {action_name} Telegraf agent: {inst_res.stderr or inst_res.stdout or 'Installation script failed'}",
                         details=self._sanitize(inst_res.stderr or inst_res.stdout),
                         duration_ms=dur,
                     )
                     self.reporter.on_stage_complete(res)
                     return res
 
-                expected_bin = "C:\\telegraf\\telegraf.exe" if is_win else "/usr/bin/telegraf"
+                if is_win:
+                    expected_bin = f"{win_dest_dir}\\telegraf.exe"
+                else:
+                    expected_bin = linux_discovered_bin if should_upgrade else "/usr/bin/telegraf"
+
                 bin_exists = self.executor.file_exists(expected_bin)
                 if not bin_exists and type(self.executor).__name__ in ("SSHExecutor", "WinRMExecutor", "LocalExecutor"):
                     dur = int((time.monotonic() - start) * 1000)
                     res = StageResult(
                         stage=WorkflowStage.APPLY,
                         status=StageStatus.FAIL,
-                        message=f"Telegraf binary not found at {expected_bin} after installation",
+                        message=f"Telegraf binary not found at {expected_bin} after {action_name}",
                         duration_ms=dur,
                     )
                     self.reporter.on_stage_complete(res)
                     return res
                 self.discovery.telegraf_installed = True
-                if is_win:
+                if is_win and should_upgrade:
+                    pass
+                elif is_win:
                     self.discovery.telegraf_bin_path = "C:\\telegraf\\telegraf.exe"
                     self.discovery.main_config_path = "C:\\telegraf\\telegraf.conf"
                     self.discovery.config_dir = "C:\\telegraf\\telegraf.d"
+                elif not is_win and should_upgrade:
+                    self.discovery.telegraf_bin_path = expected_bin
                 else:
                     self.discovery.telegraf_bin_path = "/usr/bin/telegraf"
                     self.discovery.main_config_path = "/etc/telegraf/telegraf.conf"
                     self.discovery.config_dir = "/etc/telegraf/telegraf.d"
+
+                # Query and update installed version from endpoint
+                ver_check_cmd = f'& "{expected_bin}" version' if is_win else f'"{expected_bin}" version'
+                ver_res = self.executor.execute(ver_check_cmd, timeout=10)
+                if ver_res.success and ver_res.stdout.strip():
+                    self.discovery.telegraf_version = ver_res.stdout.strip().splitlines()[0].strip()
+
+                if should_upgrade:
+                    self.should_upgrade_telegraf = True
+                    v_now = parse_telegraf_version(self.discovery.telegraf_version)
+                    v_req = parse_telegraf_version(telegraf_ver)
+                    if v_now and v_req and v_now >= v_req:
+                        self.telegraf_upgraded = True
+                        self.reporter.on_message(f"Telegraf agent upgraded to {self.discovery.telegraf_version}")
+                    else:
+                        dur = int((time.monotonic() - start) * 1000)
+                        err_msg = (
+                            f"Telegraf upgrade to {telegraf_ver} failed: "
+                            f"installed version remains {self.discovery.telegraf_version or 'unknown'}"
+                        )
+                        self.reporter.on_message(
+                            f"Telegraf agent upgrade to {telegraf_ver} did not take effect: "
+                            f"installed version is {self.discovery.telegraf_version or 'unknown'}"
+                        )
+                        self.verifications["Telegraf version"] = (
+                            f"FAIL (expected >= {telegraf_ver}, got {self.discovery.telegraf_version or 'unknown'})"
+                        )
+                        res = StageResult(
+                            stage=WorkflowStage.APPLY,
+                            status=StageStatus.FAIL,
+                            message=err_msg,
+                            duration_ms=dur,
+                        )
+                        self.reporter.on_stage_complete(res)
+                        return res
 
             # SHA-256 Idempotency Comparison
             self.is_idempotent = False
@@ -1104,6 +1220,27 @@ class ConfigureEndpointWorkflow:
         self.reporter.on_stage_complete(res)
         return res
 
+    def _query_running_telegraf_version(self, is_win: bool) -> Optional[str]:
+        """Return the version reported by the executable the Telegraf service is running."""
+        if is_win:
+            cmd = (
+                "$p = (Get-Process telegraf -ErrorAction SilentlyContinue | Select-Object -First 1).Path; "
+                "if ($p) { & \"$p\" version } else { '' }"
+            )
+        else:
+            cmd = (
+                "pid=$(systemctl show telegraf.service -p MainPID --value 2>/dev/null || pgrep -o -x telegraf 2>/dev/null); "
+                "if [ -n \"$pid\" ] && [ \"$pid\" != \"0\" ] && [ -e \"/proc/$pid/exe\" ]; then "
+                "  /proc/$pid/exe version 2>/dev/null || true; "
+                "fi"
+            )
+            if getattr(self.executor, "use_sudo", False):
+                cmd = f"sudo -n bash -c '{cmd}'"
+        chk = self.executor.execute(cmd, timeout=5)
+        if chk.success and chk.stdout.strip():
+            return chk.stdout.strip().splitlines()[0].strip()
+        return None
+
     def _rollback_configs(self, config_dir: str, is_win: bool) -> None:
         """Restore previous configuration from .bak files if apply/restart fails."""
         files_to_restore = [
@@ -1179,7 +1316,7 @@ class ConfigureEndpointWorkflow:
         start = time.monotonic()
         self.reporter.on_stage_start(WorkflowStage.RESTART)
 
-        if getattr(self, "is_idempotent", False):
+        if getattr(self, "is_idempotent", False) and not getattr(self, "telegraf_upgraded", False):
             dur = int((time.monotonic() - start) * 1000)
             res = StageResult(
                 stage=WorkflowStage.RESTART,
@@ -1290,6 +1427,29 @@ class ConfigureEndpointWorkflow:
             dur = int((time.monotonic() - start) * 1000)
 
             if restart_res.success:
+                # If an upgrade was attempted/performed, verify the running service executable
+                if (getattr(self, "telegraf_upgraded", False) or getattr(self, "should_upgrade_telegraf", False)) and not (self.options.dry_run or self.options.preview_only):
+                    running_ver = self._query_running_telegraf_version(is_win)
+
+                    if running_ver:
+                        v_running = parse_telegraf_version(running_ver)
+                        telegraf_ver = (
+                            getattr(self.options, "telegraf_version", None)
+                            or getattr(self.target, "telegraf_version", None)
+                            or "1.40.1"
+                        )
+                        v_req = parse_telegraf_version(telegraf_ver)
+                        if v_running and v_req and v_running < v_req:
+                            dur = int((time.monotonic() - start) * 1000)
+                            res = StageResult(
+                                stage=WorkflowStage.RESTART,
+                                status=StageStatus.FAIL,
+                                message=f"Telegraf service restarted with older binary version ({running_ver}), expected >= {telegraf_ver}",
+                                duration_ms=dur,
+                            )
+                            self.reporter.on_stage_complete(res)
+                            return res
+
                 res = StageResult(
                     stage=WorkflowStage.RESTART,
                     status=StageStatus.PASS,
@@ -1340,6 +1500,33 @@ class ConfigureEndpointWorkflow:
                 self.verifications["Telegraf installed"] = "PASS" if installed else "FAIL"
             else:
                 self.verifications["Telegraf installed"] = "PASS" if installed else "SKIPPED"
+
+            if getattr(self, "telegraf_upgraded", False) or getattr(self, "should_upgrade_telegraf", False):
+                telegraf_ver = (
+                    getattr(self.options, "telegraf_version", None)
+                    or getattr(self.target, "telegraf_version", None)
+                    or "1.40.1"
+                )
+                v_expected = parse_telegraf_version(telegraf_ver)
+
+                # Re-query running service binary if possible
+                running_ver = None
+                if not (self.options.dry_run or self.options.preview_only):
+                    running_ver = self._query_running_telegraf_version(is_win)
+
+                active_ver_str = (
+                    running_ver
+                    if (running_ver and parse_telegraf_version(running_ver))
+                    else (self.discovery.telegraf_version if self.discovery else None)
+                )
+                v_actual = parse_telegraf_version(active_ver_str)
+                if not (self.options.dry_run or self.options.preview_only):
+                    if v_expected and (v_actual is None or v_actual < v_expected):
+                        self.verifications["Telegraf version"] = f"FAIL (expected >= {telegraf_ver}, got {active_ver_str or 'unknown'})"
+                    else:
+                        self.verifications["Telegraf version"] = f"PASS ({active_ver_str or telegraf_ver})"
+                else:
+                    self.verifications["Telegraf version"] = "SKIPPED"
 
             # 2. Config valid check
             cfg_valid = bool(self.system_conf_content and self.vcf_conf_content)
