@@ -1106,7 +1106,7 @@ def test_vcf91_empty_collector_response_with_valid_key_returns_empty():
 
 
 
-def _platform_inventory_session(extra_props, vm_names=None, appliances=None, failing_kinds=()):
+def _platform_inventory_session(extra_props, vm_names=None, appliances=None, failing_kinds=(), vcids=None):
     """Fake Suite API whose VMs carry the given properties, keyed by resource id.
 
     appliances maps a resourceKind to its appliance node resources; failing_kinds answer HTTP 500.
@@ -1114,7 +1114,8 @@ def _platform_inventory_session(extra_props, vm_names=None, appliances=None, fai
     vm_names = vm_names or [("r-vcls", "vCLS-1a2b"), ("r-sup", "SupervisorControlPlaneVM (1)"),
                             ("r-tkc", "tkc-workers-1"), ("r-fake", "vCLS-lookalike"),
                             ("r-partial", "eam-partial"), ("r-other", "ntnx-appliance"), ("r-app", "app01")]
-    vms = [_vm_res(rid, name, f"vm-{i}", "vc-1") for i, (rid, name) in enumerate(vm_names, start=300)]
+    vcids = vcids or {}
+    vms = [_vm_res(rid, name, f"vm-{i}", vcids.get(rid, "vc-1")) for i, (rid, name) in enumerate(vm_names, start=300)]
     appliances = appliances or {}
     base = {"summary|runtime|powerState": "Powered On", "summary|config|isTemplate": "false"}
 
@@ -1236,6 +1237,39 @@ def test_vcf91_appliance_vms_matched_by_address_of_operations_nodes():
         assert vms[name].platform_kind is None, name
     # appliance categories absent from this deployment are normal and produce no notice
     assert adapter.platform_notice is None
+
+
+def test_vcf91_appliance_match_is_scoped_to_its_own_vcenter():
+    """Two vCenters sharing a private IP: only the VM in the appliance's own vCenter is hidden."""
+    names = [("r-nsx1", "nsx-vc1"), ("r-wl2", "workload-vc2"), ("r-wl1", "workload-vc1-other"),
+             ("r-host2", "nsx-host-vc2"), ("r-ops", "ops-by-ip-vc2")]
+    props = {
+        "r-nsx1": {"summary|guest|ipAddress": "10.0.0.5"},
+        "r-wl2": {"summary|guest|ipAddress": "10.0.0.5"},
+        "r-wl1": {"summary|guest|ipAddress": "10.0.0.6"},
+        # a unique hostname from an unscoped node still matches across vCenters, and wins over IP
+        "r-host2": {"summary|guest|hostName": "nsx2.corp.local", "summary|guest|ipAddress": "10.9.9.9"},
+        # an unscoped node matched by IP alone is ignored once several vCenters exist
+        "r-ops": {"summary|guest|ipAddress": "10.0.0.9"},
+    }
+    appliances = {
+        "ManagerNode": [
+            _appliance_node("n-nsx", "nsx-node", "NSXTAdapter", "ManagerNode", [("IP", "10.0.0.5"), ("VCID", "vc-1")]),
+            _appliance_node("n-nsx2", "nsx-node-2", "NSXTAdapter", "ManagerNode", [("hostname", "nsx2.corp.local")]),
+        ],
+        "vRealizeOpsNode": [_appliance_node("n-ops", "ops-node", "vRealizeOpsMgr", "vRealizeOpsNode", [("IP", "10.0.0.9")])],
+    }
+    vcids = {"r-wl2": "vc-2", "r-host2": "vc-2", "r-ops": "vc-2"}
+    adapter = VCF91OpenTelegrafIntegration(
+        _api_env(), session=_platform_inventory_session(props, names, appliances, vcids=vcids)
+    )
+    vms = {vm.name: vm for vm in adapter.list_virtual_machines()}
+
+    assert vms["nsx-vc1"].platform_kind == "NSX Manager node"
+    assert vms["workload-vc2"].platform_kind is None  # same IP, different vCenter
+    assert vms["workload-vc1-other"].platform_kind is None
+    assert vms["nsx-host-vc2"].platform_kind == "NSX Manager node"  # hostname match, unscoped node
+    assert vms["ops-by-ip-vc2"].platform_kind is None  # IP-only, unscoped, multi-vCenter inventory
 
 
 def test_vcf91_platform_notice_when_no_managed_by_metadata_or_appliance_lookup_fails():

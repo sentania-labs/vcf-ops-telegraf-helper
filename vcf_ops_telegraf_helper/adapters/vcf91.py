@@ -1194,9 +1194,13 @@ class VCF91OpenTelegrafIntegration(VCFOpsIntegration):
             text = urllib.parse.urlparse(text).hostname or ""
         return text
 
-    def _fetch_appliance_addresses(self) -> Dict[str, str]:
-        """Return {address: category} from the own-address fields of the appliance nodes Operations knows."""
-        addresses: Dict[str, str] = {}
+    def _fetch_appliance_addresses(self) -> Dict[str, List[Tuple[str, frozenset, bool]]]:
+        """Return {address: [(category, vc_ids, is_hostname)]} from the own-address fields of appliance nodes.
+
+        vc_ids holds the vCenter ids the node object itself reports (identifier VCID or VMEntityVCID); empty
+        when the node does not say which vCenter it belongs to.
+        """
+        addresses: Dict[str, List[Tuple[str, frozenset, bool]]] = {}
         for adapter_kind, resource_kind, label in APPLIANCE_RESOURCE_KINDS:
             try:
                 nodes = [
@@ -1215,13 +1219,42 @@ class VCF91OpenTelegrafIntegration(VCFOpsIntegration):
                     ((i.get("identifierType") or {}).get("name"), i.get("value"))
                     for i in (node.get("resourceKey") or {}).get("resourceIdentifiers") or []
                 ]
+                vc_ids = frozenset(
+                    str(v).strip() for n, v in fields
+                    if str(n or "").strip().lower() in ("vcid", "vmentityvcid") and v
+                )
                 fields += list((props.get(node.get("identifier")) or {}).items())
                 for name, value in fields:
                     if str(name or "").rsplit("|", 1)[-1].strip().lower() in APPLIANCE_ADDRESS_FIELDS:
                         address = self._normalize_address(value)
                         if address:
-                            addresses.setdefault(address, label)
+                            entry = (label, vc_ids, not self._looks_like_ip(address))
+                            if entry not in addresses.setdefault(address, []):
+                                addresses[address].append(entry)
         return addresses
+
+    def _match_appliance(
+        self,
+        table: Dict[str, List[Tuple[str, frozenset, bool]]],
+        vcid: Optional[str],
+        hostname: Optional[str],
+        ip_addr: Optional[str],
+        multi_vcenter: bool,
+    ) -> Optional[str]:
+        """Appliance category for a VM, or None. Hostname is tried before IP.
+
+        An entry that names its vCenter only matches VMs of that vCenter. An entry with no vCenter matches by
+        hostname anywhere, but by IP only when the inventory has a single vCenter, since private ranges overlap
+        between vCenters.
+        """
+        for address, is_host_lookup in ((self._normalize_address(hostname), True), (self._normalize_address(ip_addr), False)):
+            for label, scope, entry_is_host in table.get(address, []) if address else []:
+                if scope:
+                    if vcid in scope:
+                        return label
+                elif is_host_lookup and entry_is_host or not multi_vcenter:
+                    return label
+        return None
 
     def list_virtual_machines(self, strict: bool = False) -> List[VirtualMachineResource]:
         """Discover candidate virtual machines from VCF Operations inventory.
@@ -1240,6 +1273,7 @@ class VCF91OpenTelegrafIntegration(VCFOpsIntegration):
         props = self._fetch_properties([r.get("identifier") for r in raw if r.get("identifier")])
         self.inventory_warning = None
         appliance_addresses = self._fetch_appliance_addresses()
+        multi_vcenter = len({self._extract_vm_identifiers(r)[2] for r in raw} - {None, ""}) > 1
         if not any(
             "config|managedBy|extensionKey" in pr or "config|managedBy|type" in pr for pr in props.values()
         ):
@@ -1301,8 +1335,7 @@ class VCF91OpenTelegrafIntegration(VCFOpsIntegration):
                     platform_kind=classify_platform_vm(
                         pr.get("config|managedBy|extensionKey"), pr.get("config|managedBy|type")
                     )
-                    or appliance_addresses.get(self._normalize_address(ip_addr))
-                    or appliance_addresses.get(self._normalize_address(hostname)),
+                    or self._match_appliance(appliance_addresses, vcid, hostname, ip_addr, multi_vcenter),
                 )
             )
         return vms
