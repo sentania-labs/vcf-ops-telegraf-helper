@@ -20,6 +20,7 @@ from vcf_ops_telegraf_helper.adapters.base import IntegrationArtifacts, VCFOpsIn
 from vcf_ops_telegraf_helper.logger import get_logger
 from vcf_ops_telegraf_helper.security.tls import note_unverified_host
 from vcf_ops_telegraf_helper.models.vcf import (
+    classify_platform_vm,
     AgentObjectInfo,
     AgentTaskStatus,
     AuthToken,
@@ -1249,6 +1250,9 @@ class VCF91OpenTelegrafIntegration(VCFOpsIntegration):
                     telegraf_status=status,
                     agent_registrations=len(regs),
                     managed_type=managed_type,
+                    platform_kind=classify_platform_vm(
+                        pr.get("config|managedBy|extensionKey"), pr.get("config|managedBy|type")
+                    ),
                 )
             )
         return vms

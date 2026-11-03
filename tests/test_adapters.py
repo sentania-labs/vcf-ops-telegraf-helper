@@ -1102,3 +1102,69 @@ def test_vcf91_empty_collector_response_with_valid_key_returns_empty():
     assert adapter.list_collector_targets() == []
 
 
+
+
+def _platform_inventory_session(extra_props):
+    """Fake Suite API whose VMs carry the given managedBy properties, keyed by resource id."""
+    vms = [_vm_res(rid, name, f"vm-{i}", "vc-1") for i, (rid, name) in enumerate(
+        [("r-vcls", "vCLS-1a2b"), ("r-sup", "SupervisorControlPlaneVM (1)"), ("r-tkc", "tkc-workers-1"),
+         ("r-fake", "vCLS-lookalike"), ("r-partial", "eam-partial"), ("r-other", "ntnx-appliance"),
+         ("r-app", "app01")], start=300)]
+    base = {"summary|runtime|powerState": "Powered On", "summary|config|isTemplate": "false"}
+
+    def _resp(payload):
+        r = MagicMock()
+        r.status_code = 200
+        r.json.return_value = payload
+        return r
+
+    def get(url, headers=None, params=None, timeout=None):
+        if url.endswith("/resources/properties"):
+            ids = [v for k, v in params if k == "resourceId"]
+            return _resp({"resourcePropertiesList": [
+                {"resourceId": i, "property": [{"name": k, "value": v} for k, v in {**base, **extra_props.get(i, {})}.items()]}
+                for i in ids
+            ]})
+        if url.endswith("/resources") and params.get("adapterKind") == "APPOSUCP":
+            return _resp({"resourceList": [], "pageInfo": {"totalCount": 0}})
+        if url.endswith("/resources"):
+            return _resp({"resourceList": vms, "pageInfo": {"totalCount": len(vms)}})
+        raise AssertionError(f"unexpected GET {url}")
+
+    session = MagicMock(spec=requests.Session)
+    session.get.side_effect = get
+    return session
+
+
+def test_vcf91_platform_vms_classified_from_managed_by_metadata():
+    """Only an exact managedBy (extension key, type) match is a platform VM; names and partial matches stay workloads."""
+    ext, typ = "config|managedBy|extensionKey", "config|managedBy|type"
+    props = {
+        "r-vcls": {ext: "com.vmware.vim.eam", typ: "cluster-agent"},
+        "r-sup": {ext: "com.vmware.vcenter.wcp", typ: "SupervisorControlPlaneVM"},
+        # a workload inside a Supervisor: same extension key, different managed-by type
+        "r-tkc": {ext: "com.vmware.vcenter.wcp", typ: "TanzuKubernetesGuestNode"},
+        # name looks like vCLS but there is no managedBy metadata
+        "r-fake": {},
+        # the extension key alone, with no type, is ambiguous
+        "r-partial": {ext: "com.vmware.vim.eam"},
+        # managed by something this helper does not recognise
+        "r-other": {ext: "com.nutanix.example", typ: "appliance"},
+    }
+    adapter = VCF91OpenTelegrafIntegration(_api_env(), session=_platform_inventory_session(props))
+    vms = {vm.name: vm for vm in adapter.list_virtual_machines()}
+
+    assert vms["vCLS-1a2b"].platform_kind == "vCLS cluster agent VM"
+    assert vms["SupervisorControlPlaneVM (1)"].platform_kind == "Supervisor control plane VM"
+    for name in ("tkc-workers-1", "vCLS-lookalike", "eam-partial", "ntnx-appliance", "app01"):
+        assert vms[name].platform_kind is None and not vms[name].is_platform_vm, name
+    assert len(vms) == 7  # nothing is dropped by the adapter; hiding is the caller's choice
+
+
+def test_classify_platform_vm_is_case_insensitive_and_exact():
+    from vcf_ops_telegraf_helper.models.vcf import classify_platform_vm
+
+    assert classify_platform_vm(" COM.VMWARE.VIM.EAM ", "Cluster-Agent") == "vCLS cluster agent VM"
+    assert classify_platform_vm("com.vmware.vim.eam", "cluster-agent-extra") is None
+    assert classify_platform_vm(None, None) is None
+    assert classify_platform_vm("", "cluster-agent") is None

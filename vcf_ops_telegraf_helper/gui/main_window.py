@@ -898,7 +898,7 @@ class MainWindow(QMainWindow):
 
         desc = QLabel(
             "Choose the virtual machine to monitor. Guest IP, OS, power state, and agent status are read from "
-            "VCF Operations. Templates and VMs no longer present in vCenter are not listed."
+            "VCF Operations. Templates and VMs no longer present in vCenter are not listed; platform VMs (vCLS, Supervisor control plane) are hidden unless shown."
         )
         desc.setProperty("class", "lattice-muted")
         desc.setWordWrap(True)
@@ -926,9 +926,16 @@ class MainWindow(QMainWindow):
         self.vm_show_off_check = QCheckBox("Show powered-off VMs")
         self.vm_show_off_check.setChecked(False)
         self.vm_show_off_check.toggled.connect(self._filter_vm_table)
+        self.vm_show_platform_check = QCheckBox("Show platform VMs")
+        self.vm_show_platform_check.setToolTip(
+            "vCLS agents and Supervisor control-plane VMs, identified from vSphere managedBy metadata, are hidden by default"
+        )
+        self.vm_show_platform_check.setChecked(False)
+        self.vm_show_platform_check.toggled.connect(self._filter_vm_table)
         secondary_filter_row = QHBoxLayout()
         c_layout.addLayout(secondary_filter_row)
         secondary_filter_row.addWidget(self.vm_show_off_check)
+        secondary_filter_row.addWidget(self.vm_show_platform_check)
 
         self.fetch_vms_btn = QPushButton("Refresh")
         self.fetch_vms_btn.setProperty("class", "secondary")
@@ -1030,6 +1037,8 @@ class MainWindow(QMainWindow):
         for row, vm in enumerate(vms):
             name_item = QTableWidgetItem(vm.name)
             name_item.setData(Qt.UserRole, vm)
+            if vm.platform_kind:
+                name_item.setToolTip(f"Platform VM: {vm.platform_kind}")
             self.vm_table.setItem(row, 0, name_item)
             self.vm_table.setItem(row, 1, QTableWidgetItem(vm.ip_address or "No IP"))
             self.vm_table.setItem(row, 2, QTableWidgetItem(vm.os_name or vm.os_family.capitalize()))
@@ -1052,8 +1061,10 @@ class MainWindow(QMainWindow):
         os_filter = self.vm_os_filter.currentText().lower()
         status_filter = self.vm_status_filter.currentText()
         show_off = self.vm_show_off_check.isChecked()
+        show_platform = self.vm_show_platform_check.isChecked()
 
         visible_count = 0
+        hidden_platform = 0
         for row in range(self.vm_table.rowCount()):
             item = self.vm_table.item(row, 0)
             vm = item.data(Qt.UserRole) if item else None
@@ -1071,10 +1082,16 @@ class MainWindow(QMainWindow):
                 show = False
             elif not show_off and not vm.is_powered_on:
                 show = False
+            if vm.is_platform_vm and not show_platform:
+                show = False
+                hidden_platform += 1
             self.vm_table.setRowHidden(row, not show)
             if show:
                 visible_count += 1
-        self.vm_count_label.setText(f"{visible_count} / {len(self._cached_vms)} VMs")
+        text = f"{visible_count} / {len(self._cached_vms)} VMs"
+        if hidden_platform:
+            text += f" ({hidden_platform} platform VM{'s' if hidden_platform != 1 else ''} hidden)"
+        self.vm_count_label.setText(text)
 
     def _on_vm_row_selected(self) -> None:
         items = self.vm_table.selectedItems()
