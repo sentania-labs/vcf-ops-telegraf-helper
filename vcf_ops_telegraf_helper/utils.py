@@ -85,4 +85,3 @@ def local_now_formatted() -> str:
     """
     now = datetime.now(CHICAGO_TZ)
     return now.strftime("%Y-%m-%d %H:%M:%S %Z")
-
