@@ -838,6 +838,11 @@ def test_main_window_vm_inventory_filter_and_binding(qapp, tmp_path, monkeypatch
     assert "8 / 10 VMs" in window.vm_count_label.text()
     window.vm_show_off_check.setChecked(False)
 
+    # a platform VM already excluded by another filter is not counted as hidden by the platform checkbox
+    window.vm_search_input.setText("tkc-workers")
+    assert "1 / 10 VMs" in window.vm_count_label.text() and "hidden" not in window.vm_count_label.text()
+    window.vm_search_input.setText("")
+
     window.vm_status_filter.setCurrentText("Reporting")
     # webapp01 (open source) and dbdemo01 (Ops managed) both report
     assert "2 / 10 VMs" in window.vm_count_label.text()

@@ -1082,7 +1082,7 @@ class MainWindow(QMainWindow):
                 show = False
             elif not show_off and not vm.is_powered_on:
                 show = False
-            if vm.is_platform_vm and not show_platform:
+            if show and vm.is_platform_vm and not show_platform:
                 show = False
                 hidden_platform += 1
             self.vm_table.setRowHidden(row, not show)
