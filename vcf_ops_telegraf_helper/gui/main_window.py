@@ -898,7 +898,7 @@ class MainWindow(QMainWindow):
 
         desc = QLabel(
             "Choose the virtual machine to monitor. Guest IP, OS, power state, and agent status are read from "
-            "VCF Operations. Templates and VMs no longer present in vCenter are not listed; platform VMs (vCLS, Supervisor control plane) are hidden unless shown."
+            "VCF Operations. Templates and VMs no longer present in vCenter are not listed; platform VMs (vCLS, Supervisor control plane, appliance nodes) are hidden unless shown."
         )
         desc.setProperty("class", "lattice-muted")
         desc.setWordWrap(True)
@@ -928,7 +928,7 @@ class MainWindow(QMainWindow):
         self.vm_show_off_check.toggled.connect(self._filter_vm_table)
         self.vm_show_platform_check = QCheckBox("Show platform VMs")
         self.vm_show_platform_check.setToolTip(
-            "vCLS agents and Supervisor control-plane VMs, identified from vSphere managedBy metadata, are hidden by default"
+            "vCLS agents, Supervisor control-plane VMs and platform appliance nodes (vCenter, NSX, VCF Operations, SDDC Manager), identified from inventory metadata, are hidden by default"
         )
         self.vm_show_platform_check.setChecked(False)
         self.vm_show_platform_check.toggled.connect(self._filter_vm_table)
