@@ -122,7 +122,7 @@ Desktop API trust uses the operating system certificate store, including Windows
 * **Transparent**: The app offers configuration previews and dry-run so you can inspect the prepared configuration before applying it.
 * **Honest Validation**: Separately validates configuration syntax, endpoint reachability, collector connectivity, and service state. Failures in one layer are never masked.
 * **Direct Push**: Deploys over SSH (Linux) or WinRM (Windows). The GUI shows the equivalent `vcf-telegraf-helper run` command for anyone who needs to adapt it.
-* **Inventory-Driven Targeting**: Pick the VM from VCF Operations inventory (templates and deleted VMs excluded, powered-off VMs hidden by default). Guest OS, IP, agent status, and the agent's current collector come from VCF Operations, and each step unlocks only when the previous one is complete.
+* **Inventory-Driven Targeting**: Pick the VM from VCF Operations inventory (templates and deleted VMs excluded, powered-off VMs and platform VMs such as vCLS, Supervisor control plane and appliance nodes hidden by default; `vcf-telegraf-helper vms --include-platform-vms` and the GUI "Show platform VMs" toggle reveal the latter). Guest OS, IP, agent status, and the agent's current collector come from VCF Operations, and each step unlocks only when the previous one is complete.
 
 ## Python and development
 

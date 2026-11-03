@@ -817,24 +817,39 @@ def test_main_window_vm_inventory_filter_and_binding(qapp, tmp_path, monkeypatch
     window = _mock_window(qapp, tmp_path, monkeypatch)
     window._test_vcf_connection()
 
-    assert window.vm_table.rowCount() == 6
+    assert window.vm_table.rowCount() == 10
     assert window.vm_table.columnCount() == 6
     headers = [window.vm_table.horizontalHeaderItem(c).text() for c in range(6)]
     assert "Collector Group" not in headers and "Power" in headers
     window.vm_status_filter.setCurrentText("All Agent States")
-    assert "5 / 6 VMs" in window.vm_count_label.text()
+    # platform VMs (vCLS, Supervisor control plane) are hidden by default and counted; look-alikes and
+    # Supervisor workloads stay listed
+    assert not window.vm_show_platform_check.isChecked()
+    assert "7 / 10 VMs (2 platform VMs hidden)" in window.vm_count_label.text()
+    visible = {window.vm_table.item(r, 0).text() for r in range(10) if not window.vm_table.isRowHidden(r)}
+    assert {"tkc-workers-7f9d", "vcls-migration-tool"} <= visible
+    assert not visible & {"vCLS-4f2a9c1e", "SupervisorControlPlaneVM (1)"}
+
+    window.vm_show_platform_check.setChecked(True)
+    assert "9 / 10 VMs" in window.vm_count_label.text() and "hidden" not in window.vm_count_label.text()
+    window.vm_show_platform_check.setChecked(False)
 
     window.vm_show_off_check.setChecked(True)
-    assert "6 / 6 VMs" in window.vm_count_label.text()
+    assert "8 / 10 VMs" in window.vm_count_label.text()
     window.vm_show_off_check.setChecked(False)
+
+    # a platform VM already excluded by another filter is not counted as hidden by the platform checkbox
+    window.vm_search_input.setText("tkc-workers")
+    assert "1 / 10 VMs" in window.vm_count_label.text() and "hidden" not in window.vm_count_label.text()
+    window.vm_search_input.setText("")
 
     window.vm_status_filter.setCurrentText("Reporting")
     # webapp01 (open source) and dbdemo01 (Ops managed) both report
-    assert "2 / 6 VMs" in window.vm_count_label.text()
+    assert "2 / 10 VMs" in window.vm_count_label.text()
     window.vm_status_filter.setCurrentText("All Agent States")
 
     window.vm_os_filter.setCurrentText("Windows")
-    assert "2 / 6 VMs" in window.vm_count_label.text()
+    assert "2 / 10 VMs" in window.vm_count_label.text()
     window.vm_os_filter.setCurrentText("All OS Families")
 
     # Selecting a Windows VM binds it and sets OS and address from VCF Operations
@@ -1311,3 +1326,25 @@ def test_update_check_returns_through_gui_timer(qapp, monkeypatch, tmp_path):
     window.start_update_check()
     check.assert_called_once()
     window.close()
+
+
+def test_main_window_shows_platform_detection_notice(qapp, tmp_path, monkeypatch):
+    """When platform detection is unavailable the Select VM screen says so next to the VM count."""
+    from vcf_ops_telegraf_helper.adapters.mock import MockVCFOpsIntegration
+
+    window = _mock_window(qapp, tmp_path, monkeypatch)
+    window._test_vcf_connection()
+    assert "detection unavailable" not in window.vm_count_label.text()
+
+    monkeypatch.setattr(
+        MockVCFOpsIntegration, "platform_notice", "Platform VM detection unavailable: test notice", raising=False
+    )
+    monkeypatch.setattr(MockVCFOpsIntegration, "inventory_warning", "Agent status unavailable: test", raising=False)
+    window._fetch_vcf_inventory()
+    notice, warning = "Platform VM detection unavailable: test notice", "Agent status unavailable: test"
+    assert notice in window.vm_count_label.text() and warning in window.vm_count_label.text()
+
+    window.vm_show_platform_check.setChecked(True)
+    window.vm_search_input.setText("webapp")
+    window.vm_os_filter.setCurrentText("Linux")
+    assert notice in window.vm_count_label.text() and warning in window.vm_count_label.text()

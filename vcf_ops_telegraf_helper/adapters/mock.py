@@ -177,7 +177,7 @@ class MockVCFOpsIntegration(VCFOpsIntegration):
 
         def _vm(idx: int, name: str, ip: str, mor: str, os_name: str, power: str = "Powered On",
                 status: str = "Not installed", collector: Optional[str] = None,
-                managed: Optional[str] = None) -> VirtualMachineResource:
+                managed: Optional[str] = None, platform: Optional[str] = None) -> VirtualMachineResource:
             return VirtualMachineResource(
                 resource_id=f"res-vm-{idx:03d}",
                 name=name,
@@ -193,6 +193,7 @@ class MockVCFOpsIntegration(VCFOpsIntegration):
                 telegraf_status=status,
                 agent_registrations=0 if status == "Not installed" else 1,
                 managed_type=managed if status != "Not installed" else None,
+                platform_kind=platform,
             )
 
         return [
@@ -203,6 +204,15 @@ class MockVCFOpsIntegration(VCFOpsIntegration):
             _vm(4, "webapp01", "172.16.10.5", "vm-1020", "Ubuntu Linux (64-bit)", status="Reporting", collector="10.10.10.51"),
             _vm(5, "k8s-node01", "172.19.1.50", "vm-2005", "Ubuntu Linux (64-bit)", status="No data", collector="10.10.10.52"),
             _vm(6, "legacy-app01", "172.19.1.60", "vm-2006", "Ubuntu Linux (64-bit)", power="Powered Off"),
+            # Platform infrastructure, verified from vSphere managedBy metadata: hidden by default
+            _vm(7, "vCLS-4f2a9c1e", "172.19.0.11", "vm-3001", "Other 4.x or later Linux (64-bit)",
+                platform="vCLS cluster agent VM"),
+            _vm(8, "SupervisorControlPlaneVM (1)", "172.19.0.21", "vm-3002", "VMware Photon OS (64-bit)",
+                platform="Supervisor control plane VM"),
+            # Valid workloads that must stay listed: a guest-cluster node inside a Supervisor, and a VM
+            # whose name only looks like a platform VM but carries no verified metadata
+            _vm(9, "tkc-workers-7f9d", "172.19.2.31", "vm-3003", "VMware Photon OS (64-bit)"),
+            _vm(10, "vcls-migration-tool", "172.19.3.40", "vm-3004", "Ubuntu Linux (64-bit)"),
         ]
 
     def list_collector_targets(self) -> list[CollectorInfo]:

@@ -432,6 +432,8 @@ def _fake_suite_api():
             ]})
         if url.endswith("/resources") and params.get("adapterKind") == "APPOSUCP":
             return _resp({"resourceList": agents, "pageInfo": {"totalCount": len(agents)}})
+        if url.endswith("/resources") and params.get("resourceKind") != "VirtualMachine":
+            return _resp({"resourceList": [], "pageInfo": {"totalCount": 0}})
         if url.endswith("/resources"):
             return _resp({"resourceList": vms, "pageInfo": {"totalCount": len(vms)}})
         if url.endswith("/adapters"):
@@ -1102,3 +1104,199 @@ def test_vcf91_empty_collector_response_with_valid_key_returns_empty():
     assert adapter.list_collector_targets() == []
 
 
+
+
+def _platform_inventory_session(extra_props, vm_names=None, appliances=None, failing_kinds=(), vcids=None):
+    """Fake Suite API whose VMs carry the given properties, keyed by resource id.
+
+    appliances maps a resourceKind to its appliance node resources; failing_kinds answer HTTP 500.
+    """
+    vm_names = vm_names or [("r-vcls", "vCLS-1a2b"), ("r-sup", "SupervisorControlPlaneVM (1)"),
+                            ("r-tkc", "tkc-workers-1"), ("r-fake", "vCLS-lookalike"),
+                            ("r-partial", "eam-partial"), ("r-other", "ntnx-appliance"), ("r-app", "app01")]
+    vcids = vcids or {}
+    vms = [_vm_res(rid, name, f"vm-{i}", vcids.get(rid, "vc-1")) for i, (rid, name) in enumerate(vm_names, start=300)]
+    appliances = appliances or {}
+    base = {"summary|runtime|powerState": "Powered On", "summary|config|isTemplate": "false"}
+
+    def _resp(payload, status=200):
+        r = MagicMock()
+        r.status_code = status
+        r.json.return_value = payload
+        return r
+
+    def get(url, headers=None, params=None, timeout=None):
+        if url.endswith("/resources/properties"):
+            ids = [v for k, v in params if k == "resourceId"]
+            return _resp({"resourcePropertiesList": [
+                {"resourceId": i, "property": [{"name": k, "value": v} for k, v in {**base, **extra_props.get(i, {})}.items()]}
+                for i in ids
+            ]})
+        if url.endswith("/resources") and params.get("adapterKind") == "APPOSUCP":
+            return _resp({"resourceList": [], "pageInfo": {"totalCount": 0}})
+        if url.endswith("/resources") and params.get("resourceKind") in failing_kinds:
+            return _resp({}, status=500)
+        if url.endswith("/resources") and params.get("resourceKind") != "VirtualMachine":
+            nodes = appliances.get(params.get("resourceKind"), [])
+            return _resp({"resourceList": nodes, "pageInfo": {"totalCount": len(nodes)}})
+        if url.endswith("/resources"):
+            return _resp({"resourceList": vms, "pageInfo": {"totalCount": len(vms)}})
+        raise AssertionError(f"unexpected GET {url}")
+
+    session = MagicMock(spec=requests.Session)
+    session.get.side_effect = get
+    return session
+
+
+def _appliance_node(rid, name, adapter_kind, resource_kind, identifiers=()):
+    return {
+        "identifier": rid,
+        "resourceKey": {
+            "name": name,
+            "adapterKindKey": adapter_kind,
+            "resourceKindKey": resource_kind,
+            "resourceIdentifiers": [{"identifierType": {"name": n}, "value": v} for n, v in identifiers],
+        },
+        "resourceStatusStates": [{"resourceState": "STARTED", "adapterInstanceId": "x"}],
+    }
+
+
+def test_vcf91_platform_vms_classified_from_managed_by_metadata():
+    """Only an exact managedBy (extension key, type) match is a platform VM; names and partial matches stay workloads."""
+    ext, typ = "config|managedBy|extensionKey", "config|managedBy|type"
+    props = {
+        "r-vcls": {ext: "com.vmware.vim.eam", typ: "cluster-agent"},
+        "r-sup": {ext: "com.vmware.vcenter.wcp", typ: "SupervisorControlPlaneVM"},
+        # a workload inside a Supervisor: same extension key, different managed-by type
+        "r-tkc": {ext: "com.vmware.vcenter.wcp", typ: "TanzuKubernetesGuestNode"},
+        # name looks like vCLS but there is no managedBy metadata
+        "r-fake": {},
+        # the extension key alone, with no type, is ambiguous
+        "r-partial": {ext: "com.vmware.vim.eam"},
+        # managed by something this helper does not recognise
+        "r-other": {ext: "com.nutanix.example", typ: "appliance"},
+    }
+    adapter = VCF91OpenTelegrafIntegration(_api_env(), session=_platform_inventory_session(props))
+    vms = {vm.name: vm for vm in adapter.list_virtual_machines()}
+
+    assert vms["vCLS-1a2b"].platform_kind == "vCLS cluster agent VM"
+    assert vms["SupervisorControlPlaneVM (1)"].platform_kind == "Supervisor control plane VM"
+    for name in ("tkc-workers-1", "vCLS-lookalike", "eam-partial", "ntnx-appliance", "app01"):
+        assert vms[name].platform_kind is None and not vms[name].is_platform_vm, name
+    assert len(vms) == 7  # nothing is dropped by the adapter; hiding is the caller's choice
+
+
+def test_classify_platform_vm_is_case_insensitive_and_exact():
+    from vcf_ops_telegraf_helper.models.vcf import classify_platform_vm
+
+    assert classify_platform_vm(" COM.VMWARE.VIM.EAM ", "Cluster-Agent") == "vCLS cluster agent VM"
+    assert classify_platform_vm("com.vmware.vim.eam", "cluster-agent-extra") is None
+    assert classify_platform_vm(None, None) is None
+    assert classify_platform_vm("", "cluster-agent") is None
+
+
+def test_vcf91_appliance_vms_matched_by_address_of_operations_nodes():
+    """A VM is an appliance only when its guest IP or hostname equals an address an appliance node reports."""
+    ext, typ = "config|managedBy|extensionKey", "config|managedBy|type"
+    names = [("r-vcls", "vCLS-1"), ("r-nsx", "nsx-a"), ("r-vc", "vcsa-a"), ("r-ops", "ops-a"),
+             ("r-app", "app01"), ("r-look", "NSX-Manager-lookalike"), ("r-dns", "dns01"),
+             ("r-ntp", "ntp01"), ("r-named", "named-like-node")]
+    props = {
+        "r-vcls": {ext: "com.vmware.vim.eam", typ: "cluster-agent"},
+        "r-nsx": {"summary|guest|ipAddress": "10.0.0.5"},
+        "r-vc": {"summary|guest|hostName": "VC01.corp.local"},
+        "r-ops": {"summary|guest|ipAddress": "10.0.0.9"},
+        "r-app": {"summary|guest|ipAddress": "10.0.0.77", "summary|guest|hostName": "app01.corp.local"},
+        "r-look": {"summary|guest|ipAddress": "10.0.0.88"},
+        "r-dns": {"summary|guest|ipAddress": "10.0.0.53"},
+        "r-ntp": {"summary|guest|hostName": "ntp01.corp.local"},
+        "r-named": {"summary|guest|hostName": "nsx-mgr-node"},
+        "n-ops": {"net|ipAddress": "10.0.0.9"},
+        "n-nsx": {"config|dnsServers": "10.0.0.53", "config|ntpServer": "ntp01.corp.local", "net|gateway": "10.0.0.1"},
+    }
+    appliances = {
+        "ManagerNode": [_appliance_node("n-nsx", "nsx-mgr-node", "NSXTAdapter", "ManagerNode", [("IP", "10.0.0.5")])],
+        "VMwareAdapter Instance": [
+            _appliance_node("n-vc", "vc01", "VMWARE", "VMwareAdapter Instance", [("VCURL", "https://vc01.corp.local:443")])
+        ],
+        "vRealizeOpsNode": [_appliance_node("n-ops", "ops-node-1", "vRealizeOpsMgr", "vRealizeOpsNode")],
+    }
+    adapter = VCF91OpenTelegrafIntegration(
+        _api_env(), session=_platform_inventory_session(props, names, appliances)
+    )
+    vms = {vm.name: vm for vm in adapter.list_virtual_machines()}
+
+    assert vms["vCLS-1"].platform_kind == "vCLS cluster agent VM"
+    assert vms["nsx-a"].platform_kind == "NSX Manager node"
+    assert vms["vcsa-a"].platform_kind == "vCenter appliance"
+    assert vms["ops-a"].platform_kind == "VCF Operations node"
+    assert vms["app01"].platform_kind is None
+    assert vms["NSX-Manager-lookalike"].platform_kind is None
+    # addresses an appliance merely mentions (DNS, NTP) and its display name do not make another VM an appliance
+    for name in ("dns01", "ntp01", "named-like-node"):
+        assert vms[name].platform_kind is None, name
+    # appliance categories absent from this deployment are normal and produce no notice
+    assert adapter.platform_notice is None
+
+
+def test_vcf91_appliance_match_is_scoped_to_its_own_vcenter():
+    """Two vCenters sharing a private IP: only the VM in the appliance's own vCenter is hidden."""
+    names = [("r-nsx1", "nsx-vc1"), ("r-wl2", "workload-vc2"), ("r-wl1", "workload-vc1-other"),
+             ("r-host2", "nsx-host-vc2"), ("r-ops", "ops-by-ip-vc2")]
+    props = {
+        "r-nsx1": {"summary|guest|ipAddress": "10.0.0.5"},
+        "r-wl2": {"summary|guest|ipAddress": "10.0.0.5"},
+        "r-wl1": {"summary|guest|ipAddress": "10.0.0.6"},
+        # a unique hostname from an unscoped node still matches across vCenters, and wins over IP
+        "r-host2": {"summary|guest|hostName": "nsx2.corp.local", "summary|guest|ipAddress": "10.9.9.9"},
+        # an unscoped node matched by IP alone is ignored once several vCenters exist
+        "r-ops": {"summary|guest|ipAddress": "10.0.0.9"},
+    }
+    appliances = {
+        "ManagerNode": [
+            _appliance_node("n-nsx", "nsx-node", "NSXTAdapter", "ManagerNode", [("IP", "10.0.0.5"), ("VCID", "vc-1")]),
+            _appliance_node("n-nsx2", "nsx-node-2", "NSXTAdapter", "ManagerNode", [("hostname", "nsx2.corp.local")]),
+        ],
+        "vRealizeOpsNode": [_appliance_node("n-ops", "ops-node", "vRealizeOpsMgr", "vRealizeOpsNode", [("IP", "10.0.0.9")])],
+    }
+    vcids = {"r-wl2": "vc-2", "r-host2": "vc-2", "r-ops": "vc-2"}
+    adapter = VCF91OpenTelegrafIntegration(
+        _api_env(), session=_platform_inventory_session(props, names, appliances, vcids=vcids)
+    )
+    vms = {vm.name: vm for vm in adapter.list_virtual_machines()}
+
+    assert vms["nsx-vc1"].platform_kind == "NSX Manager node"
+    assert vms["workload-vc2"].platform_kind is None  # same IP, different vCenter
+    assert vms["workload-vc1-other"].platform_kind is None
+    assert vms["nsx-host-vc2"].platform_kind == "NSX Manager node"  # hostname match, unscoped node
+    assert vms["ops-by-ip-vc2"].platform_kind is None  # IP-only, unscoped, multi-vCenter inventory
+
+
+def test_vcf91_platform_notice_when_no_managed_by_metadata_or_appliance_lookup_fails():
+    """Detection that cannot work is reported, not silent, and never blocks the inventory."""
+    adapter = VCF91OpenTelegrafIntegration(
+        _api_env(), session=_platform_inventory_session({}, failing_kinds=("ManagerNode",))
+    )
+    vms = adapter.list_virtual_machines()
+
+    assert len(vms) == 7 and not any(vm.is_platform_vm for vm in vms)
+    assert "no VM reports vSphere managedBy metadata" in adapter.platform_notice
+    assert "appliance" not in adapter.platform_notice
+
+
+def test_vcf91_platform_notice_cleared_when_detection_works():
+    ext, typ = "config|managedBy|extensionKey", "config|managedBy|type"
+    appliances = {
+        kind: [_appliance_node(f"n-{i}", f"node-{i}", ak, kind)]
+        for i, (ak, kind) in enumerate([
+            ("VMWARE", "VMwareAdapter Instance"), ("NSXTAdapter", "ManagerNode"), ("NSXTAdapter", "EdgeNode"),
+            ("vRealizeOpsMgr", "vRealizeOpsNode"), ("VCFAdapter", "SddcManager"),
+        ])
+    }
+    adapter = VCF91OpenTelegrafIntegration(
+        _api_env(),
+        session=_platform_inventory_session({"r-vcls": {ext: "com.vmware.vim.eam", typ: "cluster-agent"}}, None, appliances),
+    )
+    adapter.platform_notice = "stale"
+    adapter.list_virtual_machines()
+    assert adapter.platform_notice is None

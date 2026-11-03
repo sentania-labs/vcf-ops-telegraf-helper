@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from pydantic import BaseModel, Field
 
 
@@ -41,6 +41,40 @@ class VCFEnvironment(BaseModel):
     token: Optional[str] = Field(default=None, description="Active auth token if previously acquired")
 
 
+# Platform-managed VMs, keyed on the vSphere managedBy record (extension key, managed-by type) that
+# VCF Operations exposes as the VM properties config|managedBy|extensionKey and config|managedBy|type.
+# Both must match exactly (case-insensitive): a name, or a managedBy record that is only partly
+# recognised, is never enough, so look-alikes and workloads that run inside a Supervisor stay listed.
+# Extend this table only with pairs confirmed on a live inventory.
+PLATFORM_MANAGED_BY_RULES: Dict[Tuple[str, str], str] = {
+    ("com.vmware.vim.eam", "cluster-agent"): "vCLS cluster agent VM",
+    ("com.vmware.vcenter.wcp", "supervisorcontrolplanevm"): "Supervisor control plane VM",
+}
+
+# Appliance nodes that VCF Operations itself inventories: (adapter kind, resource kind, category). A VM is
+# an appliance only when its guest IP or hostname equals an address those objects report. The kinds are
+# not yet confirmed on a live inventory; a category that returns no objects is only logged.
+APPLIANCE_RESOURCE_KINDS: Tuple[Tuple[str, str, str], ...] = (
+    ("VMWARE", "VMwareAdapter Instance", "vCenter appliance"),
+    ("NSXTAdapter", "ManagerNode", "NSX Manager node"),
+    ("NSXTAdapter", "EdgeNode", "NSX Edge node"),
+    ("vRealizeOpsMgr", "vRealizeOpsNode", "VCF Operations node"),
+    ("VCFAdapter", "SddcManager", "SDDC Manager"),
+)
+
+# Identifier and property names (last segment, case-insensitive) that hold an appliance node's own address.
+# Other address-shaped values on an appliance object (DNS, NTP, gateway, syslog, peers) are never used.
+APPLIANCE_ADDRESS_FIELDS = frozenset(
+    {"ip", "ipaddress", "ip_address", "managementip", "management_ip", "hostname", "host_name", "fqdn", "vcurl"}
+)
+
+
+def classify_platform_vm(extension_key: Optional[str], managed_by_type: Optional[str]) -> Optional[str]:
+    """Return the platform category for a vSphere managedBy record, or None when it is not a verified match."""
+    key = ((extension_key or "").strip().lower(), (managed_by_type or "").strip().lower())
+    return PLATFORM_MANAGED_BY_RULES.get(key)
+
+
 class VirtualMachineResource(BaseModel):
     """Virtual machine inventory item discovered from VCF Operations."""
 
@@ -69,6 +103,16 @@ class VirtualMachineResource(BaseModel):
         default=None,
         description="AgentManagedType of the agent OS object: 'Product Managed' (Ops-installed) or 'Open Source'",
     )
+
+    platform_kind: Optional[str] = Field(
+        default=None,
+        description="Platform category (e.g. 'vCLS cluster agent VM') when vSphere managedBy metadata verifies "
+        "this VM as platform infrastructure; None for workloads and for unverified look-alikes",
+    )
+
+    @property
+    def is_platform_vm(self) -> bool:
+        return bool(self.platform_kind)
 
     @property
     def is_powered_on(self) -> bool:

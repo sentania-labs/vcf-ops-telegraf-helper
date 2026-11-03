@@ -20,6 +20,9 @@ from vcf_ops_telegraf_helper.adapters.base import IntegrationArtifacts, VCFOpsIn
 from vcf_ops_telegraf_helper.logger import get_logger
 from vcf_ops_telegraf_helper.security.tls import note_unverified_host
 from vcf_ops_telegraf_helper.models.vcf import (
+    APPLIANCE_ADDRESS_FIELDS,
+    APPLIANCE_RESOURCE_KINDS,
+    classify_platform_vm,
     AgentObjectInfo,
     AgentTaskStatus,
     AuthToken,
@@ -1184,6 +1187,75 @@ class VCF91OpenTelegrafIntegration(VCFOpsIntegration):
             })
         return registrations
 
+    @staticmethod
+    def _normalize_address(value: Any) -> str:
+        text = str(value or "").strip().lower()
+        if "://" in text:
+            text = urllib.parse.urlparse(text).hostname or ""
+        return text
+
+    def _fetch_appliance_addresses(self) -> Dict[str, List[Tuple[str, frozenset, bool]]]:
+        """Return {address: [(category, vc_ids, is_hostname)]} from the own-address fields of appliance nodes.
+
+        vc_ids holds the vCenter ids the node object itself reports (identifier VCID or VMEntityVCID); empty
+        when the node does not say which vCenter it belongs to.
+        """
+        addresses: Dict[str, List[Tuple[str, frozenset, bool]]] = {}
+        for adapter_kind, resource_kind, label in APPLIANCE_RESOURCE_KINDS:
+            try:
+                nodes = [
+                    r for r in self._fetch_paged_resources(True, adapterKind=adapter_kind, resourceKind=resource_kind)
+                    if not self._is_stale(r)
+                ]
+                props = self._fetch_properties([r["identifier"] for r in nodes if r.get("identifier")]) if nodes else {}
+            except Exception as exc:
+                logger.warning("Appliance lookup for %s failed: %s", label, exc)
+                continue
+            if not nodes:
+                logger.info("No %s objects found in VCF Operations", label)
+                continue
+            for node in nodes:
+                fields = [
+                    ((i.get("identifierType") or {}).get("name"), i.get("value"))
+                    for i in (node.get("resourceKey") or {}).get("resourceIdentifiers") or []
+                ]
+                vc_ids = frozenset(
+                    str(v).strip() for n, v in fields
+                    if str(n or "").strip().lower() in ("vcid", "vmentityvcid") and v
+                )
+                fields += list((props.get(node.get("identifier")) or {}).items())
+                for name, value in fields:
+                    if str(name or "").rsplit("|", 1)[-1].strip().lower() in APPLIANCE_ADDRESS_FIELDS:
+                        address = self._normalize_address(value)
+                        if address:
+                            entry = (label, vc_ids, not self._looks_like_ip(address))
+                            if entry not in addresses.setdefault(address, []):
+                                addresses[address].append(entry)
+        return addresses
+
+    def _match_appliance(
+        self,
+        table: Dict[str, List[Tuple[str, frozenset, bool]]],
+        vcid: Optional[str],
+        hostname: Optional[str],
+        ip_addr: Optional[str],
+        multi_vcenter: bool,
+    ) -> Optional[str]:
+        """Appliance category for a VM, or None. Hostname is tried before IP.
+
+        An entry that names its vCenter only matches VMs of that vCenter. An entry with no vCenter matches by
+        hostname anywhere, but by IP only when the inventory has a single vCenter, since private ranges overlap
+        between vCenters.
+        """
+        for address, is_host_lookup in ((self._normalize_address(hostname), True), (self._normalize_address(ip_addr), False)):
+            for label, scope, entry_is_host in table.get(address, []) if address else []:
+                if scope:
+                    if vcid in scope:
+                        return label
+                elif is_host_lookup and entry_is_host or not multi_vcenter:
+                    return label
+        return None
+
     def list_virtual_machines(self, strict: bool = False) -> List[VirtualMachineResource]:
         """Discover candidate virtual machines from VCF Operations inventory.
 
@@ -1191,6 +1263,7 @@ class VCF91OpenTelegrafIntegration(VCFOpsIntegration):
         hostname, OS, and power state come from VM properties; agent status comes from the
         agent OS objects that carry the VM's vCenter ID and MOR.
         """
+        self.platform_notice = None
         raw = [
             r for r in self._fetch_paged_resources(strict, adapterKind="VMWARE", resourceKind="VirtualMachine")
             if not self._is_stale(r)
@@ -1199,6 +1272,16 @@ class VCF91OpenTelegrafIntegration(VCFOpsIntegration):
             return []
         props = self._fetch_properties([r.get("identifier") for r in raw if r.get("identifier")])
         self.inventory_warning = None
+        appliance_addresses = self._fetch_appliance_addresses()
+        multi_vcenter = len({self._extract_vm_identifiers(r)[2] for r in raw} - {None, ""}) > 1
+        if not any(
+            "config|managedBy|extensionKey" in pr or "config|managedBy|type" in pr for pr in props.values()
+        ):
+            self.platform_notice = (
+                "Platform VM detection unavailable: no VM reports vSphere managedBy metadata, "
+                "so vCLS and Supervisor VMs cannot be identified"
+            )
+            logger.warning(self.platform_notice)
         registrations: Optional[Dict[Tuple[str, str], List[Dict[str, Any]]]]
         try:
             registrations = self._fetch_agent_registrations()
@@ -1249,6 +1332,10 @@ class VCF91OpenTelegrafIntegration(VCFOpsIntegration):
                     telegraf_status=status,
                     agent_registrations=len(regs),
                     managed_type=managed_type,
+                    platform_kind=classify_platform_vm(
+                        pr.get("config|managedBy|extensionKey"), pr.get("config|managedBy|type")
+                    )
+                    or self._match_appliance(appliance_addresses, vcid, hostname, ip_addr, multi_vcenter),
                 )
             )
         return vms
