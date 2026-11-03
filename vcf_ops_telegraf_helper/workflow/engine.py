@@ -117,6 +117,8 @@ class ConfigureEndpointWorkflow:
         self.stage_results: List[StageResult] = []
         self.verifications: Dict[str, str] = {}
         self.managed_files: List[str] = []
+        self.telegraf_upgraded: bool = False
+        self.should_upgrade_telegraf: bool = False
 
         # Collect secrets for redaction
         self._secrets: List[str] = []
@@ -922,6 +924,8 @@ class ConfigureEndpointWorkflow:
                     linux_arch = "arm64" if is_arm else "amd64"
                     tar_url = f"https://dl.influxdata.com/telegraf/releases/telegraf-{telegraf_ver}_linux_{linux_arch}.tar.gz"
                     sudo_pfx = "sudo -n " if getattr(self.executor, "use_sudo", False) else ""
+                    linux_discovered_bin = getattr(self.discovery, "telegraf_bin_path", None) or "/usr/bin/telegraf"
+                    linux_discovered_esc = linux_discovered_bin.replace("'", "'\\''")
                     install_cmd = (
                         f"{sudo_pfx}bash -c '"
                         "had_conf=0; if [ -f /etc/telegraf/telegraf.conf ]; then had_conf=1; fi; "
@@ -953,6 +957,9 @@ class ConfigureEndpointWorkflow:
                         "if [ -f \"$td\"/telegraf-*/usr/lib/telegraf/scripts/telegraf.service ]; then cp \"$td\"/telegraf-*/usr/lib/telegraf/scripts/telegraf.service /lib/systemd/system/telegraf.service; fi && "
                         "rm -rf \"$td\"; "
                         "fi && "
+                        f"if [ -n \"{linux_discovered_esc}\" ] && [ \"{linux_discovered_esc}\" != \"/usr/bin/telegraf\" ]; then "
+                        f"cp -f /usr/bin/telegraf \"{linux_discovered_esc}\" 2>/dev/null || true; "
+                        "fi && "
                         "getent group telegraf >/dev/null 2>&1 || groupadd -r telegraf 2>/dev/null || addgroup --system telegraf 2>/dev/null || true; "
                         "id -u telegraf >/dev/null 2>&1 || useradd -r -U -s /bin/false telegraf 2>/dev/null || adduser --system --group --no-create-home telegraf 2>/dev/null || true; "
                         "mkdir -p /etc/telegraf/telegraf.d && "
@@ -963,6 +970,13 @@ class ConfigureEndpointWorkflow:
                         "sed -i \"s|^[[:space:]]*urls = \\[\\\"http://127\\.0\\.0\\.1:8086\\\"\\]|  # urls = [\\\"http://127.0.0.1:8086\\\"]|\" /etc/telegraf/telegraf.conf; "
                         "fi && "
                         "if command -v systemctl >/dev/null 2>&1; then "
+                        "svc_file=$(systemctl show telegraf -p FragmentPath --value 2>/dev/null || true); "
+                        "if [ -n \"$svc_file\" ] && [ -f \"$svc_file\" ]; then "
+                        "unit_bin=$(awk -F= \"/^ExecStart=/ {print \\$2}\" \"$svc_file\" 2>/dev/null | awk \"{print \\$1}\" | tr -d \"-\"); "
+                        f"if [ -n \"$unit_bin\" ] && [ -f \"$unit_bin\" ] && [ \"$unit_bin\" != \"/usr/bin/telegraf\" ] && [ \"$unit_bin\" != \"{linux_discovered_esc}\" ]; then "
+                        "cp -f /usr/bin/telegraf \"$unit_bin\" 2>/dev/null || true; "
+                        "fi; "
+                        "fi; "
                         "systemctl daemon-reload || true; "
                         "systemctl enable telegraf || true; "
                         "fi'"
@@ -980,7 +994,11 @@ class ConfigureEndpointWorkflow:
                     self.reporter.on_stage_complete(res)
                     return res
 
-                expected_bin = f"{win_dest_dir}\\telegraf.exe" if is_win else "/usr/bin/telegraf"
+                if is_win:
+                    expected_bin = f"{win_dest_dir}\\telegraf.exe"
+                else:
+                    expected_bin = linux_discovered_bin if should_upgrade else "/usr/bin/telegraf"
+
                 bin_exists = self.executor.file_exists(expected_bin)
                 if not bin_exists and type(self.executor).__name__ in ("SSHExecutor", "WinRMExecutor", "LocalExecutor"):
                     dur = int((time.monotonic() - start) * 1000)
@@ -999,6 +1017,8 @@ class ConfigureEndpointWorkflow:
                     self.discovery.telegraf_bin_path = "C:\\telegraf\\telegraf.exe"
                     self.discovery.main_config_path = "C:\\telegraf\\telegraf.conf"
                     self.discovery.config_dir = "C:\\telegraf\\telegraf.d"
+                elif not is_win and should_upgrade:
+                    self.discovery.telegraf_bin_path = expected_bin
                 else:
                     self.discovery.telegraf_bin_path = "/usr/bin/telegraf"
                     self.discovery.main_config_path = "/etc/telegraf/telegraf.conf"
@@ -1011,16 +1031,33 @@ class ConfigureEndpointWorkflow:
                     self.discovery.telegraf_version = ver_res.stdout.strip().splitlines()[0].strip()
 
                 if should_upgrade:
+                    self.should_upgrade_telegraf = True
                     v_now = parse_telegraf_version(self.discovery.telegraf_version)
                     v_req = parse_telegraf_version(telegraf_ver)
                     if v_now and v_req and v_now >= v_req:
                         self.telegraf_upgraded = True
                         self.reporter.on_message(f"Telegraf agent upgraded to {self.discovery.telegraf_version}")
                     else:
+                        dur = int((time.monotonic() - start) * 1000)
+                        err_msg = (
+                            f"Telegraf upgrade to {telegraf_ver} failed: "
+                            f"installed version remains {self.discovery.telegraf_version or 'unknown'}"
+                        )
                         self.reporter.on_message(
                             f"Telegraf agent upgrade to {telegraf_ver} did not take effect: "
                             f"installed version is {self.discovery.telegraf_version or 'unknown'}"
                         )
+                        self.verifications["Telegraf version"] = (
+                            f"FAIL (expected >= {telegraf_ver}, got {self.discovery.telegraf_version or 'unknown'})"
+                        )
+                        res = StageResult(
+                            stage=WorkflowStage.APPLY,
+                            status=StageStatus.FAIL,
+                            message=err_msg,
+                            duration_ms=dur,
+                        )
+                        self.reporter.on_stage_complete(res)
+                        return res
 
             # SHA-256 Idempotency Comparison
             self.is_idempotent = False
@@ -1376,6 +1413,47 @@ class ConfigureEndpointWorkflow:
             dur = int((time.monotonic() - start) * 1000)
 
             if restart_res.success:
+                # If an upgrade was attempted/performed, verify the running service executable
+                if (getattr(self, "telegraf_upgraded", False) or getattr(self, "should_upgrade_telegraf", False)) and not (self.options.dry_run or self.options.preview_only):
+                    running_ver = None
+                    if is_win:
+                        chk = self.executor.execute(
+                            "$p = (Get-Process telegraf -ErrorAction SilentlyContinue | Select-Object -First 1).Path; "
+                            "if ($p) { & \"$p\" version } else { '' }",
+                            timeout=5,
+                        )
+                        if chk.success and chk.stdout.strip():
+                            running_ver = chk.stdout.strip().splitlines()[0].strip()
+                    else:
+                        chk = self.executor.execute(
+                            "pid=$(systemctl show telegraf.service -p MainPID --value 2>/dev/null || pgrep -o -x telegraf 2>/dev/null); "
+                            "if [ -n \"$pid\" ] && [ \"$pid\" != \"0\" ] && [ -e \"/proc/$pid/exe\" ]; then "
+                            "  /proc/$pid/exe version 2>/dev/null || true; "
+                            "fi",
+                            timeout=5,
+                        )
+                        if chk.success and chk.stdout.strip():
+                            running_ver = chk.stdout.strip().splitlines()[0].strip()
+
+                    if running_ver:
+                        v_running = parse_telegraf_version(running_ver)
+                        telegraf_ver = (
+                            getattr(self.options, "telegraf_version", None)
+                            or getattr(self.target, "telegraf_version", None)
+                            or "1.40.1"
+                        )
+                        v_req = parse_telegraf_version(telegraf_ver)
+                        if v_running and v_req and v_running < v_req:
+                            dur = int((time.monotonic() - start) * 1000)
+                            res = StageResult(
+                                stage=WorkflowStage.RESTART,
+                                status=StageStatus.FAIL,
+                                message=f"Telegraf service restarted with older binary version ({running_ver}), expected >= {telegraf_ver}",
+                                duration_ms=dur,
+                            )
+                            self.reporter.on_stage_complete(res)
+                            return res
+
                 res = StageResult(
                     stage=WorkflowStage.RESTART,
                     status=StageStatus.PASS,
@@ -1427,19 +1505,47 @@ class ConfigureEndpointWorkflow:
             else:
                 self.verifications["Telegraf installed"] = "PASS" if installed else "SKIPPED"
 
-            if getattr(self, "telegraf_upgraded", False):
+            if getattr(self, "telegraf_upgraded", False) or getattr(self, "should_upgrade_telegraf", False):
                 telegraf_ver = (
                     getattr(self.options, "telegraf_version", None)
                     or getattr(self.target, "telegraf_version", None)
                     or "1.40.1"
                 )
                 v_expected = parse_telegraf_version(telegraf_ver)
-                v_actual = parse_telegraf_version(self.discovery.telegraf_version if self.discovery else None)
+
+                # Re-query running service binary if possible
+                running_ver = None
                 if not (self.options.dry_run or self.options.preview_only):
-                    if v_expected and v_actual and v_actual < v_expected:
-                        self.verifications["Telegraf version"] = f"FAIL (expected >= {telegraf_ver}, got {self.discovery.telegraf_version})"
+                    if is_win:
+                        chk = self.executor.execute(
+                            "$p = (Get-Process telegraf -ErrorAction SilentlyContinue | Select-Object -First 1).Path; "
+                            "if ($p) { & \"$p\" version } else { '' }",
+                            timeout=5,
+                        )
+                        if chk.success and chk.stdout.strip():
+                            running_ver = chk.stdout.strip().splitlines()[0].strip()
                     else:
-                        self.verifications["Telegraf version"] = f"PASS ({self.discovery.telegraf_version or telegraf_ver})"
+                        chk = self.executor.execute(
+                            "pid=$(systemctl show telegraf.service -p MainPID --value 2>/dev/null || pgrep -o -x telegraf 2>/dev/null); "
+                            "if [ -n \"$pid\" ] && [ \"$pid\" != \"0\" ] && [ -e \"/proc/$pid/exe\" ]; then "
+                            "  /proc/$pid/exe version 2>/dev/null || true; "
+                            "fi",
+                            timeout=5,
+                        )
+                        if chk.success and chk.stdout.strip():
+                            running_ver = chk.stdout.strip().splitlines()[0].strip()
+
+                active_ver_str = (
+                    running_ver
+                    if (running_ver and parse_telegraf_version(running_ver))
+                    else (self.discovery.telegraf_version if self.discovery else None)
+                )
+                v_actual = parse_telegraf_version(active_ver_str)
+                if not (self.options.dry_run or self.options.preview_only):
+                    if v_expected and (v_actual is None or v_actual < v_expected):
+                        self.verifications["Telegraf version"] = f"FAIL (expected >= {telegraf_ver}, got {active_ver_str or 'unknown'})"
+                    else:
+                        self.verifications["Telegraf version"] = f"PASS ({active_ver_str or telegraf_ver})"
                 else:
                     self.verifications["Telegraf version"] = "SKIPPED"
 

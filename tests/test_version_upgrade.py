@@ -233,9 +233,14 @@ def test_apply_reads_upgraded_version_from_installed_binary_not_old_path():
     )
     mock_exec = MagicMock()
 
+    installed_local = False
+
     def _exec_handler(cmd, **kw):
+        nonlocal installed_local
+        if "cp -f /usr/bin/telegraf" in cmd and "/usr/local/bin/telegraf" in cmd:
+            installed_local = True
         if cmd == '"/usr/local/bin/telegraf" version':
-            return CommandResult(exit_code=0, stdout="Telegraf 1.32.1\n", command=cmd)
+            return CommandResult(exit_code=0, stdout="Telegraf 1.40.2\n" if installed_local else "Telegraf 1.32.1\n", command=cmd)
         if cmd == '"/usr/bin/telegraf" version':
             return CommandResult(exit_code=0, stdout="Telegraf 1.40.2\n", command=cmd)
         return CommandResult(exit_code=0, stdout="success", command=cmd)
@@ -271,7 +276,7 @@ def test_apply_reads_upgraded_version_from_installed_binary_not_old_path():
 
     res = wf.apply()
     assert res.status == StageStatus.PASS
-    assert wf.discovery.telegraf_bin_path == "/usr/bin/telegraf"
+    assert wf.discovery.telegraf_bin_path == "/usr/local/bin/telegraf"
     assert wf.discovery.telegraf_version == "Telegraf 1.40.2"
 
 
@@ -364,10 +369,12 @@ def test_upgrade_that_leaves_old_version_is_not_reported_as_upgraded():
     wf.reporter = MagicMock()
     wf.reporter.on_message.side_effect = messages.append
 
-    wf.apply()
+    res = wf.apply()
+    assert res.status == StageStatus.FAIL
     assert getattr(wf, "telegraf_upgraded", False) is False
     assert not any("upgraded to" in m for m in messages)
     assert any("did not take effect" in m and "1.32.1" in m for m in messages)
+    assert "FAIL" in wf.verifications.get("Telegraf version", "")
 
 
 def test_apply_skips_upgrade_when_installed_is_equal():
@@ -556,3 +563,152 @@ def test_verify_stage_checks_upgraded_version():
     assert res.status == StageStatus.PASS
     assert "PASS" in wf.verifications["Telegraf version"]
     assert "Telegraf 1.40.2" in wf.verifications["Telegraf version"]
+
+
+def test_apply_stage_fails_when_upgrade_script_exits_zero_but_binary_unchanged():
+    """Verify Apply stage fails and records failing verification when upgrade fails to change version."""
+    env = VCFEnvironment(name="test", url="https://vcf.local", username="admin", collector=CollectorInfo(address="10.10.10.50"))
+    target = EndpointTarget(
+        hostname="node.local",
+        os_family=OSFamily.LINUX,
+        connection_method=ConnectionMethod.SSH,
+        install_telegraf=True,
+        telegraf_version="1.40.2",
+    )
+    mock_exec = MagicMock()
+
+    def _exec_handler(cmd, **kw):
+        if "version" in cmd:
+            # Script supposedly ran, but binary still returns old version 1.32.1
+            return CommandResult(exit_code=0, stdout="Telegraf 1.32.1\n", command=cmd)
+        return CommandResult(exit_code=0, stdout="OK", command=cmd)
+
+    mock_exec.execute.side_effect = _exec_handler
+    mock_exec.file_exists.return_value = True
+    mock_exec.download.return_value = "dummy"
+
+    wf = ConfigureEndpointWorkflow(
+        environment=env,
+        target=target,
+        monitoring=MonitoringConfig(),
+        executor=mock_exec,
+        adapter=MagicMock(),
+        options=WorkflowOptions(mode=DeploymentMode.PUSH, install_telegraf=True, telegraf_version="1.40.2"),
+    )
+    wf.discovery = EndpointDiscoveryResult(
+        hostname=target.hostname,
+        os_name="Linux",
+        telegraf_installed=True,
+        telegraf_version="Telegraf 1.32.1",
+        telegraf_bin_path="/usr/bin/telegraf",
+        main_config_path="/etc/telegraf/telegraf.conf",
+        config_dir="/etc/telegraf/telegraf.d",
+    )
+    wf.system_conf_content = "[agent]\ninterval = '10s'\n"
+    wf.vcf_conf_content = "[[outputs.http]]\n"
+    wf.base_stub_content = "[agent]\n"
+
+    res = wf.apply()
+    assert res.status == StageStatus.FAIL
+    assert "Telegraf upgrade to 1.40.2 failed" in res.message
+    assert wf.telegraf_upgraded is False
+    assert "FAIL" in wf.verifications.get("Telegraf version", "")
+
+
+def test_linux_upgrade_preserves_custom_discovered_bin_path():
+    """Verify Linux upgrade reconciles custom discovered binary path (/usr/local/bin/telegraf)."""
+    env = VCFEnvironment(name="test", url="https://vcf.local", username="admin", collector=CollectorInfo(address="10.10.10.50"))
+    target = EndpointTarget(
+        hostname="node.local",
+        os_family=OSFamily.LINUX,
+        connection_method=ConnectionMethod.SSH,
+        install_telegraf=True,
+        telegraf_version="1.40.2",
+    )
+    mock_exec = MagicMock()
+    executed_commands = []
+
+    def _exec_handler(cmd, **kw):
+        executed_commands.append(cmd)
+        if "version" in cmd:
+            return CommandResult(exit_code=0, stdout="Telegraf 1.40.2\n", command=cmd)
+        return CommandResult(exit_code=0, stdout="OK", command=cmd)
+
+    mock_exec.execute.side_effect = _exec_handler
+    mock_exec.file_exists.return_value = True
+    mock_exec.download.return_value = "dummy"
+
+    wf = ConfigureEndpointWorkflow(
+        environment=env,
+        target=target,
+        monitoring=MonitoringConfig(),
+        executor=mock_exec,
+        adapter=MagicMock(),
+        options=WorkflowOptions(mode=DeploymentMode.PUSH, install_telegraf=True, telegraf_version="1.40.2"),
+    )
+    wf.discovery = EndpointDiscoveryResult(
+        hostname=target.hostname,
+        os_name="Linux",
+        telegraf_installed=True,
+        telegraf_version="Telegraf 1.32.1",
+        telegraf_bin_path="/usr/local/bin/telegraf",
+        main_config_path="/etc/telegraf/telegraf.conf",
+        config_dir="/etc/telegraf/telegraf.d",
+    )
+    wf.system_conf_content = "[agent]\ninterval = '10s'\n"
+    wf.vcf_conf_content = "[[outputs.http]]\n"
+    wf.base_stub_content = "[agent]\n"
+
+    res = wf.apply()
+    assert res.status == StageStatus.PASS
+    assert wf.telegraf_upgraded is True
+
+    # Verify that install command copied binary to the custom discovered path
+    install_cmds = [c for c in executed_commands if "cp -f /usr/bin/telegraf" in c]
+    assert any("/usr/local/bin/telegraf" in c for c in install_cmds)
+
+    # Verify discovery bin path preserved custom path
+    assert wf.discovery.telegraf_bin_path == "/usr/local/bin/telegraf"
+
+
+def test_restart_stage_fails_if_running_service_binary_is_older():
+    """Verify restart stage fails if the running process executable still reports an older version."""
+    env = VCFEnvironment(name="test", url="https://vcf.local", username="admin", collector=CollectorInfo(address="10.10.10.50"))
+    target = EndpointTarget(
+        hostname="node.local",
+        os_family=OSFamily.LINUX,
+        connection_method=ConnectionMethod.SSH,
+        install_telegraf=True,
+        telegraf_version="1.40.2",
+    )
+    mock_exec = MagicMock()
+
+    def _exec_handler(cmd, **kw):
+        if "exe version" in cmd:
+            return CommandResult(exit_code=0, stdout="Telegraf 1.32.1\n", command=cmd)
+        return CommandResult(exit_code=0, stdout="OK", command=cmd)
+
+    mock_exec.execute.side_effect = _exec_handler
+    mock_exec.file_exists.return_value = True
+
+    wf = ConfigureEndpointWorkflow(
+        environment=env,
+        target=target,
+        monitoring=MonitoringConfig(),
+        executor=mock_exec,
+        adapter=MagicMock(),
+        options=WorkflowOptions(mode=DeploymentMode.PUSH, install_telegraf=True, telegraf_version="1.40.2"),
+    )
+    wf.discovery = EndpointDiscoveryResult(
+        hostname=target.hostname,
+        os_name="Linux",
+        telegraf_installed=True,
+        telegraf_version="Telegraf 1.40.2",
+    )
+    wf.telegraf_upgraded = True
+
+    res = wf.restart_if_needed()
+    assert res.status == StageStatus.FAIL
+    assert "Telegraf service restarted with older binary version" in res.message
+
+
