@@ -221,6 +221,60 @@ def test_apply_executes_linux_upgrade_when_installed_is_older():
     assert "telegraf-1.40.2_linux_amd64.tar.gz" in upgrade_cmd
 
 
+def test_apply_reads_upgraded_version_from_installed_binary_not_old_path():
+    """Verify the post-upgrade version comes from where the script installs, not the pre-upgrade binary path."""
+    env = VCFEnvironment(name="test", url="https://vcf.local", username="admin", collector=CollectorInfo(address="10.10.10.50"))
+    target = EndpointTarget(
+        hostname="ubuntu-node.local",
+        os_family=OSFamily.LINUX,
+        connection_method=ConnectionMethod.SSH,
+        install_telegraf=True,
+        telegraf_version="1.40.2",
+    )
+    mock_exec = MagicMock()
+
+    def _exec_handler(cmd, **kw):
+        if cmd == '"/usr/local/bin/telegraf" version':
+            return CommandResult(exit_code=0, stdout="Telegraf 1.32.1\n", command=cmd)
+        if cmd == '"/usr/bin/telegraf" version':
+            return CommandResult(exit_code=0, stdout="Telegraf 1.40.2\n", command=cmd)
+        return CommandResult(exit_code=0, stdout="success", command=cmd)
+
+    mock_exec.execute.side_effect = _exec_handler
+    mock_exec.file_exists.return_value = False
+    mock_adapter = MagicMock()
+    mock_adapter.prepare_telegraf_integration.return_value = IntegrationArtifacts(
+        collector_address="10.10.10.50",
+        script_url="https://10.10.10.50/downloads/salt/telegraf-utils.sh",
+        output_url="https://10.10.10.50/opensource/default/metric",
+        token="test-token-xyz",
+    )
+
+    wf = ConfigureEndpointWorkflow(
+        environment=env,
+        target=target,
+        monitoring=MonitoringConfig(),
+        executor=mock_exec,
+        adapter=mock_adapter,
+        options=WorkflowOptions(mode=DeploymentMode.PUSH, install_telegraf=True, telegraf_version="1.40.2"),
+    )
+    wf.artifacts = mock_adapter.prepare_telegraf_integration()
+    wf.discovery = EndpointDiscoveryResult(
+        hostname=target.hostname,
+        os_name="Linux",
+        os_version="Ubuntu 24.04",
+        telegraf_installed=True,
+        telegraf_version="Telegraf 1.32.1",
+        telegraf_bin_path="/usr/local/bin/telegraf",
+        architecture="x86_64",
+    )
+
+    res = wf.apply()
+    assert res.status == StageStatus.PASS
+    assert wf.discovery.telegraf_bin_path == "/usr/bin/telegraf"
+    assert wf.discovery.telegraf_version == "Telegraf 1.40.2"
+
+
 def test_apply_skips_upgrade_when_installed_is_equal():
     """Verify apply stage does not run upgrade commands when installed equals requested."""
     env = VCFEnvironment(name="test", url="https://vcf.local", username="admin", collector=CollectorInfo(address="10.10.10.50"))

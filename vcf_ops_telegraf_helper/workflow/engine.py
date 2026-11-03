@@ -960,10 +960,7 @@ class ConfigureEndpointWorkflow:
                     self.reporter.on_stage_complete(res)
                     return res
 
-                expected_bin = (
-                    getattr(self.discovery, "telegraf_bin_path", None)
-                    or ("C:\\telegraf\\telegraf.exe" if is_win else "/usr/bin/telegraf")
-                )
+                expected_bin = "C:\\telegraf\\telegraf.exe" if is_win else "/usr/bin/telegraf"
                 bin_exists = self.executor.file_exists(expected_bin)
                 if not bin_exists and type(self.executor).__name__ in ("SSHExecutor", "WinRMExecutor", "LocalExecutor"):
                     dur = int((time.monotonic() - start) * 1000)
