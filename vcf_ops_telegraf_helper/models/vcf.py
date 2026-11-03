@@ -53,7 +53,7 @@ PLATFORM_MANAGED_BY_RULES: Dict[Tuple[str, str], str] = {
 
 # Appliance nodes that VCF Operations itself inventories: (adapter kind, resource kind, category). A VM is
 # an appliance only when its guest IP or hostname equals an address those objects report. The kinds are
-# not yet confirmed on a live inventory; a category that returns no objects is surfaced to the user.
+# not yet confirmed on a live inventory; a category that returns no objects is only logged.
 APPLIANCE_RESOURCE_KINDS: Tuple[Tuple[str, str, str], ...] = (
     ("VMWARE", "VMwareAdapter Instance", "vCenter appliance"),
     ("NSXTAdapter", "ManagerNode", "NSX Manager node"),
