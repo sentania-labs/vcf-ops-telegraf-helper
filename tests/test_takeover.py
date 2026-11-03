@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -72,6 +73,9 @@ class ManagedWindowsEndpoint(MockExecutor):
             # the auto-install puts the open-source agent and its service in place
             self.telegraf_installed = True
             self.service_active = True
+            m = re.search(r"telegraf-([0-9.]+)_windows", command)
+            if m:
+                self.telegraf_version = f"Telegraf {m.group(1)}"
             return CommandResult(exit_code=0, stdout="", command=command)
         if "Win32_Service" in command and "-in @(" in command:
             if self.service_query_fails:

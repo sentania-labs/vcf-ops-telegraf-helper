@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Dict, List, Optional, Union
 from vcf_ops_telegraf_helper.executors.base import CommandResult, EndpointExecutor
 from vcf_ops_telegraf_helper.models.discovery import (
@@ -47,6 +48,25 @@ class MockExecutor(EndpointExecutor):
         cmd_lower = command.lower()
 
         # Target inspection commands
+        if "apt-get install" in command and "telegraf=" in command:
+            m = re.search(r"telegraf=([0-9.]+)", command)
+            if m:
+                self.telegraf_installed = True
+                self.service_active = True
+                self.telegraf_version = f"Telegraf {m.group(1)}"
+        elif "curl" in command and "tar -xz" in command and "telegraf-" in command:
+            m = re.search(r"telegraf-([0-9.]+)_linux", command)
+            if m:
+                self.telegraf_installed = True
+                self.service_active = True
+                self.telegraf_version = f"Telegraf {m.group(1)}"
+        elif "Invoke-WebRequest" in command and "telegraf" in command:
+            self.telegraf_installed = True
+            self.service_active = True
+            m = re.search(r"telegraf-([0-9.]+)_windows", command)
+            if m:
+                self.telegraf_version = f"Telegraf {m.group(1)}"
+
         if "uname -s" in cmd_lower:
             return CommandResult(exit_code=0, stdout="Linux\n", command=command)
         if "uname -m" in cmd_lower:
@@ -78,7 +98,14 @@ class MockExecutor(EndpointExecutor):
                 return CommandResult(exit_code=0, stdout="/usr/bin/telegraf\n", command=command)
             return CommandResult(exit_code=1, stderr="telegraf not found\n", command=command)
 
-        if "telegraf version" in cmd_lower or "telegraf --version" in cmd_lower or "telegraf.exe' version" in cmd_lower:
+        if (
+            "telegraf version" in cmd_lower
+            or "telegraf --version" in cmd_lower
+            or "telegraf.exe' version" in cmd_lower
+            or 'telegraf.exe" version' in cmd_lower
+            or "telegraf' version" in cmd_lower
+            or 'telegraf" version' in cmd_lower
+        ):
             if self.telegraf_installed:
                 return CommandResult(exit_code=0, stdout=f"{self.telegraf_version}\n", command=command)
             return CommandResult(exit_code=127, stderr="command not found\n", command=command)

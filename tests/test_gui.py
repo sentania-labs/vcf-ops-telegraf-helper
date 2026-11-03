@@ -1348,3 +1348,45 @@ def test_main_window_shows_platform_detection_notice(qapp, tmp_path, monkeypatch
     window.vm_search_input.setText("webapp")
     window.vm_os_filter.setCurrentText("Linux")
     assert notice in window.vm_count_label.text() and warning in window.vm_count_label.text()
+
+
+def test_main_window_upgrade_banner_and_preview(qapp, tmp_path, monkeypatch):
+    """Verify GUI detection of older agent displays upgrade banner and updates Review preview."""
+    window = _mock_window(qapp, tmp_path, monkeypatch)
+    window.discovered_telegraf_installed = True
+    window.discovered_telegraf_version = "Telegraf 1.32.1"
+    window._default_installation(True)
+
+    # When on "Do Not Install" (default for installed agent), upgrade banner is offered
+    assert not window.ep_upgrade_banner.isHidden()
+    assert "Telegraf Upgrade Available" in window.ep_upgrade_title.text()
+    assert "Host is currently running Telegraf 1.32.1" in window.ep_upgrade_desc.text()
+
+    # Pick newer version 1.40.2
+    window.ep_version_combo.setCurrentText("Auto-install Official 1.40.2 (1.40 Series)")
+    assert not window.ep_upgrade_banner.isHidden()
+    assert "Telegraf Upgrade Selected" in window.ep_upgrade_title.text()
+    assert "1.40.2" in window.ep_upgrade_desc.text()
+
+    # Verify preview text reflects upgrade
+    window._update_preview()
+    preview = window.review_summary_box.toPlainText()
+    assert "Upgrade existing Telegraf agent from Telegraf 1.32.1 to 1.40.2" in preview
+
+    # Pick identical version 1.32.1
+    window.ep_version_combo.setCurrentText("Auto-install Official 1.32.1 (1.32 Series)")
+    assert not window.ep_upgrade_banner.isHidden()
+    assert "Telegraf Version Unchanged" in window.ep_upgrade_title.text()
+    window._update_preview()
+    preview_same = window.review_summary_box.toPlainText()
+    assert "Telegraf agent version unchanged: installed version (Telegraf 1.32.1) matches requested 1.32.1" in preview_same
+
+    # Pick older version 1.30.0 (downgrade refusal)
+    window.ep_version_combo.setCurrentText("Auto-install Official 1.30.0 (1.30 Series)")
+    assert not window.ep_upgrade_banner.isHidden()
+    assert "Downgrade Not Permitted" in window.ep_upgrade_title.text()
+    window._update_preview()
+    preview_older = window.review_summary_box.toPlainText()
+    assert "Telegraf agent version unchanged: installed version (Telegraf 1.32.1) is newer than requested 1.30.0" in preview_older
+    assert "downgrade not permitted" in preview_older
+

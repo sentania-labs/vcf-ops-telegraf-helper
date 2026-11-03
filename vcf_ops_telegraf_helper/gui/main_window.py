@@ -100,7 +100,12 @@ from vcf_ops_telegraf_helper.models.workflow import (
     WorkflowStage,
 )
 from vcf_ops_telegraf_helper import __version__
-from vcf_ops_telegraf_helper.utils import local_now_formatted
+from vcf_ops_telegraf_helper.utils import (
+    UpgradeDecision,
+    evaluate_telegraf_upgrade,
+    local_now_formatted,
+    parse_telegraf_version,
+)
 from vcf_ops_telegraf_helper.renderer.renderer import TelegrafRenderer
 from vcf_ops_telegraf_helper.storage.state import StateStore
 from vcf_ops_telegraf_helper.workflow.engine import ConfigureEndpointWorkflow
@@ -1277,6 +1282,24 @@ class MainWindow(QMainWindow):
         self.ep_missing_banner.setVisible(False)
         c_layout.addWidget(self.ep_missing_banner)
 
+        self.ep_upgrade_banner = QFrame()
+        self.ep_upgrade_banner.setObjectName("epUpgradeBanner")
+        self.ep_upgrade_banner.setStyleSheet(
+            "#epUpgradeBanner { border-left: 4px solid #2f6feb; background-color: rgba(47, 111, 235, 0.12); border-radius: 6px; }"
+        )
+        ub_layout = QVBoxLayout(self.ep_upgrade_banner)
+        ub_layout.setContentsMargins(10, 8, 10, 8)
+        ub_layout.setSpacing(4)
+        self.ep_upgrade_title = QLabel("Telegraf Upgrade Available")
+        self.ep_upgrade_title.setStyleSheet("font-weight: 600; color: #2f6feb; font-size: 13px;")
+        self.ep_upgrade_desc = QLabel()
+        self.ep_upgrade_desc.setProperty("class", "lattice-muted")
+        self.ep_upgrade_desc.setWordWrap(True)
+        ub_layout.addWidget(self.ep_upgrade_title)
+        ub_layout.addWidget(self.ep_upgrade_desc)
+        self.ep_upgrade_banner.setVisible(False)
+        c_layout.addWidget(self.ep_upgrade_banner)
+
         self.ep_managed_banner = QFrame()
         self.ep_managed_banner.setObjectName("epManagedBanner")
         self.ep_managed_banner.setStyleSheet(
@@ -1537,13 +1560,84 @@ class MainWindow(QMainWindow):
         self._installation_choice_explicit = True
         if hasattr(self, "ep_version_combo") and self.ep_version_combo.lineEdit():
             self.ep_version_combo.lineEdit().setCursorPosition(0)
+        self._update_upgrade_banner()
 
     def _default_installation(self, installed: bool) -> None:
         if getattr(self, "_installation_choice_explicit", False):
             return
         self.ep_version_combo.blockSignals(True)
-        self.ep_version_combo.setCurrentIndex(4 if installed else 0)
+        idx = self.ep_version_combo.findText("Do Not Install", Qt.MatchFlag.MatchStartsWith)
+        if idx == -1:
+            idx = 5
+        self.ep_version_combo.setCurrentIndex(idx if installed else 0)
         self.ep_version_combo.blockSignals(False)
+        self._update_upgrade_banner()
+
+    def _update_upgrade_banner(self) -> None:
+        if not hasattr(self, "ep_upgrade_banner") or not hasattr(self, "ep_version_combo"):
+            return
+        if not getattr(self, "discovered_telegraf_installed", False):
+            self.ep_upgrade_banner.setVisible(False)
+            return
+
+        inst_ver_str = getattr(self, "discovered_telegraf_version", None)
+        selected_text = self.ep_version_combo.currentText().strip()
+        if selected_text.startswith("Do Not Install"):
+            v_inst = parse_telegraf_version(inst_ver_str)
+            v_rec = parse_telegraf_version("1.40.1")
+            if v_inst and v_rec and v_inst < v_rec:
+                self.ep_upgrade_title.setText("Telegraf Upgrade Available")
+                self.ep_upgrade_desc.setText(
+                    f"Host is currently running {inst_ver_str}. Select a release from the "
+                    "Telegraf Distribution picker above to upgrade to current, or keep 'Do Not Install' "
+                    "to leave the installed version unchanged."
+                )
+                self.ep_upgrade_banner.setStyleSheet(
+                    "#epUpgradeBanner { border-left: 4px solid #2f6feb; background-color: rgba(47, 111, 235, 0.12); border-radius: 6px; }"
+                )
+                self.ep_upgrade_title.setStyleSheet("font-weight: 600; color: #2f6feb; font-size: 13px;")
+                self.ep_upgrade_banner.setVisible(True)
+            else:
+                self.ep_upgrade_banner.setVisible(False)
+            return
+
+        req_ver_str = self._get_selected_telegraf_version()
+        decision, reason = evaluate_telegraf_upgrade(inst_ver_str, req_ver_str)
+        if decision == UpgradeDecision.UPGRADE:
+            self.ep_upgrade_title.setText("Telegraf Upgrade Selected")
+            self.ep_upgrade_desc.setText(
+                f"Host is running {inst_ver_str}. Applying configuration will upgrade the Telegraf agent "
+                f"to {req_ver_str} and restart the service."
+            )
+            self.ep_upgrade_banner.setStyleSheet(
+                "#epUpgradeBanner { border-left: 4px solid #2f6feb; background-color: rgba(47, 111, 235, 0.12); border-radius: 6px; }"
+            )
+            self.ep_upgrade_title.setStyleSheet("font-weight: 600; color: #2f6feb; font-size: 13px;")
+            self.ep_upgrade_banner.setVisible(True)
+        elif decision == UpgradeDecision.UNCHANGED_EQUAL:
+            self.ep_upgrade_title.setText("Telegraf Version Unchanged")
+            self.ep_upgrade_desc.setText(
+                f"Host is already running {inst_ver_str}. Installed version matches requested "
+                f"{req_ver_str}; agent will not be re-installed."
+            )
+            self.ep_upgrade_banner.setStyleSheet(
+                "#epUpgradeBanner { border-left: 4px solid #6c757d; background-color: rgba(108, 117, 125, 0.12); border-radius: 6px; }"
+            )
+            self.ep_upgrade_title.setStyleSheet("font-weight: 600; color: #6c757d; font-size: 13px;")
+            self.ep_upgrade_banner.setVisible(True)
+        elif decision == UpgradeDecision.UNCHANGED_NEWER:
+            self.ep_upgrade_title.setText("Downgrade Not Permitted")
+            self.ep_upgrade_desc.setText(
+                f"Host is running a newer version ({inst_ver_str}). Requested older version "
+                f"({req_ver_str}) will not be applied; the existing agent will remain unchanged."
+            )
+            self.ep_upgrade_banner.setStyleSheet(
+                "#epUpgradeBanner { border-left: 4px solid #d97706; background-color: rgba(217, 119, 6, 0.12); border-radius: 6px; }"
+            )
+            self.ep_upgrade_title.setStyleSheet("font-weight: 600; color: #d97706; font-size: 13px;")
+            self.ep_upgrade_banner.setVisible(True)
+        else:
+            self.ep_upgrade_banner.setVisible(False)
 
     def _get_selected_telegraf_version(self) -> str:
         if not hasattr(self, "ep_version_combo"):
@@ -1674,8 +1768,11 @@ class MainWindow(QMainWindow):
                 self._show_resume_banner(resume)
                 return
             self._hide_managed_banner()
+            self.discovered_telegraf_installed = found['installed']
+            self.discovered_telegraf_version = found['version']
             self._default_installation(found['installed'])
             self.ep_missing_banner.setVisible(not found['installed'])
+            self._update_upgrade_banner()
             self.ep_status_label.setText("Connected & Discovered (Windows)" if target.os_family == OSFamily.WINDOWS else "Connected & Discovered")
             self.ep_status_label.setStyleSheet("color: #199e70; font-weight: 600;")
             installation = "YES" if found['installed'] else ("NO (auto-install selected)" if self._get_endpoint_target().install_telegraf else "NO (auto-install disabled)")
@@ -3093,11 +3190,24 @@ class MainWindow(QMainWindow):
             active_plugins.append("custom_toml")
 
         if target.install_telegraf:
-            install_desc = (
-                f"Install official InfluxData agent release {target.telegraf_version} package"
-                if is_win
-                else f"Install official InfluxData agent {target.telegraf_version} via native package manager or archive fallback"
-            )
+            if getattr(self, "discovered_telegraf_installed", False):
+                v_inst = parse_telegraf_version(getattr(self, "discovered_telegraf_version", None))
+                v_sel = parse_telegraf_version(target.telegraf_version)
+                if v_inst and v_sel:
+                    if v_inst < v_sel:
+                        install_desc = f"Upgrade existing Telegraf agent from {self.discovered_telegraf_version} to {target.telegraf_version} and restart service"
+                    elif v_inst == v_sel:
+                        install_desc = f"Telegraf agent version unchanged: installed version ({self.discovered_telegraf_version}) matches requested {target.telegraf_version}"
+                    else:
+                        install_desc = f"Telegraf agent version unchanged: installed version ({self.discovered_telegraf_version}) is newer than requested {target.telegraf_version} (downgrade not permitted)"
+                else:
+                    install_desc = f"Verify existing Telegraf agent ({getattr(self, 'discovered_telegraf_version', 'unknown')})"
+            else:
+                install_desc = (
+                    f"Install official InfluxData agent release {target.telegraf_version} package"
+                    if is_win
+                    else f"Install official InfluxData agent {target.telegraf_version} via native package manager or archive fallback"
+                )
         else:
             install_desc = "Verify existing pre-installed Telegraf agent"
 

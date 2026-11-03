@@ -133,12 +133,12 @@ def run_wizard(console: Optional[Console] = None) -> None:
     telegraf_ver = "1.40.1"
     if conn_method in (ConnectionMethod.SSH, ConnectionMethod.WINRM):
         auto_install = Confirm.ask(
-            "Install open-source Telegraf agent if missing (InfluxData official distribution)?",
+            "Install open-source Telegraf agent if missing or upgrade if older (InfluxData official distribution)?",
             default=True,
             console=con,
         )
         if auto_install:
-            telegraf_ver = Prompt.ask("Telegraf release version to install", default="1.40.1", console=con).strip() or "1.40.1"
+            telegraf_ver = Prompt.ask("Telegraf release version to install or upgrade", default="1.40.1", console=con).strip() or "1.40.1"
 
     target = EndpointTarget(
         hostname=target_host,
