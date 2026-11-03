@@ -62,6 +62,12 @@ APPLIANCE_RESOURCE_KINDS: Tuple[Tuple[str, str, str], ...] = (
     ("VCFAdapter", "SddcManager", "SDDC Manager"),
 )
 
+# Identifier and property names (last segment, case-insensitive) that hold an appliance node's own address.
+# Other address-shaped values on an appliance object (DNS, NTP, gateway, syslog, peers) are never used.
+APPLIANCE_ADDRESS_FIELDS = frozenset(
+    {"ip", "ipaddress", "ip_address", "managementip", "management_ip", "hostname", "host_name", "fqdn", "vcurl"}
+)
+
 
 def classify_platform_vm(extension_key: Optional[str], managed_by_type: Optional[str]) -> Optional[str]:
     """Return the platform category for a vSphere managedBy record, or None when it is not a verified match."""

@@ -1198,7 +1198,8 @@ def test_vcf91_appliance_vms_matched_by_address_of_operations_nodes():
     """A VM is an appliance only when its guest IP or hostname equals an address an appliance node reports."""
     ext, typ = "config|managedBy|extensionKey", "config|managedBy|type"
     names = [("r-vcls", "vCLS-1"), ("r-nsx", "nsx-a"), ("r-vc", "vcsa-a"), ("r-ops", "ops-a"),
-             ("r-app", "app01"), ("r-look", "NSX-Manager-lookalike")]
+             ("r-app", "app01"), ("r-look", "NSX-Manager-lookalike"), ("r-dns", "dns01"),
+             ("r-ntp", "ntp01"), ("r-named", "named-like-node")]
     props = {
         "r-vcls": {ext: "com.vmware.vim.eam", typ: "cluster-agent"},
         "r-nsx": {"summary|guest|ipAddress": "10.0.0.5"},
@@ -1206,7 +1207,11 @@ def test_vcf91_appliance_vms_matched_by_address_of_operations_nodes():
         "r-ops": {"summary|guest|ipAddress": "10.0.0.9"},
         "r-app": {"summary|guest|ipAddress": "10.0.0.77", "summary|guest|hostName": "app01.corp.local"},
         "r-look": {"summary|guest|ipAddress": "10.0.0.88"},
+        "r-dns": {"summary|guest|ipAddress": "10.0.0.53"},
+        "r-ntp": {"summary|guest|hostName": "ntp01.corp.local"},
+        "r-named": {"summary|guest|hostName": "nsx-mgr-node"},
         "n-ops": {"net|ipAddress": "10.0.0.9"},
+        "n-nsx": {"config|dnsServers": "10.0.0.53", "config|ntpServer": "ntp01.corp.local", "net|gateway": "10.0.0.1"},
     }
     appliances = {
         "ManagerNode": [_appliance_node("n-nsx", "nsx-mgr-node", "NSXTAdapter", "ManagerNode", [("IP", "10.0.0.5")])],
@@ -1226,9 +1231,11 @@ def test_vcf91_appliance_vms_matched_by_address_of_operations_nodes():
     assert vms["ops-a"].platform_kind == "VCF Operations node"
     assert vms["app01"].platform_kind is None
     assert vms["NSX-Manager-lookalike"].platform_kind is None
-    assert adapter.platform_notice == (
-        "Platform VM detection unavailable: no appliance objects found for NSX Edge node, SDDC Manager"
-    )
+    # addresses an appliance merely mentions (DNS, NTP) and its display name do not make another VM an appliance
+    for name in ("dns01", "ntp01", "named-like-node"):
+        assert vms[name].platform_kind is None, name
+    # appliance categories absent from this deployment are normal and produce no notice
+    assert adapter.platform_notice is None
 
 
 def test_vcf91_platform_notice_when_no_managed_by_metadata_or_appliance_lookup_fails():
@@ -1240,7 +1247,7 @@ def test_vcf91_platform_notice_when_no_managed_by_metadata_or_appliance_lookup_f
 
     assert len(vms) == 7 and not any(vm.is_platform_vm for vm in vms)
     assert "no VM reports vSphere managedBy metadata" in adapter.platform_notice
-    assert "NSX Manager node" in adapter.platform_notice
+    assert "appliance" not in adapter.platform_notice
 
 
 def test_vcf91_platform_notice_cleared_when_detection_works():

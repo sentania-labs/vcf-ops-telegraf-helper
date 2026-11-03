@@ -983,15 +983,14 @@ class MainWindow(QMainWindow):
         try:
             adapter = adapter or get_adapter(self._get_vcf_env())
             self._cached_vms = run_busy(self, "Loading VM inventory...", lambda: adapter.list_virtual_machines(strict=True))
+            self._vm_notices = [n for n in (adapter.inventory_warning, adapter.platform_notice) if n]
             self._populate_vm_table(self._cached_vms)
             self._filter_vm_table()
             self._reconcile_binding()
-            for notice in (adapter.inventory_warning, adapter.platform_notice):
-                if notice:
-                    self.vm_count_label.setText(f"{self.vm_count_label.text()} | {notice}")
             self.logger.info("Retrieved %d VMs from VCF Operations inventory", len(self._cached_vms))
         except Exception as exc:
             self._cached_vms = []
+            self._vm_notices = []
             self._populate_vm_table([])
             self._clear_vm_binding()
             self.vm_count_label.setText(f"Query error: {exc}")
@@ -1092,6 +1091,8 @@ class MainWindow(QMainWindow):
         text = f"{visible_count} / {len(self._cached_vms)} VMs"
         if hidden_platform:
             text += f" ({hidden_platform} platform VM{'s' if hidden_platform != 1 else ''} hidden)"
+        for notice in getattr(self, "_vm_notices", []):
+            text += f" | {notice}"
         self.vm_count_label.setText(text)
 
     def _on_vm_row_selected(self) -> None:

@@ -20,6 +20,7 @@ from vcf_ops_telegraf_helper.adapters.base import IntegrationArtifacts, VCFOpsIn
 from vcf_ops_telegraf_helper.logger import get_logger
 from vcf_ops_telegraf_helper.security.tls import note_unverified_host
 from vcf_ops_telegraf_helper.models.vcf import (
+    APPLIANCE_ADDRESS_FIELDS,
     APPLIANCE_RESOURCE_KINDS,
     classify_platform_vm,
     AgentObjectInfo,
@@ -1193,10 +1194,9 @@ class VCF91OpenTelegrafIntegration(VCFOpsIntegration):
             text = urllib.parse.urlparse(text).hostname or ""
         return text
 
-    def _fetch_appliance_addresses(self) -> Tuple[Dict[str, str], List[str]]:
-        """Return ({address: category}, [categories with no usable objects]) for the appliance nodes Operations knows."""
+    def _fetch_appliance_addresses(self) -> Dict[str, str]:
+        """Return {address: category} from the own-address fields of the appliance nodes Operations knows."""
         addresses: Dict[str, str] = {}
-        missing: List[str] = []
         for adapter_kind, resource_kind, label in APPLIANCE_RESOURCE_KINDS:
             try:
                 nodes = [
@@ -1206,23 +1206,22 @@ class VCF91OpenTelegrafIntegration(VCFOpsIntegration):
                 props = self._fetch_properties([r["identifier"] for r in nodes if r.get("identifier")]) if nodes else {}
             except Exception as exc:
                 logger.warning("Appliance lookup for %s failed: %s", label, exc)
-                nodes, props = [], {}
+                continue
             if not nodes:
-                missing.append(label)
+                logger.info("No %s objects found in VCF Operations", label)
                 continue
             for node in nodes:
-                key = node.get("resourceKey") or {}
-                values = [key.get("name")] + [i.get("value") for i in key.get("resourceIdentifiers") or []]
-                for name, value in (props.get(node.get("identifier")) or {}).items():
-                    if self._looks_like_ip(str(value or "").strip()) or any(
-                        token in str(name).lower() for token in ("hostname", "fqdn")
-                    ):
-                        values.append(value)
-                for value in values:
-                    address = self._normalize_address(value)
-                    if address:
-                        addresses.setdefault(address, label)
-        return addresses, missing
+                fields = [
+                    ((i.get("identifierType") or {}).get("name"), i.get("value"))
+                    for i in (node.get("resourceKey") or {}).get("resourceIdentifiers") or []
+                ]
+                fields += list((props.get(node.get("identifier")) or {}).items())
+                for name, value in fields:
+                    if str(name or "").rsplit("|", 1)[-1].strip().lower() in APPLIANCE_ADDRESS_FIELDS:
+                        address = self._normalize_address(value)
+                        if address:
+                            addresses.setdefault(address, label)
+        return addresses
 
     def list_virtual_machines(self, strict: bool = False) -> List[VirtualMachineResource]:
         """Discover candidate virtual machines from VCF Operations inventory.
@@ -1240,16 +1239,14 @@ class VCF91OpenTelegrafIntegration(VCFOpsIntegration):
             return []
         props = self._fetch_properties([r.get("identifier") for r in raw if r.get("identifier")])
         self.inventory_warning = None
-        appliance_addresses, missing_appliances = self._fetch_appliance_addresses()
-        notices: List[str] = []
+        appliance_addresses = self._fetch_appliance_addresses()
         if not any(
             "config|managedBy|extensionKey" in pr or "config|managedBy|type" in pr for pr in props.values()
         ):
-            notices.append("no VM reports vSphere managedBy metadata, so vCLS and Supervisor VMs cannot be identified")
-        if missing_appliances:
-            notices.append("no appliance objects found for " + ", ".join(missing_appliances))
-        if notices:
-            self.platform_notice = "Platform VM detection unavailable: " + "; ".join(notices)
+            self.platform_notice = (
+                "Platform VM detection unavailable: no VM reports vSphere managedBy metadata, "
+                "so vCLS and Supervisor VMs cannot be identified"
+            )
             logger.warning(self.platform_notice)
         registrations: Optional[Dict[Tuple[str, str], List[Dict[str, Any]]]]
         try:

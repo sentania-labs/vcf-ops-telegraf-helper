@@ -1339,5 +1339,12 @@ def test_main_window_shows_platform_detection_notice(qapp, tmp_path, monkeypatch
     monkeypatch.setattr(
         MockVCFOpsIntegration, "platform_notice", "Platform VM detection unavailable: test notice", raising=False
     )
+    monkeypatch.setattr(MockVCFOpsIntegration, "inventory_warning", "Agent status unavailable: test", raising=False)
     window._fetch_vcf_inventory()
-    assert "Platform VM detection unavailable: test notice" in window.vm_count_label.text()
+    notice, warning = "Platform VM detection unavailable: test notice", "Agent status unavailable: test"
+    assert notice in window.vm_count_label.text() and warning in window.vm_count_label.text()
+
+    window.vm_show_platform_check.setChecked(True)
+    window.vm_search_input.setText("webapp")
+    window.vm_os_filter.setCurrentText("Linux")
+    assert notice in window.vm_count_label.text() and warning in window.vm_count_label.text()
