@@ -20,6 +20,7 @@ from vcf_ops_telegraf_helper.adapters.base import IntegrationArtifacts, VCFOpsIn
 from vcf_ops_telegraf_helper.logger import get_logger
 from vcf_ops_telegraf_helper.security.tls import note_unverified_host
 from vcf_ops_telegraf_helper.models.vcf import (
+    APPLIANCE_RESOURCE_KINDS,
     classify_platform_vm,
     AgentObjectInfo,
     AgentTaskStatus,
@@ -1185,6 +1186,44 @@ class VCF91OpenTelegrafIntegration(VCFOpsIntegration):
             })
         return registrations
 
+    @staticmethod
+    def _normalize_address(value: Any) -> str:
+        text = str(value or "").strip().lower()
+        if "://" in text:
+            text = urllib.parse.urlparse(text).hostname or ""
+        return text
+
+    def _fetch_appliance_addresses(self) -> Tuple[Dict[str, str], List[str]]:
+        """Return ({address: category}, [categories with no usable objects]) for the appliance nodes Operations knows."""
+        addresses: Dict[str, str] = {}
+        missing: List[str] = []
+        for adapter_kind, resource_kind, label in APPLIANCE_RESOURCE_KINDS:
+            try:
+                nodes = [
+                    r for r in self._fetch_paged_resources(True, adapterKind=adapter_kind, resourceKind=resource_kind)
+                    if not self._is_stale(r)
+                ]
+                props = self._fetch_properties([r["identifier"] for r in nodes if r.get("identifier")]) if nodes else {}
+            except Exception as exc:
+                logger.warning("Appliance lookup for %s failed: %s", label, exc)
+                nodes, props = [], {}
+            if not nodes:
+                missing.append(label)
+                continue
+            for node in nodes:
+                key = node.get("resourceKey") or {}
+                values = [key.get("name")] + [i.get("value") for i in key.get("resourceIdentifiers") or []]
+                for name, value in (props.get(node.get("identifier")) or {}).items():
+                    if self._looks_like_ip(str(value or "").strip()) or any(
+                        token in str(name).lower() for token in ("hostname", "fqdn")
+                    ):
+                        values.append(value)
+                for value in values:
+                    address = self._normalize_address(value)
+                    if address:
+                        addresses.setdefault(address, label)
+        return addresses, missing
+
     def list_virtual_machines(self, strict: bool = False) -> List[VirtualMachineResource]:
         """Discover candidate virtual machines from VCF Operations inventory.
 
@@ -1192,6 +1231,7 @@ class VCF91OpenTelegrafIntegration(VCFOpsIntegration):
         hostname, OS, and power state come from VM properties; agent status comes from the
         agent OS objects that carry the VM's vCenter ID and MOR.
         """
+        self.platform_notice = None
         raw = [
             r for r in self._fetch_paged_resources(strict, adapterKind="VMWARE", resourceKind="VirtualMachine")
             if not self._is_stale(r)
@@ -1200,6 +1240,17 @@ class VCF91OpenTelegrafIntegration(VCFOpsIntegration):
             return []
         props = self._fetch_properties([r.get("identifier") for r in raw if r.get("identifier")])
         self.inventory_warning = None
+        appliance_addresses, missing_appliances = self._fetch_appliance_addresses()
+        notices: List[str] = []
+        if not any(
+            "config|managedBy|extensionKey" in pr or "config|managedBy|type" in pr for pr in props.values()
+        ):
+            notices.append("no VM reports vSphere managedBy metadata, so vCLS and Supervisor VMs cannot be identified")
+        if missing_appliances:
+            notices.append("no appliance objects found for " + ", ".join(missing_appliances))
+        if notices:
+            self.platform_notice = "Platform VM detection unavailable: " + "; ".join(notices)
+            logger.warning(self.platform_notice)
         registrations: Optional[Dict[Tuple[str, str], List[Dict[str, Any]]]]
         try:
             registrations = self._fetch_agent_registrations()
@@ -1252,7 +1303,9 @@ class VCF91OpenTelegrafIntegration(VCFOpsIntegration):
                     managed_type=managed_type,
                     platform_kind=classify_platform_vm(
                         pr.get("config|managedBy|extensionKey"), pr.get("config|managedBy|type")
-                    ),
+                    )
+                    or appliance_addresses.get(self._normalize_address(ip_addr))
+                    or appliance_addresses.get(self._normalize_address(hostname)),
                 )
             )
         return vms

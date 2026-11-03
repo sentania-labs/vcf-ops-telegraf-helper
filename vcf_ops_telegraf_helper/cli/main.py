@@ -647,6 +647,12 @@ def run_cmd(
     help="Filter by agent status reported by VCF Operations",
 )
 @click.option("--include-powered-off", is_flag=True, default=False, help="Include powered-off VMs (hidden by default)")
+@click.option(
+    "--include-platform-vms",
+    is_flag=True,
+    default=False,
+    help="Include platform VMs (vCLS, Supervisor control plane, appliance nodes), hidden by default",
+)
 @click.option("--filter", "query_filter", default=None, help="Search filter for VM name, IP, hostname, or MOR")
 def vms_cmd(
     vcf_url: str,
@@ -661,6 +667,7 @@ def vms_cmd(
     cg_filter: Optional[str],
     status_filter: str,
     include_powered_off: bool,
+    include_platform_vms: bool,
     query_filter: Optional[str],
 ) -> None:
     """Query and display virtual machine inventory from VCF Operations."""
@@ -698,12 +705,16 @@ def vms_cmd(
         sys.exit(1)
     if adapter.inventory_warning:
         console.print(f"[bold yellow]Warning:[/bold yellow] {adapter.inventory_warning}")
+    if adapter.platform_notice:
+        console.print(f"[bold yellow]Warning:[/bold yellow] {adapter.platform_notice}")
 
     status_values = {"not-installed": "Not installed", "reporting": "Reporting", "no-data": "No data"}
     filtered = []
     q = (query_filter or "").strip().lower()
     for vm in vms:
         if not include_powered_off and not vm.is_powered_on:
+            continue
+        if not include_platform_vms and vm.is_platform_vm:
             continue
         haystack = (vm.name, vm.ip_address or "", vm.hostname or "", vm.vm_mor or "")
         if q and not any(q in field.lower() for field in haystack):

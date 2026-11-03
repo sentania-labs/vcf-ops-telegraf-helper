@@ -986,8 +986,9 @@ class MainWindow(QMainWindow):
             self._populate_vm_table(self._cached_vms)
             self._filter_vm_table()
             self._reconcile_binding()
-            if adapter.inventory_warning:
-                self.vm_count_label.setText(f"{self.vm_count_label.text()} | {adapter.inventory_warning}")
+            for notice in (adapter.inventory_warning, adapter.platform_notice):
+                if notice:
+                    self.vm_count_label.setText(f"{self.vm_count_label.text()} | {notice}")
             self.logger.info("Retrieved %d VMs from VCF Operations inventory", len(self._cached_vms))
         except Exception as exc:
             self._cached_vms = []

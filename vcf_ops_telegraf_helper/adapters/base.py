@@ -44,6 +44,8 @@ class VCFOpsIntegration(ABC):
 
     # Set by list_virtual_machines when part of the inventory (such as agent status) could not be read
     inventory_warning: Optional[str] = None
+    # Set by list_virtual_machines when platform VM detection could not work (missing metadata or appliance nodes)
+    platform_notice: Optional[str] = None
 
     @abstractmethod
     def validate_connection(self) -> bool:

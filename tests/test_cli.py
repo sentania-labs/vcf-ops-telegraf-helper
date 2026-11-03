@@ -711,6 +711,16 @@ def test_cli_vms_command_listing_and_filtering(wide_console):
     assert "legacy-app01" in res_off.output
     assert "Powered Off" in res_off.output
 
+    # Platform VMs are hidden by default and shown with --include-platform-vms
+    assert "vCLS-4f2a9c1e" not in res.output and "SupervisorControlPlaneVM" not in res.output
+    assert "tkc-workers-7f9d" in res.output and "vcls-migration-tool" in res.output
+    res_platform = runner.invoke(
+        cli,
+        ["vms", "--vcf-url", "https://vcf-ops.local", "--mock-vcf", "--include-platform-vms"],
+    )
+    assert res_platform.exit_code == 0
+    assert "vCLS-4f2a9c1e" in res_platform.output and "SupervisorControlPlaneVM" in res_platform.output
+
     # Agent status filter uses the values reported by VCF Operations
     res_rep = runner.invoke(
         cli,

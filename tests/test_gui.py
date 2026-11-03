@@ -1326,3 +1326,18 @@ def test_update_check_returns_through_gui_timer(qapp, monkeypatch, tmp_path):
     window.start_update_check()
     check.assert_called_once()
     window.close()
+
+
+def test_main_window_shows_platform_detection_notice(qapp, tmp_path, monkeypatch):
+    """When platform detection is unavailable the Select VM screen says so next to the VM count."""
+    from vcf_ops_telegraf_helper.adapters.mock import MockVCFOpsIntegration
+
+    window = _mock_window(qapp, tmp_path, monkeypatch)
+    window._test_vcf_connection()
+    assert "detection unavailable" not in window.vm_count_label.text()
+
+    monkeypatch.setattr(
+        MockVCFOpsIntegration, "platform_notice", "Platform VM detection unavailable: test notice", raising=False
+    )
+    window._fetch_vcf_inventory()
+    assert "Platform VM detection unavailable: test notice" in window.vm_count_label.text()
