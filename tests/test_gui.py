@@ -1350,6 +1350,23 @@ def test_main_window_shows_platform_detection_notice(qapp, tmp_path, monkeypatch
     assert notice in window.vm_count_label.text() and warning in window.vm_count_label.text()
 
 
+def test_main_window_upgrade_state_cleared_when_target_changes(qapp, tmp_path, monkeypatch):
+    """A different target must not inherit the previous host's discovered agent or upgrade banner."""
+    window = _mock_window(qapp, tmp_path, monkeypatch)
+    window.discovered_telegraf_installed = True
+    window.discovered_telegraf_version = "Telegraf 1.32.1"
+    window._default_installation(True)
+    window.ep_version_combo.setCurrentText("Auto-install Official 1.40.2 (1.40 Series)")
+    assert not window.ep_upgrade_banner.isHidden()
+
+    window._on_target_host_changed("other-host")
+
+    assert window.ep_upgrade_banner.isHidden()
+    assert not window.discovered_telegraf_installed
+    window._update_preview()
+    assert "Upgrade existing Telegraf agent" not in window.review_summary_box.toPlainText()
+
+
 def test_main_window_upgrade_banner_and_preview(qapp, tmp_path, monkeypatch):
     """Verify GUI detection of older agent displays upgrade banner and updates Review preview."""
     window = _mock_window(qapp, tmp_path, monkeypatch)

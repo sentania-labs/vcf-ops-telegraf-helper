@@ -614,8 +614,14 @@ class MainWindow(QMainWindow):
             self.vcf_status_label.setStyleSheet("")
         self._refresh_step_gating()
 
+    def _clear_discovered_telegraf(self) -> None:
+        self.discovered_telegraf_installed = False
+        self.discovered_telegraf_version = None
+        self._update_upgrade_banner()
+
     def _invalidate_endpoint_detection(self, *_: Any) -> None:
         self._endpoint_detected = False
+        self._clear_discovered_telegraf()
         if hasattr(self, "ep_status_label"):
             self.ep_status_label.setText("Not detected yet")
             self.ep_status_label.setStyleSheet("")
@@ -1839,6 +1845,7 @@ class MainWindow(QMainWindow):
         self.ep_uninstall_btn.setToolTip("Ops-managed agents are retired through VCF Operations, not uninstalled here.")
         self._installation_choice_explicit = False
         self._default_installation(False)
+        self._clear_discovered_telegraf()
         self.ep_status_label.setText("Connected: Ops-managed agent detected")
         self.ep_status_label.setStyleSheet("color: #2f6feb; font-weight: 600;")
         details = [f"OS: {found['os']}", f"Discovered Hostname: {found['hostname']}",
@@ -1891,6 +1898,7 @@ class MainWindow(QMainWindow):
         self.ep_uninstall_btn.setEnabled(True)
         self._installation_choice_explicit = False
         self._default_installation(False)
+        self._clear_discovered_telegraf()
         self.ep_status_label.setText("Connected: interrupted takeover journaled")
         self.ep_status_label.setStyleSheet("color: #2f6feb; font-weight: 600;")
         self.ep_details_box.setPlainText(
