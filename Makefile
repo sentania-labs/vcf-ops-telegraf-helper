@@ -1,6 +1,6 @@
 PYTHON ?= python3
 
-.PHONY: all lint test check install
+.PHONY: all lint test check install notices
 
 all: check
 
@@ -10,7 +10,10 @@ lint:
 test:
 	$(PYTHON) -m pytest -v tests
 
-check: lint test
+notices:
+	$(PYTHON) scripts/generate_notices.py --verify
+
+check: lint test notices
 
 install:
 	$(PYTHON) -m pip install --user --break-system-packages --no-deps -e .

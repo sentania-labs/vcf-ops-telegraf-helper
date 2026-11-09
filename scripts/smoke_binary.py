@@ -12,7 +12,22 @@ import tempfile
 def smoke(artifact: Path, signed: bool = False) -> None:
     with tempfile.TemporaryDirectory(prefix='telegraf-smoke-') as directory:
         root = Path(directory)
-        if artifact.suffix == '.zip':
+        if artifact.suffix == '.dmg':
+            mount_point = root / 'dmg_mount'
+            mount_point.mkdir()
+            subprocess.run(['hdiutil', 'attach', str(artifact), '-mountpoint', str(mount_point),
+                            '-nobrowse', '-readonly'], check=True)
+            try:
+                app = root / 'VCF Telegraf Helper.app'
+                shutil.copytree(mount_point / 'VCF Telegraf Helper.app', app, symlinks=True)
+                apps_link = mount_point / 'Applications'
+                if not apps_link.is_symlink() or os.readlink(apps_link) != '/Applications':
+                    raise RuntimeError(f"Expected /Applications symlink in DMG, got {apps_link}")
+            finally:
+                subprocess.run(['hdiutil', 'detach', str(mount_point)], check=True)
+            if signed:
+                subprocess.run(['codesign', '--verify', '--strict', str(artifact)], check=True)
+        elif artifact.suffix == '.zip':
             subprocess.run(['ditto', '-x', '-k', str(artifact), str(root)], check=True)
             app = root / 'VCF Telegraf Helper.app'
         elif artifact.suffix == '.app':
@@ -36,13 +51,24 @@ def smoke(artifact: Path, signed: bool = False) -> None:
                 env.pop(key, None)
         else:
             env['QT_QPA_PLATFORM'] = 'offscreen'
-        for args, expected in [(['--help'], 'Usage:'), (['render', '--cpu', '--mem'], 'inputs.cpu'),
-                               (['gui-smoke'], 'GUI smoke passed')]:
+        for args, expected in [(['--help'], 'Usage:'),
+                               (['--licenses'], 'THIRD-PARTY SOFTWARE NOTICES AND LICENSES'),
+                               (['render', '--cpu', '--mem'], 'inputs.cpu')]:
             result = subprocess.run([str(binary), *args], cwd=root, env=env,
                                     capture_output=True, text=True, timeout=120)
             if result.returncode or expected not in result.stdout:
                 raise RuntimeError(f'{args} failed ({result.returncode}): {result.stdout} {result.stderr}')
             print(f'PASS: {args}', flush=True)
+
+        # Run gui-smoke exit check multiple times to ensure clean exit on PySide6 6.12 (#64)
+        for attempt in (1, 2, 3):
+            result = subprocess.run([str(binary), 'gui-smoke'], cwd=root, env=env,
+                                    capture_output=True, text=True, timeout=120)
+            if result.returncode != 0 or 'GUI smoke passed' not in result.stdout:
+                raise RuntimeError(f'gui-smoke attempt {attempt} failed ({result.returncode}): {result.stdout} {result.stderr}')
+            if 'pure virtual method called' in result.stderr or 'pure virtual method called' in result.stdout:
+                raise RuntimeError(f'gui-smoke attempt {attempt} hit pure virtual method called: {result.stderr}')
+            print(f'PASS: [gui-smoke] attempt {attempt}/3', flush=True)
         if sys.platform == 'win32':
             # CREATE_NEW_CONSOLE matches Explorer's separate console launch.
             # Do not redirect streams: that would bypass desktop auto-detection.
@@ -86,6 +112,6 @@ if __name__ == '__main__':
     parser.add_argument('artifact', type=Path)
     parser.add_argument('--signed', action='store_true')
     args = parser.parse_args()
-    if args.artifact.suffix in ('.app', '.zip') and sys.platform != 'darwin':
+    if args.artifact.suffix in ('.app', '.dmg', '.zip') and sys.platform != 'darwin':
         parser.error('macOS app smoke tests require macOS')
     smoke(args.artifact.resolve(), args.signed)

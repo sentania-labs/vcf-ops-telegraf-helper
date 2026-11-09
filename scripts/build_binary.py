@@ -4,10 +4,52 @@ from importlib.metadata import version
 from pathlib import Path
 import plistlib
 import re
+import shutil
 import struct
 import subprocess
 import sys
 import tempfile
+
+from scripts.generate_notices import (
+    collect_bundled_distributions,
+    generate_notices_text,
+    verify_notices,
+)
+
+
+def generate_and_verify_notices() -> Path:
+    """Generate and verify THIRD-PARTY-NOTICES.txt before freezing the binary."""
+    dists = collect_bundled_distributions()
+    text = generate_notices_text(dists)
+    verify_notices(text, dists)
+
+    notices_file = Path("vcf_ops_telegraf_helper/THIRD-PARTY-NOTICES.txt")
+    notices_file.write_text(text, encoding="utf-8")
+    Path("THIRD-PARTY-NOTICES.txt").write_text(text, encoding="utf-8")
+    dist_dir = Path("dist")
+    dist_dir.mkdir(exist_ok=True)
+    (dist_dir / "THIRD-PARTY-NOTICES.txt").write_text(text, encoding="utf-8")
+    return notices_file
+
+
+def package_dmg(app_path: Path, dmg_path: Path, volume_name: str = "VCF Telegraf Helper") -> Path:
+    """Package a .app bundle into a drag-to-Applications .dmg."""
+    dmg_path.parent.mkdir(parents=True, exist_ok=True)
+    if dmg_path.exists():
+        dmg_path.unlink()
+    with tempfile.TemporaryDirectory(prefix="vcf-dmg-") as staging:
+        staging_dir = Path(staging)
+        shutil.copytree(app_path, staging_dir / app_path.name, symlinks=True)
+        (staging_dir / "Applications").symlink_to("/Applications")
+        subprocess.run([
+            "hdiutil", "create",
+            "-volname", volume_name,
+            "-srcfolder", str(staging_dir),
+            "-ov",
+            "-format", "UDZO",
+            str(dmg_path),
+        ], check=True)
+    return dmg_path
 
 
 def mac_icon() -> Path:
@@ -68,7 +110,8 @@ def windows_icon() -> Path:
     return icon
 
 
-def build(platform: str) -> None:
+def build(platform: str, package_dmg_flag: bool = False) -> None:
+    generate_and_verify_notices()
     mac = platform.startswith('macos-')
     name = 'vcf-telegraf-helper' if mac else f'vcf-telegraf-helper-{platform}'
     options = ['--onedir', '--windowed', '--osx-bundle-identifier',
@@ -105,9 +148,14 @@ def build(platform: str) -> None:
         # Refresh PyInstaller's ad-hoc seal after metadata changes. Release CI
         # replaces it with Developer ID signatures on all nested code.
         subprocess.run(['codesign', '--force', '--sign', '-', str(app)], check=True)
+        if package_dmg_flag:
+            package_dmg(app, Path(f'dist/{name}.dmg'))
 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('platform', choices=['linux', 'windows', 'macos-arm64', 'macos-x86_64'])
-    build(parser.parse_args().platform)
+    parser.add_argument('--package-dmg', action='store_true',
+                        help='Package the macOS .app bundle into a .dmg')
+    args = parser.parse_args()
+    build(args.platform, package_dmg_flag=args.package_dmg)

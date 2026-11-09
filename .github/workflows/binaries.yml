@@ -50,6 +50,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install -e '.[gui]' pyinstaller
+          python -c 'import PySide6; print("PySide6 version:", PySide6.__version__)'
 
       - name: Build standalone binary
         run: python scripts/build_binary.py ${{ matrix.name }}
@@ -105,18 +106,28 @@ jobs:
         uses: sentania-labs/.github/.github/actions/macos-notarize@a37e4e029c8ebb8f1810c3dd50aa035acecbe1fc # sentania-labs/.github latest merged 2026-10-07
         with:
           bundle: dist/VCF Telegraf Helper.app
-          output-zip: dist/vcf-telegraf-helper-${{ matrix.name }}.zip
+          output-zip: /tmp/stapled-app.zip
           notary-issuer-id: ${{ secrets.NOTARY_ISSUER_ID }}
           notary-key-id: ${{ secrets.NOTARY_KEY_ID }}
           notary-key-p8: ${{ secrets.NOTARY_KEY_P8 }}
 
-      - name: Package unsigned macOS app
-        if: runner.os == 'macOS' && !inputs.sign
-        run: ditto -c -k --keepParent "dist/VCF Telegraf Helper.app" "dist/vcf-telegraf-helper-${{ matrix.name }}.zip"
+      - name: Package macOS DMG
+        if: runner.os == 'macOS'
+        run: |
+          mkdir -p "dist/dmg_staging"
+          cp -a "dist/VCF Telegraf Helper.app" "dist/dmg_staging/"
+          ln -s /Applications "dist/dmg_staging/Applications"
+          hdiutil create -volname "VCF Telegraf Helper" -srcfolder "dist/dmg_staging" -ov -format UDZO "dist/vcf-telegraf-helper-${{ matrix.name }}.dmg"
+          rm -rf "dist/dmg_staging"
+
+      - name: Sign macOS DMG
+        if: runner.os == 'macOS' && inputs.sign
+        run: |
+          codesign --force --sign "$SIGN_ID" --timestamp "dist/vcf-telegraf-helper-${{ matrix.name }}.dmg"
 
       - name: Verify extracted macOS download
         if: runner.os == 'macOS'
-        run: python scripts/smoke_binary.py "dist/vcf-telegraf-helper-${{ matrix.name }}.zip" ${{ inputs.sign && '--signed' || '' }}
+        run: python scripts/smoke_binary.py "dist/vcf-telegraf-helper-${{ matrix.name }}.dmg" ${{ inputs.sign && '--signed' || '' }}
 
       - name: Upload Mac launch evidence
         if: runner.os == 'macOS'
@@ -138,6 +149,6 @@ jobs:
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: vcf-telegraf-helper-${{ matrix.name }}
-          path: dist/vcf-telegraf-helper-${{ matrix.name }}${{ runner.os == 'macOS' && '.zip' || matrix.ext }}
+          path: dist/vcf-telegraf-helper-${{ matrix.name }}${{ runner.os == 'macOS' && '.dmg' || matrix.ext }}
           if-no-files-found: error
 

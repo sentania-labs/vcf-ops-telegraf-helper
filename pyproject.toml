@@ -7,6 +7,7 @@ name = "vcf-ops-telegraf-helper"
 dynamic = ["version"]
 description = "Local administrator utility for VCF Operations open-source Telegraf onboarding"
 authors = [{ name = "Scott" }]
+license = { text = "MIT" }
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
@@ -24,7 +25,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-gui = ["PySide6>=6.7.2,<6.12"]  # Retain until the #64 layout ownership fix has frozen Windows/macOS exit evidence.
+gui = ["PySide6>=6.7.2"]  # Allow 6.12; layout ownership fix verified across platforms (#64).
 
 [project.scripts]
 vcf-telegraf-helper = "vcf_ops_telegraf_helper.cli.main:cli"
@@ -37,6 +38,7 @@ where = ["."]
 include = ["vcf_ops_telegraf_helper*"]
 
 [tool.setuptools.package-data]
+"vcf_ops_telegraf_helper" = ["THIRD-PARTY-NOTICES.txt"]
 "vcf_ops_telegraf_helper.gui" = ["assets/*.svg"]
 
 [tool.ruff]

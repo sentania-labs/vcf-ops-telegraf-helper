@@ -22,6 +22,21 @@ def test_cli_help_runner():
     assert "Usage:" in result.output
     assert "render" in result.output
     assert "wizard" in result.output
+    assert "--licenses" in result.output
+
+
+def test_cli_licenses_flag():
+    """Verify --licenses outputs third-party notices, source pointers, and exits 0."""
+    runner = CliRunner()
+    result = runner.invoke(cli, ["--licenses"])
+    assert result.exit_code == 0
+    assert "THIRD-PARTY SOFTWARE NOTICES AND LICENSES" in result.output
+    assert "SOURCE CODE AVAILABILITY AND RELINKING INSTRUCTIONS" in result.output
+    assert "GNU LESSER GENERAL PUBLIC LICENSE Version 3" in result.output
+    assert "GNU LESSER GENERAL PUBLIC LICENSE Version 2.1" in result.output
+    assert "https://github.com/sentania-labs/vcf-ops-telegraf-helper" in result.output
+    assert "https://download.qt.io/official_releases/QtForPython/pyside6/" in result.output
+    assert "https://github.com/paramiko/paramiko/" in result.output
 
 
 def test_cli_terminal_no_args_displays_help():

@@ -48,6 +48,7 @@ from PySide6.QtWidgets import (
     QStackedWidget,
     QTableWidget,
     QTableWidgetItem,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -426,6 +427,82 @@ class MainWindow(QMainWindow):
         vbox.addWidget(btn_box)
         dlg.exec()
 
+    def _show_about_dialog(self, initial_tab: int = 0) -> None:
+        """Show the About dialog with product details and Third-Party Licenses view."""
+        from vcf_ops_telegraf_helper.notices import get_third_party_notices
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("About VCF Operations Open Telegraf Helper")
+        dlg.resize(800, 600)
+        vbox = QVBoxLayout(dlg)
+        vbox.setContentsMargins(16, 16, 16, 16)
+        vbox.setSpacing(12)
+
+        tabs = QTabWidget(dlg)
+        vbox.addWidget(tabs, 1)
+
+        # Tab 1: About
+        about_page = QWidget()
+        about_layout = QVBoxLayout(about_page)
+        about_layout.setContentsMargins(16, 16, 16, 16)
+        about_layout.setSpacing(12)
+
+        title_lbl = QLabel(f"VCF Operations Open Telegraf Helper v{__version__}")
+        title_lbl.setProperty("class", "lattice-title")
+        about_layout.addWidget(title_lbl)
+
+        desc_lbl = QLabel(
+            "Local administrator utility for VCF Operations open-source Telegraf onboarding.\n"
+            "Provides guided discovery, validation, and multi-endpoint configuration."
+        )
+        desc_lbl.setWordWrap(True)
+        about_layout.addWidget(desc_lbl)
+
+        info_lbl = QLabel(
+            "<b>Author:</b> Scott<br>"
+            "<b>Copyright:</b> Copyright &copy; 2026 Scott<br>"
+            "<b>License:</b> MIT License<br>"
+            "<b>Repository:</b> <a href='https://github.com/sentania-labs/vcf-ops-telegraf-helper'>"
+            "https://github.com/sentania-labs/vcf-ops-telegraf-helper</a>"
+        )
+        info_lbl.setOpenExternalLinks(True)
+        about_layout.addWidget(info_lbl)
+
+        about_layout.addStretch()
+
+        view_licenses_btn = QPushButton("View Third-Party Licenses & Notices →")
+        view_licenses_btn.clicked.connect(lambda: tabs.setCurrentIndex(1))
+        about_layout.addWidget(view_licenses_btn)
+
+        tabs.addTab(about_page, "About")
+
+        # Tab 2: Licenses (About -> Licenses view)
+        licenses_page = QWidget()
+        licenses_layout = QVBoxLayout(licenses_page)
+        licenses_layout.setContentsMargins(12, 12, 12, 12)
+        licenses_layout.setSpacing(8)
+
+        lic_header = QLabel("Third-Party Notices and Open-Source Licenses:")
+        lic_header.setProperty("class", "lattice-section-label")
+        licenses_layout.addWidget(lic_header)
+
+        lic_edit = QPlainTextEdit(licenses_page)
+        lic_edit.setProperty("class", "code-block")
+        lic_edit.setReadOnly(True)
+        lic_edit.setPlainText(get_third_party_notices())
+        licenses_layout.addWidget(lic_edit, 1)
+
+        tabs.addTab(licenses_page, "Licenses")
+
+        if initial_tab in (0, 1):
+            tabs.setCurrentIndex(initial_tab)
+
+        btn_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        btn_box.rejected.connect(dlg.reject)
+        vbox.addWidget(btn_box)
+
+        dlg.exec()
+
     def _init_ui(self) -> None:
         central = QWidget(self)
         self.setCentralWidget(central)
@@ -467,6 +544,18 @@ class MainWindow(QMainWindow):
         self.theme_btn = QPushButton("Theme: Light")
         self.theme_btn.clicked.connect(self._toggle_theme)
         header_layout.addWidget(self.theme_btn)
+
+        self.about_btn = QPushButton("About")
+        self.about_btn.clicked.connect(lambda: self._show_about_dialog(0))
+        header_layout.addWidget(self.about_btn)
+
+        menubar = self.menuBar()
+        if menubar:
+            help_menu = menubar.addMenu("&Help")
+            about_action = help_menu.addAction("&About VCF Operations Open Telegraf Helper")
+            about_action.triggered.connect(lambda: self._show_about_dialog(0))
+            licenses_action = help_menu.addAction("&Third-Party Licenses")
+            licenses_action.triggered.connect(lambda: self._show_about_dialog(1))
 
         main_layout.addWidget(header)
 
