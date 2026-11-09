@@ -23,10 +23,10 @@ LICENSES_DIR = REPO_ROOT / "scripts" / "licenses"
 
 
 def _read_license_file(filename: str) -> str:
-    path = LICENSES_DIR / filename
-    if path.is_file():
-        return path.read_text(encoding="utf-8").strip()
-    return ""
+    text = (LICENSES_DIR / filename).read_text(encoding="utf-8").strip()
+    if not text:
+        raise ValueError(f"License text file is empty: {filename}")
+    return text
 
 
 # Standard texts
@@ -654,12 +654,7 @@ def main() -> None:
     if args.output:
         outputs.append(args.output)
     else:
-        # Default locations: root, package dir, dist (if exists)
-        outputs.append(REPO_ROOT / "THIRD-PARTY-NOTICES.txt")
         outputs.append(REPO_ROOT / "vcf_ops_telegraf_helper" / "THIRD-PARTY-NOTICES.txt")
-        dist_dir = REPO_ROOT / "dist"
-        if dist_dir.is_dir():
-            outputs.append(dist_dir / "THIRD-PARTY-NOTICES.txt")
 
     for out in outputs:
         out.parent.mkdir(parents=True, exist_ok=True)

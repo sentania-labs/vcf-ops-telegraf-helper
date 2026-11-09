@@ -9,6 +9,8 @@ import subprocess
 import sys
 import tempfile
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 from scripts.generate_notices import (
     collect_bundled_distributions,
     generate_notices_text,
@@ -24,7 +26,6 @@ def generate_and_verify_notices(platform: str) -> Path:
 
     notices_file = Path("vcf_ops_telegraf_helper/THIRD-PARTY-NOTICES.txt")
     notices_file.write_text(text, encoding="utf-8")
-    Path("THIRD-PARTY-NOTICES.txt").write_text(text, encoding="utf-8")
     dist_dir = Path("dist")
     dist_dir.mkdir(exist_ok=True)
     (dist_dir / f"THIRD-PARTY-NOTICES-{platform}.txt").write_text(text, encoding="utf-8")
