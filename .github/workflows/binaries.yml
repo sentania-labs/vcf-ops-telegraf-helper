@@ -145,6 +145,13 @@ jobs:
           path: dist/windows-launch.*
           if-no-files-found: error
 
+      - name: Upload build-time third-party notices
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: notices-${{ matrix.name }}
+          path: dist/THIRD-PARTY-NOTICES-${{ matrix.name }}.txt
+          if-no-files-found: error
+
       - name: Upload binary artifact
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:

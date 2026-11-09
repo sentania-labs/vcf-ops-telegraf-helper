@@ -631,7 +631,7 @@ def verify_notices(notices_text: str, dists: Dict[str, md.Distribution]) -> None
 def main() -> None:
     parser = argparse.ArgumentParser(description="Generate and verify THIRD-PARTY-NOTICES.txt")
     parser.add_argument("--output", "-o", type=Path, default=None, help="Output file path")
-    parser.add_argument("--verify", action="store_true", help="Run verification check on output")
+    parser.add_argument("--verify", action="store_true", help="Verify only; do not write any files")
     args = parser.parse_args()
 
     dists = collect_bundled_distributions()
@@ -646,6 +646,9 @@ def main() -> None:
     except Exception as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         sys.exit(1)
+
+    if args.verify:
+        return
 
     outputs = []
     if args.output:

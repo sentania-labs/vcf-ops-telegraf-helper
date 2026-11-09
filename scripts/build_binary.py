@@ -17,7 +17,7 @@ from scripts.generate_notices import (
 )
 
 
-def generate_and_verify_notices() -> Path:
+def generate_and_verify_notices(platform: str) -> Path:
     """Generate and verify THIRD-PARTY-NOTICES.txt before freezing the binary."""
     dists = collect_bundled_distributions()
     text = generate_notices_text(dists)
@@ -28,7 +28,7 @@ def generate_and_verify_notices() -> Path:
     Path("THIRD-PARTY-NOTICES.txt").write_text(text, encoding="utf-8")
     dist_dir = Path("dist")
     dist_dir.mkdir(exist_ok=True)
-    (dist_dir / "THIRD-PARTY-NOTICES.txt").write_text(text, encoding="utf-8")
+    (dist_dir / f"THIRD-PARTY-NOTICES-{platform}.txt").write_text(text, encoding="utf-8")
     return notices_file
 
 
@@ -111,7 +111,7 @@ def windows_icon() -> Path:
 
 
 def build(platform: str, package_dmg_flag: bool = False) -> None:
-    generate_and_verify_notices()
+    generate_and_verify_notices(platform)
     mac = platform.startswith('macos-')
     name = 'vcf-telegraf-helper' if mac else f'vcf-telegraf-helper-{platform}'
     options = ['--onedir', '--windowed', '--osx-bundle-identifier',
