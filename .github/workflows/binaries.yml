@@ -120,10 +120,59 @@ jobs:
           hdiutil create -volname "VCF Telegraf Helper" -srcfolder "dist/dmg_staging" -ov -format UDZO "dist/vcf-telegraf-helper-${{ matrix.name }}.dmg"
           rm -rf "dist/dmg_staging"
 
+      - name: Import signing certificate for the DMG (macOS)
+        if: runner.os == 'macOS' && inputs.sign
+        env:
+          MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
+          MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+        run: |
+          set -euo pipefail
+          DMG_KEYCHAIN="$RUNNER_TEMP/dmg-signing.keychain-db"
+          DMG_KEYCHAIN_PW="$(/usr/bin/openssl rand -base64 24)"
+          echo "DMG_KEYCHAIN=$DMG_KEYCHAIN" >> "$GITHUB_ENV"
+          security delete-keychain "$DMG_KEYCHAIN" 2>/dev/null || true
+          security create-keychain -p "$DMG_KEYCHAIN_PW" "$DMG_KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$DMG_KEYCHAIN"
+          security unlock-keychain -p "$DMG_KEYCHAIN_PW" "$DMG_KEYCHAIN"
+          printf '%s' "$MACOS_CERT_P12" | base64 --decode > "$RUNNER_TEMP/dmg-cert.p12"
+          security import "$RUNNER_TEMP/dmg-cert.p12" -k "$DMG_KEYCHAIN" -P "$MACOS_CERT_PASSWORD" -T /usr/bin/codesign
+          rm -f "$RUNNER_TEMP/dmg-cert.p12"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$DMG_KEYCHAIN_PW" "$DMG_KEYCHAIN" > /dev/null
+          identities="$(security find-identity -v -p codesigning "$DMG_KEYCHAIN" | grep 'Developer ID Application' || true)"
+          if [ "$(printf '%s\n' "$identities" | grep -c .)" != "1" ]; then
+            echo "::error::expected exactly one Developer ID Application identity for the DMG"
+            exit 1
+          fi
+          echo "DMG_SIGN_ID=$(printf '%s\n' "$identities" | awk '{print $2}')" >> "$GITHUB_ENV"
+
       - name: Sign macOS DMG
         if: runner.os == 'macOS' && inputs.sign
         run: |
-          codesign --force --sign "$SIGN_ID" --timestamp "dist/vcf-telegraf-helper-${{ matrix.name }}.dmg"
+          codesign --force --sign "$DMG_SIGN_ID" --keychain "$DMG_KEYCHAIN" --timestamp "dist/vcf-telegraf-helper-${{ matrix.name }}.dmg"
+          codesign --verify --strict --verbose=2 "dist/vcf-telegraf-helper-${{ matrix.name }}.dmg"
+
+      - name: Notarize and staple macOS DMG
+        if: runner.os == 'macOS' && inputs.sign
+        env:
+          NOTARY_ISSUER_ID: ${{ secrets.NOTARY_ISSUER_ID }}
+          NOTARY_KEY_ID: ${{ secrets.NOTARY_KEY_ID }}
+          NOTARY_KEY_P8: ${{ secrets.NOTARY_KEY_P8 }}
+        run: |
+          set -euo pipefail
+          DMG="dist/vcf-telegraf-helper-${{ matrix.name }}.dmg"
+          printf '%s' "$NOTARY_KEY_P8" | base64 --decode > "$RUNNER_TEMP/dmg-notary.p8"
+          xcrun notarytool submit "$DMG" --key "$RUNNER_TEMP/dmg-notary.p8" --key-id "$NOTARY_KEY_ID" \
+            --issuer "$NOTARY_ISSUER_ID" --wait --timeout 2h --output-format json > "$RUNNER_TEMP/dmg-notary.json"
+          cat "$RUNNER_TEMP/dmg-notary.json"
+          python3 -c "import json,sys; d=json.load(open(sys.argv[1])); sys.exit(0 if d.get('status')=='Accepted' else 1)" "$RUNNER_TEMP/dmg-notary.json"
+          xcrun stapler staple "$DMG"
+          xcrun stapler validate "$DMG"
+
+      - name: Remove the DMG signing keychain and notary key (macOS)
+        if: always() && runner.os == 'macOS' && inputs.sign
+        run: |
+          security delete-keychain "${DMG_KEYCHAIN:-$RUNNER_TEMP/dmg-signing.keychain-db}" 2>/dev/null || true
+          rm -f "$RUNNER_TEMP/dmg-cert.p12" "$RUNNER_TEMP/dmg-notary.p8" "$RUNNER_TEMP/dmg-notary.json" 2>/dev/null || true
 
       - name: Verify extracted macOS download
         if: runner.os == 'macOS'

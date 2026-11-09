@@ -71,15 +71,17 @@ def test_main_window_theme_toggle(qapp, tmp_path):
 
 
 def test_main_window_about_and_licenses_dialog(qapp, tmp_path):
-    """Verify About dialog renders product info, Licenses tab, and view switching."""
+    """Help -> About is the single entry point; its Licenses tab shows the embedded notices."""
     from unittest.mock import patch
-    from PySide6.QtWidgets import QDialog, QTabWidget, QPlainTextEdit
+    from PySide6.QtWidgets import QDialog, QMenu, QTabWidget, QPlainTextEdit
     state_file = tmp_path / "state.json"
     store = StateStore(state_file=state_file)
     window = MainWindow(state_store=store)
 
-    assert hasattr(window, "about_btn")
-    assert window.about_btn.text() == "About"
+    assert not hasattr(window, "about_btn")
+    help_menu = next(a.menu() for a in window.menuBar().actions() if a.menu() and a.text() == "&Help")
+    assert isinstance(help_menu, QMenu)
+    assert len(help_menu.actions()) == 1
 
     dialog_instances = []
 
@@ -88,7 +90,7 @@ def test_main_window_about_and_licenses_dialog(qapp, tmp_path):
         return QDialog.DialogCode.Accepted
 
     with patch.object(QDialog, "exec", mock_exec):
-        window._show_about_dialog(0)
+        help_menu.actions()[0].trigger()
         assert len(dialog_instances) == 1
         dlg = dialog_instances[0]
         tabs = dlg.findChild(QTabWidget)
@@ -104,12 +106,6 @@ def test_main_window_about_and_licenses_dialog(qapp, tmp_path):
         assert "THIRD-PARTY SOFTWARE NOTICES AND LICENSES" in edit.toPlainText()
         assert "SOURCE CODE AVAILABILITY AND RELINKING INSTRUCTIONS" in edit.toPlainText()
         assert "GNU LESSER GENERAL PUBLIC LICENSE Version 3" in edit.toPlainText()
-
-        window._show_about_dialog(1)
-        assert len(dialog_instances) == 2
-        dlg2 = dialog_instances[1]
-        tabs2 = dlg2.findChild(QTabWidget)
-        assert tabs2.currentIndex() == 1
 
 
 def test_main_window_endpoint_detection_linux(qapp, tmp_path):

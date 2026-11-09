@@ -39,6 +39,14 @@ def test_cli_licenses_flag():
     assert "https://github.com/paramiko/paramiko/" in result.output
 
 
+def test_cli_licenses_fails_when_notices_missing(tmp_path, monkeypatch):
+    """A build without the notices file must fail --licenses, not print a placeholder and exit 0."""
+    monkeypatch.setattr("vcf_ops_telegraf_helper.notices.files", lambda package: tmp_path)
+    result = CliRunner().invoke(cli, ["--licenses"])
+    assert result.exit_code != 0
+    assert isinstance(result.exception, FileNotFoundError)
+
+
 def test_cli_terminal_no_args_displays_help():
     """Verify standard terminal invocation without subcommands shows banner and help."""
     runner = CliRunner()

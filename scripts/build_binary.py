@@ -4,7 +4,6 @@ from importlib.metadata import version
 from pathlib import Path
 import plistlib
 import re
-import shutil
 import struct
 import subprocess
 import sys
@@ -30,26 +29,6 @@ def generate_and_verify_notices(platform: str) -> Path:
     dist_dir.mkdir(exist_ok=True)
     (dist_dir / f"THIRD-PARTY-NOTICES-{platform}.txt").write_text(text, encoding="utf-8")
     return notices_file
-
-
-def package_dmg(app_path: Path, dmg_path: Path, volume_name: str = "VCF Telegraf Helper") -> Path:
-    """Package a .app bundle into a drag-to-Applications .dmg."""
-    dmg_path.parent.mkdir(parents=True, exist_ok=True)
-    if dmg_path.exists():
-        dmg_path.unlink()
-    with tempfile.TemporaryDirectory(prefix="vcf-dmg-") as staging:
-        staging_dir = Path(staging)
-        shutil.copytree(app_path, staging_dir / app_path.name, symlinks=True)
-        (staging_dir / "Applications").symlink_to("/Applications")
-        subprocess.run([
-            "hdiutil", "create",
-            "-volname", volume_name,
-            "-srcfolder", str(staging_dir),
-            "-ov",
-            "-format", "UDZO",
-            str(dmg_path),
-        ], check=True)
-    return dmg_path
 
 
 def mac_icon() -> Path:
@@ -110,7 +89,7 @@ def windows_icon() -> Path:
     return icon
 
 
-def build(platform: str, package_dmg_flag: bool = False) -> None:
+def build(platform: str) -> None:
     generate_and_verify_notices(platform)
     mac = platform.startswith('macos-')
     name = 'vcf-telegraf-helper' if mac else f'vcf-telegraf-helper-{platform}'
@@ -148,14 +127,10 @@ def build(platform: str, package_dmg_flag: bool = False) -> None:
         # Refresh PyInstaller's ad-hoc seal after metadata changes. Release CI
         # replaces it with Developer ID signatures on all nested code.
         subprocess.run(['codesign', '--force', '--sign', '-', str(app)], check=True)
-        if package_dmg_flag:
-            package_dmg(app, Path(f'dist/{name}.dmg'))
 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('platform', choices=['linux', 'windows', 'macos-arm64', 'macos-x86_64'])
-    parser.add_argument('--package-dmg', action='store_true',
-                        help='Package the macOS .app bundle into a .dmg')
     args = parser.parse_args()
-    build(args.platform, package_dmg_flag=args.package_dmg)
+    build(args.platform)

@@ -427,7 +427,7 @@ class MainWindow(QMainWindow):
         vbox.addWidget(btn_box)
         dlg.exec()
 
-    def _show_about_dialog(self, initial_tab: int = 0) -> None:
+    def _show_about_dialog(self) -> None:
         """Show the About dialog with product details and Third-Party Licenses view."""
         from vcf_ops_telegraf_helper.notices import get_third_party_notices
 
@@ -470,10 +470,6 @@ class MainWindow(QMainWindow):
 
         about_layout.addStretch()
 
-        view_licenses_btn = QPushButton("View Third-Party Licenses & Notices →")
-        view_licenses_btn.clicked.connect(lambda: tabs.setCurrentIndex(1))
-        about_layout.addWidget(view_licenses_btn)
-
         tabs.addTab(about_page, "About")
 
         # Tab 2: Licenses (About -> Licenses view)
@@ -493,9 +489,6 @@ class MainWindow(QMainWindow):
         licenses_layout.addWidget(lic_edit, 1)
 
         tabs.addTab(licenses_page, "Licenses")
-
-        if initial_tab in (0, 1):
-            tabs.setCurrentIndex(initial_tab)
 
         btn_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
         btn_box.rejected.connect(dlg.reject)
@@ -545,17 +538,11 @@ class MainWindow(QMainWindow):
         self.theme_btn.clicked.connect(self._toggle_theme)
         header_layout.addWidget(self.theme_btn)
 
-        self.about_btn = QPushButton("About")
-        self.about_btn.clicked.connect(lambda: self._show_about_dialog(0))
-        header_layout.addWidget(self.about_btn)
-
         menubar = self.menuBar()
         if menubar:
             help_menu = menubar.addMenu("&Help")
             about_action = help_menu.addAction("&About VCF Operations Open Telegraf Helper")
-            about_action.triggered.connect(lambda: self._show_about_dialog(0))
-            licenses_action = help_menu.addAction("&Third-Party Licenses")
-            licenses_action.triggered.connect(lambda: self._show_about_dialog(1))
+            about_action.triggered.connect(lambda: self._show_about_dialog())
 
         main_layout.addWidget(header)
 

@@ -27,6 +27,7 @@ def smoke(artifact: Path, signed: bool = False) -> None:
                 subprocess.run(['hdiutil', 'detach', str(mount_point)], check=True)
             if signed:
                 subprocess.run(['codesign', '--verify', '--strict', str(artifact)], check=True)
+                subprocess.run(['xcrun', 'stapler', 'validate', str(artifact)], check=True)
         elif artifact.suffix == '.zip':
             subprocess.run(['ditto', '-x', '-k', str(artifact), str(root)], check=True)
             app = root / 'VCF Telegraf Helper.app'
