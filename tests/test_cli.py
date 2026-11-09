@@ -39,6 +39,15 @@ def test_cli_licenses_flag():
     assert "https://github.com/paramiko/paramiko/" in result.output
 
 
+def test_cli_licenses_writes_non_cp1252_text_as_utf8(tmp_path, monkeypatch):
+    """Redirected stdout must carry notices verbatim as UTF-8 even for characters outside cp1252."""
+    (tmp_path / "THIRD-PARTY-NOTICES.txt").write_text("Copyright \u00a9 \u5f20\u4f1f \u2192 \u03a9\n", encoding="utf-8")
+    monkeypatch.setattr("vcf_ops_telegraf_helper.notices.files", lambda package: tmp_path)
+    result = CliRunner().invoke(cli, ["--licenses"])
+    assert result.exit_code == 0
+    assert result.stdout_bytes == "Copyright \u00a9 \u5f20\u4f1f \u2192 \u03a9\n\n".encode("utf-8")
+
+
 def test_cli_licenses_fails_when_notices_missing(tmp_path, monkeypatch):
     """A build without the notices file must fail --licenses, not print a placeholder and exit 0."""
     monkeypatch.setattr("vcf_ops_telegraf_helper.notices.files", lambda package: tmp_path)

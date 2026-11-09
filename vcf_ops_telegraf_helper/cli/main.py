@@ -85,7 +85,9 @@ def _show_licenses(ctx: click.Context, param: click.Parameter, value: bool) -> N
         return
     from vcf_ops_telegraf_helper.notices import get_third_party_notices
 
-    click.echo(get_third_party_notices())
+    stream = click.get_binary_stream("stdout")
+    stream.write((get_third_party_notices() + "\n").encode("utf-8"))
+    stream.flush()
     ctx.exit(0)
 
 
