@@ -70,6 +70,44 @@ def test_main_window_theme_toggle(qapp, tmp_path):
     assert window.current_theme == "dark"
 
 
+def test_main_window_about_and_licenses_dialog(qapp, tmp_path):
+    """Help -> About is the single entry point; its Licenses tab shows the embedded notices."""
+    from unittest.mock import patch
+    from PySide6.QtWidgets import QDialog, QMenu, QTabWidget, QPlainTextEdit
+    state_file = tmp_path / "state.json"
+    store = StateStore(state_file=state_file)
+    window = MainWindow(state_store=store)
+
+    assert not hasattr(window, "about_btn")
+    help_menu = next(a.menu() for a in window.menuBar().actions() if a.menu() and a.text() == "&Help")
+    assert isinstance(help_menu, QMenu)
+    assert len(help_menu.actions()) == 1
+
+    dialog_instances = []
+
+    def mock_exec(self):
+        dialog_instances.append(self)
+        return QDialog.DialogCode.Accepted
+
+    with patch.object(QDialog, "exec", mock_exec):
+        help_menu.actions()[0].trigger()
+        assert len(dialog_instances) == 1
+        dlg = dialog_instances[0]
+        tabs = dlg.findChild(QTabWidget)
+        assert tabs is not None
+        assert tabs.count() == 2
+        assert tabs.tabText(0) == "About"
+        assert tabs.tabText(1) == "Licenses"
+        assert tabs.currentIndex() == 0
+
+        edit = dlg.findChild(QPlainTextEdit)
+        assert edit is not None
+        assert edit.isReadOnly()
+        assert "THIRD-PARTY SOFTWARE NOTICES AND LICENSES" in edit.toPlainText()
+        assert "SOURCE CODE AVAILABILITY AND RELINKING INSTRUCTIONS" in edit.toPlainText()
+        assert "GNU LESSER GENERAL PUBLIC LICENSE Version 3" in edit.toPlainText()
+
+
 def test_main_window_endpoint_detection_linux(qapp, tmp_path):
     """Verify Linux endpoint detection updates UI state with discovered details."""
     from unittest.mock import MagicMock

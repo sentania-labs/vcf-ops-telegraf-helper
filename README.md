@@ -20,11 +20,11 @@ This helper compresses those manual steps into a fast, guided, transparent, and 
 | Your desktop | Download | Launch |
 | --- | --- | --- |
 | Windows | [Windows app (.exe)](https://github.com/sentania-labs/vcf-ops-telegraf-helper/releases/latest/download/vcf-telegraf-helper-windows.exe) | Double-click the executable. |
-| Mac, Apple Silicon | [Apple Silicon app (.zip)](https://github.com/sentania-labs/vcf-ops-telegraf-helper/releases/latest/download/vcf-telegraf-helper-macos-arm64.zip) | Extract the ZIP, move **VCF Telegraf Helper.app** to **Applications**, then double-click the app. |
+| Mac, Apple Silicon | [Apple Silicon app (.dmg)](https://github.com/sentania-labs/vcf-ops-telegraf-helper/releases/latest/download/vcf-telegraf-helper-macos-arm64.dmg) | Open the DMG, drag **VCF Telegraf Helper.app** to **Applications**, then double-click the app. |
 | Mac, Intel | *Not built for now* | Intel Mac users can install the Python wheel: `pip install 'vcf-ops-telegraf-helper[gui]'` |
 | Linux desktop | [Linux executable](https://github.com/sentania-labs/vcf-ops-telegraf-helper/releases/latest/download/vcf-telegraf-helper-linux) | Mark the file executable, then run it with `gui` to open the app. |
 
-On a Mac, check **Apple menu > About This Mac** if you are unsure which download to choose. Keep the whole app together when moving it. The Mac ZIP/app instructions apply from v0.7.5 onward; older releases contain bare executables.
+On a Mac, check **Apple menu > About This Mac** if you are unsure which download to choose. Keep the whole app together when moving it. The Mac DMG instructions apply from v0.8.8 onward; older releases contain zipped apps or bare executables.
 
 Windows releases are Authenticode signed. Mac apps are Developer ID signed, notarized, and stapled. Windows SmartScreen may still show an unrecognized-app prompt while reputation builds, and macOS may ask you to confirm opening a downloaded app. Your organization's application-control policies still apply. PR artifacts are unsigned development builds.
 
@@ -60,7 +60,7 @@ Each release includes `SHA256SUMS`. Download it alongside your chosen asset and 
 shasum -a 256 -c SHA256SUMS --ignore-missing
 ```
 
-Confirm that your selected ZIP reports `OK`. On Linux, use `sha256sum --check SHA256SUMS --ignore-missing`. On Windows, use `Get-FileHash .\vcf-telegraf-helper-windows.exe -Algorithm SHA256` and compare it with the matching entry in `SHA256SUMS`.
+Confirm that your selected download reports `OK`. On Linux, use `sha256sum --check SHA256SUMS --ignore-missing`. On Windows, use `Get-FileHash .\vcf-telegraf-helper-windows.exe -Algorithm SHA256` and compare it with the matching entry in `SHA256SUMS`.
 
 Uploaded release assets carry GitHub build provenance attestations from v0.7.5 onward. This covers binaries, Python packages, and `SHA256SUMS`; GitHub's automatically generated “Source code” archives are not covered. With GitHub CLI installed, verify an uploaded asset came from this repository's build:
 
@@ -147,4 +147,4 @@ On managed Windows, the pip-generated launcher is unsigned and may be blocked by
 
 ## License
 
-Apache-2.0
+MIT; see [LICENSE](LICENSE). The app bundles third-party open-source components (including PySide6/Qt under LGPLv3 and paramiko under LGPL-2.1). Their notices and license texts are built into the app: open **About > Licenses** in the GUI or run `vcf-telegraf-helper --licenses`. Each release also attaches a `THIRD-PARTY-NOTICES-<platform>.txt` file.

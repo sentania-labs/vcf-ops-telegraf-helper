@@ -9,6 +9,28 @@ import subprocess
 import sys
 import tempfile
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from scripts.generate_notices import (
+    collect_bundled_distributions,
+    generate_notices_text,
+    verify_notices,
+)
+
+
+def generate_and_verify_notices(platform: str) -> Path:
+    """Generate and verify THIRD-PARTY-NOTICES.txt before freezing the binary."""
+    dists = collect_bundled_distributions()
+    text = generate_notices_text(dists)
+    verify_notices(text, dists)
+
+    notices_file = Path("vcf_ops_telegraf_helper/THIRD-PARTY-NOTICES.txt")
+    notices_file.write_text(text, encoding="utf-8")
+    dist_dir = Path("dist")
+    dist_dir.mkdir(exist_ok=True)
+    (dist_dir / f"THIRD-PARTY-NOTICES-{platform}.txt").write_text(text, encoding="utf-8")
+    return notices_file
+
 
 def mac_icon() -> Path:
     """Render the product's vector icon at native Retina icon sizes."""
@@ -69,6 +91,7 @@ def windows_icon() -> Path:
 
 
 def build(platform: str) -> None:
+    generate_and_verify_notices(platform)
     mac = platform.startswith('macos-')
     name = 'vcf-telegraf-helper' if mac else f'vcf-telegraf-helper-{platform}'
     options = ['--onedir', '--windowed', '--osx-bundle-identifier',
@@ -110,4 +133,5 @@ def build(platform: str) -> None:
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('platform', choices=['linux', 'windows', 'macos-arm64', 'macos-x86_64'])
-    build(parser.parse_args().platform)
+    args = parser.parse_args()
+    build(args.platform)

@@ -25,10 +25,11 @@ This guide covers local development, testing, and linting for VCF Operations Ope
    make lint
    ```
 
-4. Run all checks (matching the standard CI pipeline):
+4. Run all checks (lint, tests, and third-party notices verification):
    ```bash
    make check
    ```
+   `make notices` runs `scripts/generate_notices.py --verify`, which checks that every bundled dependency has license text; install the GUI extra (`pip install -e '.[gui]'`) first. Run `python scripts/generate_notices.py` to regenerate `vcf_ops_telegraf_helper/THIRD-PARTY-NOTICES.txt`.
 
 ## Running the Utility Locally
 

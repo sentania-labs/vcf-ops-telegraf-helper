@@ -79,8 +79,28 @@ def _is_windows_double_click() -> bool:
         return False
 
 
+def _show_licenses(ctx: click.Context, param: click.Parameter, value: bool) -> None:
+    """Print embedded third-party notices and open-source licenses and exit."""
+    if not value or ctx.resilient_parsing:
+        return
+    from vcf_ops_telegraf_helper.notices import get_third_party_notices
+
+    stream = click.get_binary_stream("stdout")
+    stream.write((get_third_party_notices() + "\n").encode("utf-8"))
+    stream.flush()
+    ctx.exit(0)
+
+
 @click.group(invoke_without_command=True)
 @click.version_option(__version__, "--version", "-v", prog_name="vcf-ops-telegraf-helper")
+@click.option(
+    "--licenses",
+    is_flag=True,
+    is_eager=True,
+    expose_value=False,
+    callback=_show_licenses,
+    help="Show open-source third-party notices and licenses.",
+)
 @click.pass_context
 def cli(ctx: click.Context) -> None:
     """VCF Operations Open Telegraf Helper: Local onboarding utility."""
