@@ -60,7 +60,7 @@ Each release includes `SHA256SUMS`. Download it alongside your chosen asset and 
 shasum -a 256 -c SHA256SUMS --ignore-missing
 ```
 
-Confirm that your selected ZIP reports `OK`. On Linux, use `sha256sum --check SHA256SUMS --ignore-missing`. On Windows, use `Get-FileHash .\vcf-telegraf-helper-windows.exe -Algorithm SHA256` and compare it with the matching entry in `SHA256SUMS`.
+Confirm that your selected download reports `OK`. On Linux, use `sha256sum --check SHA256SUMS --ignore-missing`. On Windows, use `Get-FileHash .\vcf-telegraf-helper-windows.exe -Algorithm SHA256` and compare it with the matching entry in `SHA256SUMS`.
 
 Uploaded release assets carry GitHub build provenance attestations from v0.7.5 onward. This covers binaries, Python packages, and `SHA256SUMS`; GitHub's automatically generated “Source code” archives are not covered. With GitHub CLI installed, verify an uploaded asset came from this repository's build:
 
@@ -147,4 +147,4 @@ On managed Windows, the pip-generated launcher is unsigned and may be blocked by
 
 ## License
 
-Apache-2.0
+MIT; see [LICENSE](LICENSE). The app bundles third-party open-source components (including PySide6/Qt under LGPLv3 and paramiko under LGPL-2.1). Their notices and license texts are built into the app: open **About > Licenses** in the GUI or run `vcf-telegraf-helper --licenses`. Each release also attaches a `THIRD-PARTY-NOTICES-<platform>.txt` file.
