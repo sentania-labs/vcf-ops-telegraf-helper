@@ -398,6 +398,9 @@ def get_distribution_license_text(pkg_name: str, dist: md.Distribution) -> Tuple
     """Return (license_type, full_license_text) for a distribution."""
     norm = pkg_name.lower().replace("-", "_").replace(".", "_")
 
+    if norm == "vcf_ops_telegraf_helper":
+        return ("MIT", (REPO_ROOT / "LICENSE").read_text(encoding="utf-8").strip())
+
     # Special handling for PySide6 / Qt suite
     if norm.startswith("pyside6") or norm == "shiboken6":
         return (
@@ -428,8 +431,7 @@ Copyright (C) Jeff Forcier, Robey Pointer, and others.
     texts: List[str] = []
     if dist.files:
         for f in dist.files:
-            upper = str(f).upper()
-            if any(k in upper for k in ["LICENSE", "COPYING", "NOTICE"]):
+            if Path(str(f)).name.upper().startswith(("LICENSE", "COPYING", "NOTICE")):
                 try:
                     path = dist.locate_file(f)
                     if path.is_file():
@@ -448,12 +450,6 @@ Copyright (C) Jeff Forcier, Robey Pointer, and others.
         lic_name, copyright_header, full_text = CANONICAL_FALLBACKS[norm]
         combined = f"{copyright_header}\n\n{full_text}" if copyright_header else full_text
         return (lic_name, combined)
-
-    # Check project itself
-    if norm == "vcf_ops_telegraf_helper":
-        lic_path = REPO_ROOT / "LICENSE"
-        if lic_path.is_file():
-            return ("MIT", lic_path.read_text(encoding="utf-8").strip())
 
     license_meta = dist.metadata.get("License") or dist.metadata.get("License-Expression") or "Unknown"
     return (license_meta, "")
