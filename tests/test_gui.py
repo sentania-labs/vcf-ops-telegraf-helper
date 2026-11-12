@@ -304,6 +304,17 @@ def test_tick_all_keeps_machines_ticked_under_another_filter(session):
     assert "1 machine ticked" in d.text("selection-count")
 
 
+def test_selection_bar_button_is_not_clipped_when_a_ticked_machine_is_hidden(session):
+    """The blue button must show its full label even when the bar also names hidden ticked machines."""
+    d, _window, _world = session.start()
+    d.click("tick-web-prod-01")
+    d.click("chip-none")
+    go = d.find("selection-setup")
+    assert go.width() >= go.sizeHint().width(), "the label would be cut off"
+    note = d.find("selection-count")
+    assert note.width() >= note.sizeHint().width(), "the count would be cut off"
+
+
 def test_machine_page_shows_status_actions_and_history(session):
     d, _window, _world = session.start()
     d.click("open-web-prod-01")

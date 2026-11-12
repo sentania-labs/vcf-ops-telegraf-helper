@@ -307,13 +307,18 @@ def machines_page(win) -> Page:
             what = plural(count, "machine")
             on_screen = {m.id for m in visible_machines(win)}
             hidden = sum(1 for i in win.selection if i not in on_screen)
-            aside = f", {hidden} not shown with this filter" if hidden else ""
+            aside = f", {hidden} not shown" if hidden else ""
+            counted = label(f"<b>{what} ticked</b>{aside}", "note", wrap=False, name="selection-count")
+            if hidden:
+                counted.setToolTip(f"{plural(hidden, 'ticked machine is', 'ticked machines are')} hidden by the current filter or search. Still ticked.")
+            go = button(f"Set up monitoring on {what} →", lambda: win.start_flow("setup", list(win.selection)),
+                        "primary big", name="selection-setup")
+            go.setMinimumWidth(go.sizeHint().width())
             page.footer(
-                label(f"<b>{what} ticked</b>{aside}", "note", wrap=False, name="selection-count"),
+                counted,
                 link("Untick all", lambda: (win.selection.clear(), redraw()), name="selection-clear"), stretch,
                 button("Test connection only", lambda: win.start_flow("test", list(win.selection)), name="selection-test"),
-                button(f"Set up monitoring on {what} →", lambda: win.start_flow("setup", list(win.selection)),
-                       "primary big", name="selection-setup"),
+                go,
             )
         else:
             page.footer(label("To set up or test several machines together, tick them. The buttons for both appear here.",
