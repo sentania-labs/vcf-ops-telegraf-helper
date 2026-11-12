@@ -135,9 +135,10 @@ jobs:
           security set-keychain-settings -lut 21600 "$DMG_KEYCHAIN"
           security unlock-keychain -p "$DMG_KEYCHAIN_PW" "$DMG_KEYCHAIN"
           printf '%s' "$MACOS_CERT_P12" | base64 --decode > "$RUNNER_TEMP/dmg-cert.p12"
-          security import "$RUNNER_TEMP/dmg-cert.p12" -k "$DMG_KEYCHAIN" -P "$MACOS_CERT_PASSWORD" -T /usr/bin/codesign
+          security import "$RUNNER_TEMP/dmg-cert.p12" -k "$DMG_KEYCHAIN" -P "$MACOS_CERT_PASSWORD" -T /usr/bin/codesign -T /usr/bin/security
           rm -f "$RUNNER_TEMP/dmg-cert.p12"
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$DMG_KEYCHAIN_PW" "$DMG_KEYCHAIN" > /dev/null
+          security list-keychains -d user -s "$DMG_KEYCHAIN" $(security list-keychains -d user | tr -d '"')
           identities="$(security find-identity -v -p codesigning "$DMG_KEYCHAIN" | grep 'Developer ID Application' || true)"
           if [ "$(printf '%s\n' "$identities" | grep -c .)" != "1" ]; then
             echo "::error::expected exactly one Developer ID Application identity for the DMG"
