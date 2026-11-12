@@ -327,7 +327,9 @@ def test_linux_takeover_through_the_window(tmp_path):
         assert "2 items were left on the machine" in said
         assert "--take-over-managed-agent --confirm-takeover linux-demo" in d.text("command-text")
         assert "remove them by hand if nothing else uses them" in window.history.entries()[0].log
-        assert not endpoint.managed if hasattr(endpoint, "managed") else True
+        assert endpoint.vendor_called and not endpoint.services
+        after = detect_linux_managed_installation(endpoint)
+        assert after.query_ok and not after.running_services
     finally:
         window.close()
 
