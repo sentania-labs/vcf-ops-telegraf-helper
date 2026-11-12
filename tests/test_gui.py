@@ -288,6 +288,22 @@ def test_machines_list_statuses_filters_search_and_ticks(session):
     fits(d)
 
 
+def test_tick_all_keeps_machines_ticked_under_another_filter(session):
+    d, window, _world = session.start()
+    d.click("tick-web-prod-01")
+    first = list(window.selection)
+    assert len(first) == 1
+    d.click("chip-none")
+    assert not d.has("tick-web-prod-01")
+    assert "1 machine ticked" in d.text("selection-count")
+    assert "1 not shown" in d.text("selection-count")
+    d.click("tick-all")
+    assert first[0] in window.selection and len(window.selection) > 1
+    d.click("tick-all")
+    assert window.selection == first
+    assert "1 machine ticked" in d.text("selection-count")
+
+
 def test_machine_page_shows_status_actions_and_history(session):
     d, _window, _world = session.start()
     d.click("open-web-prod-01")

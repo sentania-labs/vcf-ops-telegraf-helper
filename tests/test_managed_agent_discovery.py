@@ -361,3 +361,104 @@ def test_machine_status_marks_ops_managed():
     assert machine_status(vm).status == STATUS_MANAGED
     oss = VirtualMachineResource(resource_id="r", name="x", telegraf_status="Reporting", managed_type="Open Source", agent_registrations=2)
     assert machine_status(oss).status == STATUS_SENDING
+
+
+def test_stock_saltstack_minion_is_not_an_ops_agent():
+    """A site-managed SaltStack minion shares the salt-minion name; only the Ops one under C:\\VMware\\UCP counts."""
+    line = "salt-minion|Running|C:\\Program Files\\Salt Project\\Salt\\bin\\ssm.exe\n"
+    ex = MockExecutor(custom_responses={"-in @(": CommandResult(exit_code=0, stdout=line, command="")})
+    found = detect_managed_installation(ex, WindowsTelegrafDetection(installed=True, binary_path=r"C:\Program Files\Telegraf\telegraf.exe", service_name="telegraf"))
+    assert not found.present
+    wf = _create_test_workflow()
+    wf.target.os_family = OSFamily.WINDOWS
+    wf.executor = ex
+    assert wf.detect_telegraf().status != StageStatus.FAIL
+
+
+def test_managed_found_by_service_query_alone():
+    """Control services under C:\\VMware\\UCP mark the endpoint managed even when no telegraf service is visible."""
+    lines = (
+        "salt-minion|Running|C:\\VMware\\UCP\\salt\\nssm.exe\n"
+        "ucp-minion|Stopped|C:\\VMware\\UCP\\salt\\nssm.exe\n"
+    )
+    ex = MockExecutor(telegraf_installed=False, custom_responses={"-in @(": CommandResult(exit_code=0, stdout=lines, command="")})
+    found = detect_managed_installation(ex, WindowsTelegrafDetection(installed=False), read_config=False)
+    assert found.present and sorted(found.services) == ["salt-minion", "ucp-minion"]
+    assert found.running_services == ["salt-minion"]
+    # no config read requested: no directory probes or version calls
+    assert not any("Test-Path" in c for c in ex.executed_commands)
+
+
+def test_managed_detection_tolerates_non_json_stats():
+    session = _ops_session()
+    base = session.get.side_effect
+
+    def get(url, headers=None, params=None, timeout=None):
+        r = base(url, headers=headers, params=params, timeout=timeout)
+        if url.endswith("/stats/latest"):
+            r.json.side_effect = ValueError("not json")
+        return r
+
+    session.get.side_effect = get
+    adapter = VCF91OpenTelegrafIntegration(_env(), session=session)
+    obj = adapter.get_agent_object("5f898d03-vc", "vm-6068")
+    assert obj is not None and obj.last_sample_ms is None
+    assert adapter.verify_ingestion("x", since=1.0, vc_id="5f898d03-vc", vm_mor="vm-6068") == "PENDING"
+
+
+def test_workflow_verify_does_not_fall_back_to_hostname_after_identity_miss():
+    """Codex review: a hostname match on an unrelated registration must not stand in for the bound object."""
+    wf = _create_test_workflow()
+    wf.target.vm_mor = "vm-1042"
+    wf.target.vc_id = "423b-81f0-91a2-0002"
+    calls = []
+
+    def spy(hostname, since=None, vc_id=None, vm_mor=None):
+        calls.append((hostname, vc_id, vm_mor))
+        return "UNKNOWN" if vm_mor else "PASS"
+
+    wf.adapter.verify_ingestion = spy
+    wf.run()
+    assert calls == [(calls[0][0], "423b-81f0-91a2-0002", "vm-1042")]
+    assert wf.verifications["VCF Ops ingestion"].startswith("PENDING")
+
+
+def test_inventory_marks_managed_when_a_second_registration_is_product_managed():
+    """Codex review: a reporting open-source object listed first must not hide a product-managed one."""
+    from test_adapters import _fake_suite_api
+
+    oss = {
+        "identifier": "a-oss",
+        "resourceKey": {
+            "name": "Windows OS on win-app01", "resourceKindKey": "win",
+            "resourceIdentifiers": [
+                {"identifierType": {"name": "VCID"}, "value": "vc-1"},
+                {"identifierType": {"name": "VMMOR"}, "value": "vm-201"},
+            ],
+        },
+        "resourceStatusStates": [{"resourceState": "STARTED", "resourceStatus": "DATA_RECEIVING", "adapterInstanceId": "ai-1"}],
+    }
+    managed = dict(oss, identifier="a-managed")
+    managed["resourceStatusStates"] = [{"resourceState": "STARTED", "resourceStatus": "NO_DATA_RECEIVING", "adapterInstanceId": "ai-1"}]
+    types = {"a-oss": "Open Source", "a-managed": "Product Managed"}
+    session = _fake_suite_api()
+    base = session.get.side_effect
+
+    def get(url, headers=None, params=None, timeout=None):
+        if url.endswith("/resources") and (params or {}).get("adapterKind") == "APPOSUCP":
+            r = MagicMock()
+            r.status_code = 200
+            r.json.return_value = {"resourceList": [oss, managed], "pageInfo": {"totalCount": 2}}
+            return r
+        r = base(url, headers=headers, params=params, timeout=timeout)
+        if url.endswith("/resources/properties"):
+            for entry in r.json.return_value["resourcePropertiesList"]:
+                if entry["resourceId"] in types:
+                    entry["property"].append({"name": "AgentManagedType", "value": types[entry["resourceId"]]})
+        return r
+
+    session.get.side_effect = get
+    adapter = VCF91OpenTelegrafIntegration(_env(), session=session)
+    win = next(vm for vm in adapter.list_virtual_machines() if vm.name == "win-app01")
+    assert win.telegraf_status == "Reporting" and win.agent_registrations == 2
+    assert win.is_ops_managed

@@ -283,7 +283,10 @@ def machines_page(win) -> Page:
 
     def on_tick_all(state: bool) -> None:
         shown = [m.id for m in visible_machines(win) if m.selectable]
-        win.selection = shown if state else []
+        if state:
+            win.selection.extend(i for i in shown if i not in win.selection)
+        else:
+            win.selection = [i for i in win.selection if i not in shown]
         redraw(keep_focus="tick-all")
 
     tick_all.clicked.connect(on_tick_all)
@@ -302,8 +305,11 @@ def machines_page(win) -> Page:
         count = len(win.selection)
         if count:
             what = plural(count, "machine")
+            on_screen = {m.id for m in visible_machines(win)}
+            hidden = sum(1 for i in win.selection if i not in on_screen)
+            aside = f", {hidden} not shown with this filter" if hidden else ""
             page.footer(
-                label(f"<b>{what} ticked</b>", "note", wrap=False, name="selection-count"),
+                label(f"<b>{what} ticked</b>{aside}", "note", wrap=False, name="selection-count"),
                 link("Untick all", lambda: (win.selection.clear(), redraw()), name="selection-clear"), stretch,
                 button("Test connection only", lambda: win.start_flow("test", list(win.selection)), name="selection-test"),
                 button(f"Set up monitoring on {what} →", lambda: win.start_flow("setup", list(win.selection)),
