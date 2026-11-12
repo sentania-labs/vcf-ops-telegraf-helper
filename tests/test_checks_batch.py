@@ -520,6 +520,20 @@ def test_a_database_password_never_reaches_the_log_the_report_or_the_history(tmp
     assert "Requested input changes" in outcome.report and 'servers = "[REDACTED]"' in outcome.report
 
 
+def test_a_change_names_what_starts_and_stops_in_the_row_and_the_saved_report():
+    executor = MockExecutor(telegraf_installed=True)
+    executor.uploaded_files["/etc/telegraf/telegraf.d/vcf-helper-system.conf"] = TelegrafRenderer.render_system_inputs(
+        c.monitoring_for(c.CollectChoices(keys=["cpu", "swap"]), "linux"))
+    change = _plan(kind=p.KIND_CHANGE, install=p.KEEP, choices=c.CollectChoices(keys=["cpu", "diskio"]))
+    runner = _runner([change], {"10.20.2.21": executor})
+    runner.run()
+    entry = batch.build_entry("change", [change], runner.outcomes, CONN, added=["diskio"], removed=["swap"])
+    assert "Newly collecting: Disk activity" in entry.rows[0].msg and "No longer collecting: Swap use" in entry.rows[0].msg
+    assert "Newly collecting: Disk activity" in entry.report and "No longer collecting: Swap use" in entry.report
+    practice = batch.build_entry("change", [change], runner.outcomes, CONN, practice=True, added=["diskio"], removed=["swap"])
+    assert "Newly collecting" not in practice.report
+
+
 def test_two_machines_can_be_sent_the_same_package_at_once(tmp_path):
     import time as clock
 

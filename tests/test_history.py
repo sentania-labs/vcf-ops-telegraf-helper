@@ -166,6 +166,17 @@ def test_every_failure_gets_a_reason_and_a_remedy_in_plain_words():
     assert nothing.what and nothing.todo
 
 
+def test_a_failed_push_install_is_not_blamed_on_the_machines_internet():
+    stages = _failed(WorkflowStage.APPLY, "Failed to auto-install Telegraf agent: tar: short read")
+    pulled = plain.explain_failure(stages)
+    pushed = plain.explain_failure(stages, pushed=True)
+    assert "no way out to the internet" in pulled.what
+    assert "internet" not in pushed.what and "sent from this computer" in pushed.what
+    assert "offer to download" not in pushed.todo
+    intact = _failed(WorkflowStage.APPLY, "The Telegraf package sent from this computer did not arrive intact (checksum mismatch)")
+    assert plain.explain_failure(intact, pushed=True) == plain.explain_failure(intact)
+
+
 def test_step_words_match_what_really_happens_to_the_machine():
     assert plain.step_label("setup", 2) == "Installing Telegraf"
     assert plain.step_label("setup", 2, install="keep") == "Keeping the Telegraf that is already installed"

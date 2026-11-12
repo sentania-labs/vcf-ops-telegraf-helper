@@ -1823,17 +1823,9 @@ class Flow:
                 machine_id=plan.machine_id, ok=False, msg="The run ended before this machine was finished.",
                 todo="Press Try again."))
         left = self.left_out() if (self.kind == SETUP) else []
+        add, remove = getattr(self, "diff", ([], [])) if self.kind == CHANGE else ([], [])
         entry = build_entry(self.kind, run.plans, run.outcomes, win.conn, left_out=left, practice=run.practice,
-                            resume=self.resume)
-        if self.kind == CHANGE and not run.practice:
-            add, remove = getattr(self, "diff", ([], []))
-            for row in entry.rows:
-                if row.ok and row.counted and row.msg.startswith("Change applied"):
-                    if add:
-                        row.msg += (f" Newly collecting: {', '.join(names_of(add))} (shows in VCF Operations within about "
-                                    "5 minutes).")
-                    if remove:
-                        row.msg += f" No longer collecting: {', '.join(names_of(remove))}."
+                            resume=self.resume, added=add, removed=remove)
         run.entry = entry
         win.history.add(entry)
         if not run.practice:

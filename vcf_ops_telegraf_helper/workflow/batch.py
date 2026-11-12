@@ -46,6 +46,7 @@ from vcf_ops_telegraf_helper.workflow.plan import (
     KIND_CHANGE,
     KIND_SETUP,
     KIND_TAKEOVER,
+    PUSH,
     ConnectionChoices,
     MachinePlan,
     build_command,
@@ -77,6 +78,7 @@ class MachineOutcome(BaseModel):
     pending: bool = False
     skipped: bool = False
     note: bool = False
+    changed: bool = False
     msg: str = ""
     todo: str = ""
     log: str = ""
@@ -254,7 +256,7 @@ class BatchRunner:
         if summary.stopped:
             return MachineOutcome(skipped=True, msg=STOPPED_TEXT, **base)
         if not summary.success:
-            problem = explain_failure(summary.stages)
+            problem = explain_failure(summary.stages, pushed=plan.install == PUSH)
             return MachineOutcome(ok=False, msg=problem.what, todo=problem.todo, **base)
         if plan.practice:
             return MachineOutcome(
@@ -298,9 +300,9 @@ class BatchRunner:
         restart = next((s for s in summary.stages if s.stage == WorkflowStage.RESTART), None)
         if restart is not None and restart.status == StageStatus.PASS:
             msg = "Change applied. The app read the settings back from the machine, and Telegraf restarted without errors."
-        else:
-            msg = ("The machine already had exactly these settings, so nothing needed to change. "
-                   "The app read them back from the machine to confirm.")
+            return MachineOutcome(msg=msg, changed=True, **base)
+        msg = ("The machine already had exactly these settings, so nothing needed to change. "
+               "The app read them back from the machine to confirm.")
         return MachineOutcome(msg=msg, **base)
 
     # ------------------------------------------------------------------ takeover
@@ -330,7 +332,7 @@ class BatchRunner:
             log = stage_log(plan.name, stages, practice=True)
             failed = any(s.status == StageStatus.FAIL for s in stages)
             if failed:
-                problem = explain_failure(stages)
+                problem = explain_failure(stages, pushed=plan.install == PUSH)
                 return MachineOutcome(machine_id=plan.machine_id, ok=False, msg=problem.what, todo=problem.todo, log=log)
             return MachineOutcome(machine_id=plan.machine_id, msg="Would be taken over without problems.", log=log)
 
@@ -352,7 +354,7 @@ class BatchRunner:
         base = dict(machine_id=plan.machine_id, log=log, report=summary.to_markdown(), checks=checks,
                     backup_dir=summary.backup_dir)
         if not summary.success:
-            problem = explain_failure(summary.stages)
+            problem = explain_failure(summary.stages, pushed=plan.install == PUSH)
             return MachineOutcome(ok=False, msg=problem.what, todo=problem.todo, **base)
         imported = workflow.imported.monitoring if workflow.imported else workflow.monitoring
         if imported is not None:
@@ -465,6 +467,8 @@ def build_entry(
     left_out: Optional[List[LeftOut]] = None,
     practice: bool = False,
     resume: bool = False,
+    added: Optional[List[str]] = None,
+    removed: Optional[List[str]] = None,
 ) -> ActivityEntry:
     """One history entry for a run: a line for every machine the person picked."""
     rows: List[ActivityRow] = []
@@ -474,9 +478,15 @@ def build_entry(
         outcome = outcomes.get(plan.machine_id) or MachineOutcome(
             machine_id=plan.machine_id, ok=False, msg="The run ended before this machine was reached.", todo="Press Try again."
         )
+        msg = outcome.msg
+        if kind == KIND_CHANGE and not practice and outcome.ok and outcome.changed:
+            if added:
+                msg += f" Newly collecting: {', '.join(names_of(added))} (shows in VCF Operations within about 5 minutes)."
+            if removed:
+                msg += f" No longer collecting: {', '.join(names_of(removed))}."
         rows.append(ActivityRow(
             machine_id=plan.machine_id, name=plan.name, os=plan.os, ok=outcome.ok, pending=outcome.pending,
-            skipped=outcome.skipped, note=outcome.note, msg=outcome.msg, todo=outcome.todo,
+            skipped=outcome.skipped, note=outcome.note, msg=msg, todo=outcome.todo,
             # No command for a machine that was never started, nor for a takeover practice run: the
             # command line has no practice run for a takeover, and the real command retires the agent.
             cmd="" if (outcome.skipped or (practice and kind == KIND_TAKEOVER)) else build_command(plan, conn),

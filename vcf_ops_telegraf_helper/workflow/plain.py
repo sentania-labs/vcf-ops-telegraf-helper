@@ -233,6 +233,10 @@ _TRY_AGAIN = "Press Try again."
 _SUPPORT = ("Press Try again. If it happens again, open Technical details on this result and send them to "
             "whoever supports this app.")
 
+_NO_INTERNET = "The machine could not download Telegraf. It has no way out to the internet."
+_PUSH_FAILED = ("Telegraf was sent from this computer, but installing it on the machine did not finish.",
+                _SUPPORT)
+
 # (stage or None for any, pattern in the stage message, what happened, what to do). First match wins.
 _FAILURES: Sequence[tuple] = (
     (WorkflowStage.CONNECT, r"auth|password|permission denied|credential|401|access is denied|rejected|logon",
@@ -282,7 +286,7 @@ _FAILURES: Sequence[tuple] = (
      "Telegraf could not be sent from this computer to the machine.",
      "This computer downloads Telegraf first, so check that it can reach the internet. Then press Try again."),
     (WorkflowStage.APPLY, r"auto-install|binary not found|Failed to (auto-install|upgrade)",
-     "The machine could not download Telegraf. It has no way out to the internet.",
+     _NO_INTERNET,
      "Press Try again. The app will offer to download Telegraf on this computer and send it across instead."),
     (WorkflowStage.APPLY, r"upgrade to .* failed|installed version remains",
      "Telegraf on the machine could not be updated.",
@@ -347,7 +351,7 @@ _FAILURES: Sequence[tuple] = (
 )
 
 
-def explain_failure(stages: Sequence[StageResult]) -> Problem:
+def explain_failure(stages: Sequence[StageResult], pushed: bool = False) -> Problem:
     """The reason and the remedy for the first failed stage of a run."""
     failed = next((s for s in stages if s.status == StageStatus.FAIL), None)
     if failed is None:
@@ -360,6 +364,8 @@ def explain_failure(stages: Sequence[StageResult]) -> Problem:
                 if found:
                     what = (f"The machine does not have enough free disk space ({found.group(1)} MB free). "
                             "The app needs 500 MB free to install Telegraf.")
+            if pushed and what == _NO_INTERNET:
+                what, todo = _PUSH_FAILED
             return Problem(what, todo)
     return Problem("Something went wrong part-way through.", _SUPPORT)
 
