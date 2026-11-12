@@ -73,10 +73,12 @@ from vcf_ops_telegraf_helper.workflow.collect import (
     GROUP_WINDOWS,
     WINDOWS_ONLY,
     CollectChoices,
+    database_scopes,
     effective_keys,
     item as catalog_item,
     name_of,
     names_of,
+    PASSWORD_PLACEHOLDER,
     ordered,
 )
 from vcf_ops_telegraf_helper.workflow.plain import (
@@ -154,6 +156,7 @@ class Flow:
         self.update_from_setting = False
         self.choices = CollectChoices(keys=list(win.settings.defaults))
         self.before: List[str] = []
+        self.before_choices = CollectChoices()
         self.primed = False
         self.edit_collect = False
         self.typed = ""
@@ -215,7 +218,7 @@ class Flow:
     def title(self) -> str:
         if self.resume:
             return "Finish a takeover"
-        if self.retry:
+        if self.retry and self.kind != CHANGE:
             return "Try again"
         return TITLES[self.kind]
 
@@ -326,7 +329,7 @@ class Flow:
                                    "Operations' own agent. Replacing that is a takeover, done one machine at a time: use "
                                    '"Take over" on each row.'))
                 return
-        if self.retry:
+        if self.retry and self.kind != CHANGE:
             self._load_last_choices()
         if self.resume:
             vm = self.machines[0].vm
@@ -344,6 +347,34 @@ class Flow:
             self.after_signin()
         else:
             self.show_signin()
+
+    def _last_attempt(self, current: CollectChoices) -> CollectChoices:
+        """Try again on a change: the ticks of the attempt that failed, on top of what the machine has today."""
+        machine_id = self.ids[0]
+        entry = self.win.history.last_change(machine_id)
+        row = entry.row_for(machine_id) if entry else None
+        saved = (entry.choices or {}).get("collect") if (entry and entry.kind == CHANGE and row and not row.ok) else None
+        try:
+            wanted = CollectChoices.model_validate(saved) if saved else None
+        except Exception:
+            wanted = None
+        if wanted is None or not wanted.keys:
+            return current.model_copy(deep=True)
+        for key in list(wanted.keys):
+            saved_detail = wanted.details.get(key, {})
+            if key in wanted.missing_secrets() or PASSWORD_PLACEHOLDER in str(saved_detail.get("url", "")):
+                # A password is never kept on this computer. What the machine has today stands in for it;
+                # an item that was new in that attempt has to be asked for again.
+                if current.has(key):
+                    wanted.details[key] = dict(current.details.get(key, {}))
+                    if key in current.notes:
+                        wanted.notes[key] = current.notes[key]
+                else:
+                    wanted.remove(key)
+        # Nor are someone's own Telegraf settings kept here: the ones on the machine stay as they are
+        self.lost_custom = bool(wanted.had_custom) and not current.custom_toml.strip()
+        wanted.custom_toml, wanted.had_custom = current.custom_toml, False
+        return wanted
 
     def _load_last_choices(self) -> None:
         entry = self.win.history.last_change(self.ids[0])
@@ -437,7 +468,7 @@ class Flow:
             allow_key = os == "linux" and self.kind != TAKEOVER
             secret = dialogs.KeyOrPassword(self.win, signin, allow_key, f"signin-{os}")
             card.body.addLayout(hbox((user, 1), (secret, 1), spacing=12, align=Qt.AlignTop))
-            foot = hbox((label(hints[os], "small"), 1), align=Qt.AlignTop)
+            foot = hbox((label(hints[os], "small", name=f"signin-hint-{os}"), 1), spacing=14)
             if allow_key:
                 toggle = link("", name="signin-key-toggle")
 
@@ -448,7 +479,7 @@ class Flow:
 
                 toggle.setText("Use a password instead" if signin.use_key else "Use a key file instead of a password")
                 toggle.clicked.connect(lambda _c=False, f=flip: f())
-                foot.addWidget(toggle)
+                foot.addWidget(toggle, 0, Qt.AlignTop)
             card.body.addLayout(foot)
             page.add(card)
             self.signin_fields[os] = (user, secret)
@@ -541,7 +572,11 @@ class Flow:
         if self.kind == CHANGE:
             self.choices = result.current.model_copy(deep=True) if result.current else CollectChoices()
             self.before = effective_keys(self.choices.keys, machine.os)
+            self.before_choices = self.choices.model_copy(deep=True)
+            # What was just read from the machine is what it collects today
             self.win.history.remember(machine.id, collecting=list(self.choices.keys))
+            if self.retry:
+                self.choices = self._last_attempt(self.before_choices)
             self.show_collect()
         else:
             self.show_review()
@@ -946,6 +981,9 @@ class Flow:
             title = f"Change what {esc(machines[0].name)} collects"
             sub = ("Ticked items are collected today. Tick or untick, then continue. You will see exactly what changes "
                    "before anything is done.")
+            if self.retry and ordered(self.choices.keys) != ordered(self.before_choices.keys):
+                sub = ("These are your ticks from the last attempt, which was not applied. Change them if you like, then "
+                       "continue. You will see exactly what changes before anything is done.")
         else:
             title = "What should be collected?"
             if self.retry:
@@ -1293,6 +1331,8 @@ class Flow:
                     soft_tags.append(f"{name_of(key)} ({', '.join(where) if where else 'no machine in this run has it'})")
             card.body.addLayout(hbox(label("And, because it runs there:" if one else "And only where it runs:", "small",
                                            wrap=False), (Tags(soft_tags), 1), spacing=8, align=Qt.AlignTop))
+        for line in database_scopes(self.choices, software):
+            card.add(label(esc(line), "small", name="review-databases"))
         if self.choices.custom_toml.strip():
             card.add(label("Plus your own Telegraf settings.", "small"))
         if self.retry and not self.edit_collect:
@@ -1320,13 +1360,18 @@ class Flow:
         after = effective_keys(self.choices.keys, machine.os)
         add = [k for k in after if k not in self.before]
         remove = [k for k in self.before if k not in after]
-        keep = [k for k in after if k in self.before]
+        # An item that stays ticked can still be given new settings (another ping address, another database account)
+        edited = [k for k in after if k in self.before
+                  and self.choices.details.get(k, {}) != self.before_choices.details.get(k, {})]
+        own = self.choices.custom_toml.strip() != self.before_choices.custom_toml.strip()
+        keep = [k for k in after if k in self.before and k not in edited]
         self.diff = (add, remove)
+        self.edited = names_of(edited) + (["Your own Telegraf settings"] if own else [])
         page = Page("review")
         page.title("Check the change, then apply it",
                    "Nothing has been changed yet. This is what will happen when you press the blue button.")
         card = Card(f"What changes on {machine.name}")
-        nothing = not add and not remove
+        nothing = not add and not remove and not self.edited
         if nothing:
             text = "You have not changed anything yet. Go back and tick or untick something, or cancel."
             if machine.os == "windows" and ordered(self.choices.keys) != ordered(self.before):
@@ -1335,14 +1380,23 @@ class Flow:
                         "cancel.")
             card.add(Banner("info", text, name="review-nothing"))
         else:
-            for title, keys, kind, prefix in (("Starts collecting", add, "add", "+ "), ("Stops collecting", remove, "rem", ""),
-                                              ("Stays the same", keep, "", "")):
-                if not keys and kind:
+            for title, names, kind, prefix in (
+                    ("Starts collecting", names_of(add), "add", "+ "), ("Stops collecting", names_of(remove), "rem", ""),
+                    ("New settings for", self.edited, "set", ""), ("Stays the same", names_of(keep), "", "")):
+                if not names and kind:
                     continue
                 heading = label(f"<b>{title}</b>", "plain", wrap=False, name=f"review-{kind or 'keep'}")
                 heading.setFixedWidth(128)
-                tags = Tags([(prefix + name, kind) for name in names_of(keys)]) if keys else label("Nothing.", "small")
+                shade = "" if kind == "set" else kind
+                tags = Tags([(prefix + name, shade) for name in names], name=f"review-{kind or 'keep'}-tags") \
+                    if names else label("Nothing.", "small")
                 card.body.addLayout(hbox(heading, (tags, 1), spacing=8, align=Qt.AlignTop))
+            for line in database_scopes(self.choices, [k for k in add + edited]):
+                card.add(label(esc(line), "small", name="review-databases"))
+            going = self.effective_collector(machine.id)
+            if going is not None:
+                card.add(label(f"Its data keeps going to {esc(collector_label(going))}, where this machine already "
+                               "sends it.", "small", name="review-collector"))
         page.add(card)
         page.body.addLayout(sentence(
             f"Telegraf on {esc(machine.name)} is restarted to pick up the change, which takes a few seconds. Nothing else "
@@ -1832,8 +1886,9 @@ class Flow:
                 todo="Press Try again."))
         left = self.left_out() if (self.kind == SETUP) else []
         add, remove = getattr(self, "diff", ([], [])) if self.kind == CHANGE else ([], [])
+        edited = list(getattr(self, "edited", [])) if self.kind == CHANGE else []
         entry = build_entry(self.kind, run.plans, run.outcomes, win.conn, left_out=left, practice=run.practice,
-                            resume=self.resume, added=add, removed=remove)
+                            resume=self.resume, added=add, removed=remove, edited=edited)
         run.entry = entry
         win.history.add(entry)
         if not run.practice:
@@ -1962,7 +2017,14 @@ class Flow:
             return
         banner = None
         run = self.run
-        if finished and run and run.finished and not run.practice and run.entry is not None:
+        failed = [r for r in run.entry.rows if not r.ok and r.counted] if (run and run.entry is not None) else []
+        if finished and run and run.finished and not run.practice and failed:
+            # Never a green "finished" for a run that did not do what was asked
+            who = esc(failed[0].name) if len(failed) == 1 else plural(len(failed), "machine")
+            banner = ("bad", f"<b>{esc(run.entry.title)} did not work on {who}.</b> What happened is on "
+                      f"{'its row' if len(failed) == 1 else 'their rows'} below, with what to do. The full result is saved "
+                      "under Activity.")
+        elif finished and run and run.finished and not run.practice and run.entry is not None:
             waiting = sum(1 for r in run.entry.rows if r.pending)
             more = (f" {plural(waiting, 'machine is', 'machines are')} waiting for first data; press \"Refresh list\" in a "
                     "few minutes.") if waiting else ""

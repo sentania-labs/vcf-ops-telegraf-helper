@@ -24,6 +24,7 @@ from vcf_ops_telegraf_helper.workflow.collect import (
     CollectChoices,
     database_setting,
     monitoring_for,
+    mask_web_address,
     placeholder_for,
 )
 
@@ -255,6 +256,9 @@ def placeholder_monitoring(plan: MachinePlan) -> MonitoringConfig:
         mon.postgresql.address = database_setting("pg", details.get("pg", {}), placeholder=True)
     if mon.mssql.enabled:
         mon.mssql.servers = [database_setting("mssql", details.get("mssql", {}), placeholder=True)]
+    # A status page address can carry a password as well
+    mon.nginx.urls = [mask_web_address(url) for url in mon.nginx.urls]
+    mon.apache.urls = [mask_web_address(url) for url in mon.apache.urls]
     return mon
 
 

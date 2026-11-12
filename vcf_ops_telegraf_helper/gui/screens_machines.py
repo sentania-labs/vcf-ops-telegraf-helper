@@ -26,7 +26,7 @@ from vcf_ops_telegraf_helper.gui.widgets import (
     link,
     mark,
     plain,
-    reserve_bold,
+    reserve_chip,
     stretch,
     vbox,
 )
@@ -43,6 +43,7 @@ from vcf_ops_telegraf_helper.workflow.plain import (
     STATUS_TEXT,
     STATUS_TONE,
     STATUS_WAITING,
+    first_sentence,
     plural,
 )
 
@@ -140,7 +141,8 @@ def _machine_row(win, machine: Machine, on_tick) -> QFrame:
         pill.setObjectName(f"status-{machine.name}")
         monitoring.addLayout(hbox(pill, stretch))
         if machine.status in (STATUS_ATTENTION, STATUS_INTERRUPTED) and machine.problem:
-            why = label(esc(machine.problem.what), "why")
+            # The row says it in a sentence; the machine's own page says all of it
+            why = label(esc(first_sentence(machine.problem.what)), "why")
             why.setToolTip(machine.problem.what)
             monitoring.addWidget(why)
         elif machine.status == STATUS_MANAGED:
@@ -222,6 +224,10 @@ def machines_page(win) -> Page:
                       "be listed below as ordinary machines. Leave those alone.", name="banner-platform")
         note.setToolTip(str(win.platform_note))
         page.add(note)
+    problem_showing = interrupted is not None or bool(win.inventory_note)
+    if win.banner and win.banner[0] in ("ok", "info", "") and problem_showing:
+        # Good news does not share the screen with a problem: the problem is what needs reading
+        win.banner = None
     if win.banner:
         kind, html = win.banner
 
@@ -328,7 +334,7 @@ def machines_page(win) -> Page:
         counts = chip_counts(win)
         for key, (chip, text) in chips.items():
             chip.setText(plain(f"{text}  {counts[key]}"))
-            reserve_bold(chip)
+            reserve_chip(chip)
             chip.setChecked(win.filter == key)
         shown = visible_machines(win)
         table.clear()
@@ -447,11 +453,22 @@ def machine_page(win, machine: Machine) -> Page:
                    button("Remove monitoring…", lambda: ask_remove(win, machine), name="machine-remove")]
     elif status == STATUS_ATTENTION:
         problem = machine.problem
-        page.add(Headline("bad", "!", "The last attempt to set up monitoring did not finish" if win.history.last_change(machine.id)
-                          else "Monitoring on this machine is not working",
+        last = win.history.last_change(machine.id)
+        failed_change = bool(last and last.kind == "change")
+        title = "Monitoring on this machine is not working"
+        if failed_change:
+            title = "The last change to this machine was not applied"
+        elif last:
+            title = "The last attempt to set up monitoring did not finish"
+        page.add(Headline("bad", "!", title,
                           f"<b>What happened:</b> {esc(problem.what)}<br><b>What to do:</b> {esc(problem.todo)}",
                           name="machine-headline"))
-        actions = [button("Try again", start("setup", retry=True), "primary", name="machine-retry"), test]
+        if failed_change:
+            # The machine is still monitored, with what it collected before the change
+            actions = [button("Try again", start("change", retry=True), "primary", name="machine-retry"), test, stretch,
+                       button("Remove monitoring…", lambda: ask_remove(win, machine), name="machine-remove")]
+        else:
+            actions = [button("Try again", start("setup", retry=True), "primary", name="machine-retry"), test]
     elif status == STATUS_INTERRUPTED:
         page.add(Headline("bad", "!", "The takeover of this machine stopped half-way",
                           f"<b>What happened:</b> {esc(machine.problem.what)}<br><b>What to do:</b> {esc(machine.problem.todo)}",
@@ -477,29 +494,33 @@ def machine_page(win, machine: Machine) -> Page:
     facts = win.history.facts(machine.id)
     collecting = known_collecting(win, machine)
     now = Card("Collecting now")
-    if status in (STATUS_SENDING, STATUS_WAITING) and collecting:
-        now.add(Tags(names_of(effective_keys(collecting, machine.os))))
-    elif status == STATUS_MANAGED:
+    # After a change that was not applied the machine is still monitored, with what it collected before
+    last_entry = win.history.last_change(machine.id)
+    still_monitored = status == STATUS_ATTENTION and bool(last_entry and last_entry.kind == "change")
+    shown = STATUS_SENDING if still_monitored else status
+    if shown in (STATUS_SENDING, STATUS_WAITING) and collecting:
+        now.add(Tags(names_of(effective_keys(collecting, machine.os)), name="machine-collecting"))
+    elif shown == STATUS_MANAGED:
         now.add(label("What VCF Operations' own agent collects. A takeover keeps it the same.", "small"))
-    elif status in (STATUS_SENDING, STATUS_WAITING):
+    elif shown in (STATUS_SENDING, STATUS_WAITING):
         now.add(label('The app has not read this from the machine yet. Press "Change what is collected" and it reads it.',
                       "small", name="machine-collecting-unknown"))
     else:
         now.add(label("Nothing yet.", "small", name="machine-collecting-none"))
     goes = _collector_text(win, machine)
-    if not goes or status in (STATUS_NONE, STATUS_ATTENTION, STATUS_INTERRUPTED):
+    if not goes or shown in (STATUS_NONE, STATUS_ATTENTION, STATUS_INTERRUPTED):
         where = '<span style="font-weight:400">Not sending yet</span>'
     else:
         where = esc(goes[0].upper() + goes[1:])
-    if status == STATUS_MANAGED:
+    if shown == STATUS_MANAGED:
         telegraf = "VCF Operations' own copy"
-    elif status == STATUS_INTERRUPTED:
+    elif shown == STATUS_INTERRUPTED:
         telegraf = "Not installed (the old agent was removed)"
     elif facts.get("telegraf"):
         telegraf = f"Version {esc(str(facts['telegraf']))}" + (
             ", installed by someone else and not yet reporting to VCF Operations"
-            if status == STATUS_NONE and not win.history.last_change(machine.id) else "")
-    elif status in (STATUS_SENDING, STATUS_WAITING):
+            if shown == STATUS_NONE and not win.history.last_change(machine.id) else "")
+    elif shown in (STATUS_SENDING, STATUS_WAITING):
         telegraf = "Installed"
     else:
         telegraf = "Not installed, as far as VCF Operations knows"

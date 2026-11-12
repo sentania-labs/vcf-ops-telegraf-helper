@@ -137,7 +137,8 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(f"{APP_NAME}, {APP_TAGLINE}")
         self.setWindowIcon(QIcon(str(Path(__file__).parent / "assets/app.svg")))
         self.resize(1000, 700)
-        self.setMinimumSize(980, 640)
+        # Every screen is designed and checked to fit 1000 x 700 without scrolling, so that is the smallest size
+        self.setMinimumSize(1000, 700)
 
         self._init_ui()
         self._apply_theme()
@@ -938,6 +939,9 @@ class MainWindow(QMainWindow):
         if not ids or any(m is None for m in machines):
             return
         origin = (self.screen, self.machine_id, getattr(self.page, "entry_id", None))
+        if self.flow is not None:
+            # Started from a result screen (Try again): Done goes back to where the person began
+            origin = self.flow.origin
         self.selection = []
         self.banner = None
         self.flow = Flow(self, kind, list(ids), retry=retry, resume=resume, origin=origin)

@@ -64,8 +64,8 @@ def _fix_button(win, entry: ActivityEntry, row: ActivityRow, machine):
             return button("Try again", lambda: win.start_flow("takeover", [machine.id]), "primary sm", name=name)
         return None
     if entry.kind == KIND_CHANGE:
-        if machine.status in (STATUS_SENDING, STATUS_WAITING):
-            return button("Try again", lambda: win.start_flow("change", [machine.id]), "primary sm", name=name)
+        if machine.status in (STATUS_SENDING, STATUS_WAITING, STATUS_ATTENTION):
+            return button("Try again", lambda: win.start_flow("change", [machine.id], retry=True), "primary sm", name=name)
         return None
     if entry.kind == KIND_SETUP and machine.status in (STATUS_ATTENTION, STATUS_NONE):
         return button("Try again", lambda: win.start_flow("setup", [machine.id], retry=True), "primary sm", name=name)

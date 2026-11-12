@@ -632,7 +632,7 @@ QPushButton.chip {{
     color: {t["ink-muted"]};
     font-size: 12px;
     font-weight: 400;
-    padding: 3px 11px;
+    padding: 3px 8px;
 }}
 QPushButton.chip:hover {{ border-color: {t["ink-subtle"]}; }}
 QPushButton.chip:checked {{

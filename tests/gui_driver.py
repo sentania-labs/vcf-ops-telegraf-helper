@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import time
 from pathlib import Path
 
@@ -10,13 +11,14 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QPoint, Qt  # noqa: E402
 from PySide6.QtTest import QTest  # noqa: E402
-from PySide6.QtWidgets import QApplication, QCheckBox, QComboBox, QLineEdit, QPlainTextEdit, QWidget  # noqa: E402
+from PySide6.QtWidgets import QApplication, QCheckBox, QComboBox, QLabel, QLineEdit, QPlainTextEdit, QWidget  # noqa: E402
 
 
 class Driver:
     def __init__(self, window, shots: Path):
         self.app = QApplication.instance()
         self.window = window
+        self.fit_problems: list = []
         self.shots = Path(shots)
         self.shots.mkdir(parents=True, exist_ok=True)
         self.count = 0
@@ -174,14 +176,38 @@ class Driver:
             painter.end()
         image.save(str(path))
         self.log.append(f"shot {path.name}")
+        # Every screen that is looked at is also checked for anything cut off or squeezed
+        self.fit_problems.extend(f"{path.name}: {line}" for line in self.overflow())
         return path
 
     def overflow(self) -> list:
-        """Widgets on the current page that are cut off: the page must fit without scrolling."""
+        """Everything on screen that is cut off, squeezed or needs scrolling to reach.
+
+        The page must fit the window both ways without scrolling, and nothing in the window or in an
+        open dialog may be shorter than its words or its box needs.
+        """
         page = self.window.page
         problems = []
-        if page is None:
-            return problems
+        if page is not None:
+            hint = page.body_widget.minimumSizeHint()
+            have = page.scroll.viewport().size()
+            if hint.height() > have.height() + 1 or page.scroll.verticalScrollBar().maximum() > 0:
+                problems.append(f"page {page.name}: needs {hint.height()}px, has {have.height()}px (the page would scroll)")
+            if hint.width() > have.width() + 1 or page.scroll.horizontalScrollBar().maximum() > 0:
+                problems.append(f"page {page.name}: needs {hint.width()}px across, has {have.width()}px (cut off at the side)")
+        top = self.top()
+        for box in top.findChildren(QLineEdit):
+            if box.isVisible() and box.height() < box.minimumSizeHint().height():
+                problems.append(f"{box.objectName() or 'a box'} is squeezed to {box.height()}px, needs "
+                                f"{box.minimumSizeHint().height()}px")
+        for words in top.findChildren(QLabel):
+            if not words.isVisible() or not words.text():
+                continue
+            said = " ".join(re.sub(r"<[^>]+>", " ", words.text()).split())[:48]
+            if words.wordWrap() and words.height() < words.heightForWidth(words.width()) - 1:
+                problems.append(f"cut off at the bottom: {said!r} ({words.height()}px of "
+                                f"{words.heightForWidth(words.width())}px)")
+        return problems
         hint = page.body_widget.minimumSizeHint().height()
         have = page.scroll.viewport().height()
         if hint > have + 1 or page.scroll.verticalScrollBar().maximum() > 0:

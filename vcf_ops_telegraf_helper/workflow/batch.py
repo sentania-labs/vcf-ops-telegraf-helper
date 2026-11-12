@@ -32,7 +32,14 @@ from vcf_ops_telegraf_helper.storage.history import (
 from vcf_ops_telegraf_helper.storage.journal import TakeoverJournal
 from vcf_ops_telegraf_helper.utils import local_now_formatted
 from vcf_ops_telegraf_helper.workflow.checks import _system_file, collector_label
-from vcf_ops_telegraf_helper.workflow.collect import DEFAULT_WEB_URL, effective_keys, name_of, names_of, secrets_in
+from vcf_ops_telegraf_helper.workflow.collect import (
+    DEFAULT_WEB_URL,
+    database_scopes,
+    effective_keys,
+    name_of,
+    names_of,
+    secrets_in,
+)
 from vcf_ops_telegraf_helper.workflow.engine import ConfigureEndpointWorkflow
 from vcf_ops_telegraf_helper.workflow.plain import (
     FIRST_DATA_WAIT,
@@ -258,7 +265,13 @@ class BatchRunner:
             return MachineOutcome(skipped=True, msg=STOPPED_TEXT, **base)
         if not summary.success:
             problem = explain_failure(summary.stages, pushed=plan.install == PUSH)
-            return MachineOutcome(ok=False, msg=problem.what, todo=problem.todo, **base)
+            todo = problem.todo
+            if plan.kind == KIND_CHANGE:
+                # A change keeps the machine's own collector, so it does not offer another one
+                todo = todo.replace(
+                    "Press Try again: the app tests every collector from this machine and offers one it can reach.",
+                    "Once the machine can reach its collector again, press Try again: your ticks are kept.")
+            return MachineOutcome(ok=False, msg=problem.what, todo=todo, **base)
         if plan.practice:
             return MachineOutcome(
                 msg="Would be changed without problems." if plan.kind == KIND_CHANGE else "Would be set up without problems.",
@@ -274,13 +287,16 @@ class BatchRunner:
         arriving = str(summary.verifications.get("VCF Ops ingestion", "")).startswith("PASS") and not any(
             str(v).startswith("PENDING") for v in summary.verifications.values())
         extra = _unwatched_note(plan) + _status_page_note(plan)
+        # Which databases a database tick watches is said in words, so nobody has to read the command to find out
+        scope = "".join(" " + line for line in database_scopes(plan.choices, collecting))
         if not arriving:
             return MachineOutcome(
                 pending=True, note=bool(extra),
-                msg=f'Set up and running. Waiting for first data: {FIRST_DATA_WAIT} The Machines list says "waiting" until it arrives.' + extra,
+                msg=f'Set up and running. Waiting for first data: {FIRST_DATA_WAIT} The Machines list says "waiting" until it arrives.'
+                    + extra + scope,
                 **base,
             )
-        return MachineOutcome(note=bool(extra), msg="Set up. Data is arriving in VCF Operations." + extra, **base)
+        return MachineOutcome(note=bool(extra), msg="Set up. Data is arriving in VCF Operations." + extra + scope, **base)
 
     def _change_outcome(self, plan, workflow, executor, summary, base) -> MachineOutcome:
         windows = plan.windows
@@ -301,6 +317,7 @@ class BatchRunner:
         restart = next((s for s in summary.stages if s.stage == WorkflowStage.RESTART), None)
         if restart is not None and restart.status == StageStatus.PASS:
             msg = "Change applied. The app read the settings back from the machine, and Telegraf restarted without errors."
+            msg += "".join(" " + line for line in database_scopes(plan.choices, base.get("collecting") or []))
             return MachineOutcome(msg=msg, changed=True, **base)
         msg = ("The machine already had exactly these settings, so nothing needed to change. "
                "The app read them back from the machine to confirm.")
@@ -470,6 +487,7 @@ def build_entry(
     resume: bool = False,
     added: Optional[List[str]] = None,
     removed: Optional[List[str]] = None,
+    edited: Optional[List[str]] = None,
 ) -> ActivityEntry:
     """One history entry for a run: a line for every machine the person picked."""
     rows: List[ActivityRow] = []
@@ -485,6 +503,8 @@ def build_entry(
                 msg += f" Newly collecting: {', '.join(names_of(added))} (shows in VCF Operations within about 5 minutes)."
             if removed:
                 msg += f" No longer collecting: {', '.join(names_of(removed))}."
+            if edited:
+                msg += f" New settings for: {', '.join(edited)}."
         rows.append(ActivityRow(
             machine_id=plan.machine_id, name=plan.name, os=plan.os, ok=outcome.ok, pending=outcome.pending,
             skipped=outcome.skipped, note=outcome.note, msg=msg, todo=outcome.todo,

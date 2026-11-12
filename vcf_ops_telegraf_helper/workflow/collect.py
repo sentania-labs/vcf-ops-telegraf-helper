@@ -140,6 +140,8 @@ class CollectChoices(BaseModel):
             detail.pop("password", None)
             if detail.get("raw") and key in DATABASE_KEYS:
                 detail["raw"] = _mask_password(key, detail["raw"])
+            if detail.get("url") and key in DEFAULT_WEB_URL:
+                detail["url"] = mask_web_address(str(detail["url"]))
         # Someone's own Telegraf settings may hold anything, a password included, so they are not kept
         copy.had_custom = bool(self.custom_toml.strip())
         copy.custom_toml = ""
@@ -218,8 +220,8 @@ def monitoring_for(
         win_services=WinServicesInputConfig(
             enabled=windows and (basics or "winsvc" in keys), service_names=services
         ),
-        nginx=NginxInputConfig(enabled="nginx" in keys, urls=[web_urls.get("nginx") or DEFAULT_WEB_URL["nginx"]]),
-        apache=ApacheInputConfig(enabled="apache" in keys, urls=[web_urls.get("apache") or DEFAULT_WEB_URL["apache"]]),
+        nginx=NginxInputConfig(enabled="nginx" in keys, urls=[web_address("nginx", detail("nginx"), web_urls)]),
+        apache=ApacheInputConfig(enabled="apache" in keys, urls=[web_address("apache", detail("apache"), web_urls)]),
         mysql=MysqlInputConfig(enabled="mysql" in keys, servers=[database_setting("mysql", detail("mysql"))]),
         postgresql=PostgresqlInputConfig(enabled="pg" in keys, address=database_setting("pg", detail("pg"))),
         mssql=MssqlInputConfig(enabled="mssql" in keys, servers=[database_setting("mssql", detail("mssql"))]),
@@ -232,12 +234,24 @@ def monitoring_for(
     )
 
 
+def web_address(key: str, detail: Dict[str, Any], web_urls: Optional[Dict[str, str]] = None) -> str:
+    """The status page a web server is read from.
+
+    The address already working on the machine comes first, then the one the app found there,
+    then the usual one. A saved address whose password was left out cannot be used again.
+    """
+    deployed = str(detail.get("url") or "")
+    if deployed and PASSWORD_PLACEHOLDER not in deployed:
+        return deployed
+    return (web_urls or {}).get(key) or DEFAULT_WEB_URL[key]
+
+
 def database_setting(key: str, detail: Dict[str, Any], placeholder: bool = False) -> str:
     """The connection setting Telegraf needs for a database; the password can be a placeholder."""
     raw = detail.get("raw")
     if raw and not detail.get("user"):
         # Read back from the machine and not changed: keep it exactly as deployed
-        return _mask_password(key, raw).replace(PASSWORD_PLACEHOLDER, placeholder_for(key)) if placeholder else raw
+        return _mask_password(key, raw, for_command=True) if placeholder else raw
     user = detail.get("user") or ""
     password = placeholder_for(key) if placeholder else quoted_password(key, detail.get("password") or "")
     port = int(detail.get("port") or DATABASE_PORTS[key])
@@ -251,6 +265,27 @@ def database_setting(key: str, detail: Dict[str, Any], placeholder: bool = False
         return f"host=localhost port={port} user={user or 'postgres'}{secret} sslmode=disable{name}"
     who = f"User Id={user};Password={password};" if user else ""
     return f"Server=127.0.0.1;Port={port};{who}app name=telegraf;log=1;"
+
+
+def database_scope(key: str, detail: Dict[str, Any]) -> str:
+    """In words, which databases a ticked database item watches. It states what happens; it chooses nothing."""
+    name = name_of(key)
+    if detail.get("raw") and not detail.get("user"):
+        return f"{name}: watched the way it is on the machine today."
+    found = [str(d) for d in (detail.get("databases") or [])]
+    listed = ""
+    if found:
+        shown = found[:4] + ([f"{len(found) - 4} more"] if len(found) > 4 else [])
+        listed = " (" + (", ".join(shown[:-1]) + " and " + shown[-1] if len(shown) > 1 else shown[0]) + ")"
+    if key == "pg":
+        through = f' Telegraf signs in through "{found[0]}".' if found else ""
+        return f"{name}: every database on that server is watched{listed}, not one of them alone.{through}"
+    return f"{name}: the whole server is watched, with every database on it{listed}."
+
+
+def database_scopes(choices: "CollectChoices", keys: Iterable[str]) -> List[str]:
+    wanted = set(keys)
+    return [database_scope(key, choices.details.get(key, {})) for key in DATABASE_KEYS if key in wanted]
 
 
 def placeholder_for(key: str) -> str:
@@ -278,40 +313,91 @@ def quoted_password(key: str, password: str) -> str:
     return password
 
 
-def _mask_password(key: str, raw: str) -> str:
-    """A deployed database setting with its password replaced by the placeholder.
+# scheme://user:password@host: the password runs to the last "@", so one that holds an "@" is still covered
+_URI_PASSWORD = r"^\s*[A-Za-z][A-Za-z0-9+.-]*://[^:/?#@]*:(?P<pw>.*)@"
+_URI_QUERY_PASSWORD = r"[?&]password=(?P<pw>[^&#\s]*)"
+
+
+def _is_uri(raw: str) -> bool:
+    import re
+
+    return bool(re.match(r"^\s*[A-Za-z][A-Za-z0-9+.-]*://", raw))
+
+
+def _secret_spans(key: str, raw: str) -> List[tuple]:
+    """Where the password sits in a deployed setting: (start, end, quoted) for each place.
 
     A password may itself contain "@", ";" or spaces, so each form is matched by its own structure
-    rather than by what a password usually looks like.
+    rather than by what a password usually looks like. `quoted` says the place takes a quoted value
+    (key=value forms), as opposed to a bare one (inside an address).
     """
     import re
 
-    if key == "mysql":
+    spans: List[tuple] = []
+
+    def take(pattern: str, quoted: bool, flags: int = re.IGNORECASE | re.DOTALL, once: bool = False) -> bool:
+        hit = False
+        for match in re.finditer(pattern, raw, flags):
+            start, end = match.span("pw")
+            if end > start and not any(s < end and start < e for s, e, _q in spans):
+                spans.append((start, end, quoted))
+                hit = True
+            if once:
+                break
+        return hit
+
+    if _is_uri(raw):
+        # postgres://user:password@host/db, sqlserver://user:password@host, http://user:password@host/status
+        take(_URI_PASSWORD, False, once=True)
+        take(_URI_QUERY_PASSWORD, False)
+    elif key == "mysql":
         # user:password@protocol(address): the password runs to the last "@" before the protocol
-        return re.sub(r"^([^:@/]*):.*@(?=[A-Za-z0-9_]*\()", rf"\1:{PASSWORD_PLACEHOLDER}@", raw, count=1)
-    if key == "pg":
-        value = r"('(?:[^'\\]|\\.)*'|\"[^\"]*\"|[^\s]+)"
-        return re.sub(rf"(password\s*=\s*){value}", rf"\1{PASSWORD_PLACEHOLDER}", raw, flags=re.IGNORECASE)
-    value = r"(\"(?:[^\"]|\"\")*\"|'(?:[^']|'')*'|\{[^}]*\}|[^;]*)"
-    return re.sub(rf"((?:Password|PWD)\s*=\s*){value}", rf"\1{PASSWORD_PLACEHOLDER}", raw, flags=re.IGNORECASE)
+        if not take(r"^[^:@/]*:(?P<pw>.*)@(?=[A-Za-z0-9_]*\()", False, once=True):
+            # user:password@/database, with no protocol named
+            take(r"^[^:@/]*:(?P<pw>.*)@(?=/)", False, once=True)
+    elif key == "pg":
+        take(r"password\s*=\s*(?P<pw>'(?:[^'\\]|\\.)*'|\"[^\"]*\"|[^\s]+)", True)
+    elif key == "mssql":
+        take(r"(?:Password|PWD)\s*=\s*(?P<pw>\"(?:[^\"]|\"\")*\"|'(?:[^']|'')*'|\{[^}]*\}|[^;]*)", True)
+    return sorted(spans)
+
+
+def _mask_password(key: str, raw: str, for_command: bool = False) -> str:
+    """A deployed setting with its password replaced by the placeholder.
+
+    `for_command` writes the placeholder the way the shown command needs it: already quoted
+    where the setting takes a quoted value, so a real password drops straight in.
+    """
+    out = raw
+    for start, end, quoted in reversed(_secret_spans(key, raw)):
+        shown = placeholder_for(key) if (for_command and quoted) else PASSWORD_PLACEHOLDER
+        out = out[:start] + shown + out[end:]
+    return out
+
+
+def mask_web_address(url: str) -> str:
+    """A status page address with any password in it replaced by the placeholder."""
+    return _mask_password("web", url) if url else url
 
 
 def secrets_in(choices: "CollectChoices") -> List[str]:
-    """Every database password these choices hold, for redacting anything that is written down."""
+    """Every password these choices hold, for redacting anything that is written down."""
     found: List[str] = []
+
+    def held_in(key: str, raw: str) -> None:
+        for start, end, _quoted in _secret_spans(key, raw):
+            secret = raw[start:end]
+            found.append(secret.strip("'\"{}") or secret)
+            found.append(secret)
+
     for key in DATABASE_KEYS:
         detail = choices.details.get(key, {})
         if detail.get("password"):
             found.append(str(detail["password"]))
             found.append(_escaped_password(key, str(detail["password"])))
-        raw = str(detail.get("raw") or "")
-        masked = _mask_password(key, raw) if raw else ""
-        if raw and masked != raw and PASSWORD_PLACEHOLDER in masked:
-            before, _, after = masked.partition(PASSWORD_PLACEHOLDER)
-            secret = raw[len(before):len(raw) - len(after)] if after else raw[len(before):]
-            if secret:
-                found.append(secret.strip("'\"{}") or secret)
-                found.append(secret)
+        held_in(key, str(detail.get("raw") or ""))
+    for key in DEFAULT_WEB_URL:
+        held_in("web", str(choices.details.get(key, {}).get("url") or ""))
     return [s for s in dict.fromkeys(found) if s]
 
 
@@ -354,6 +440,10 @@ def choices_from_monitoring(mon: MonitoringConfig, os_family: str) -> CollectCho
     if "ping" in keys and mon.ping.urls:
         details["ping"] = {"addr": mon.ping.urls[0]}
         notes["ping"] = f"Pings {mon.ping.urls[0]}."
+    for key, urls in (("nginx", mon.nginx.urls), ("apache", mon.apache.urls)):
+        if key in keys and urls and urls[0]:
+            # The address that works on this machine today is kept, whatever else is changed
+            details[key] = {"url": urls[0]}
     for key, raw in (("mysql", mon.mysql.servers[0] if mon.mysql.servers else ""),
                      ("pg", mon.postgresql.address),
                      ("mssql", mon.mssql.servers[0] if mon.mssql.servers else "")):

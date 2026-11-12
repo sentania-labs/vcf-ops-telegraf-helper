@@ -325,6 +325,23 @@ def _system_file(config_dir: Optional[str], windows: bool) -> str:
     return f"{folder}\\vcf-helper-system.conf" if windows else f"{folder}/vcf-helper-system.conf"
 
 
+def deployed_collector(executor: EndpointExecutor, config_dir: Optional[str], windows: bool,
+                       collectors: List[CollectorInfo]) -> Optional[CollectorInfo]:
+    """The collector the machine sends its data to today, read from the output file this app wrote there."""
+    path = _system_file(config_dir, windows).replace("vcf-helper-system.conf", "cloudproxy-http.conf")
+    try:
+        if not executor.file_exists(path):
+            return None
+        found = re.search(r'^\s*url\s*=\s*"https?://([^/"]+)/', executor.download(path) or "", re.MULTILINE)
+    except Exception as exc:
+        logger.warning("Could not read %s: %s", path, exc)
+        return None
+    if not found:
+        return None
+    address = found.group(1)
+    return next((c for c in collectors if c.address == address), None) or CollectorInfo(address=address)
+
+
 def read_current(executor: EndpointExecutor, config_dir: Optional[str], os_family: str) -> Optional[CollectChoices]:
     """What the machine collects today, from the settings file this app writes; None when it is not there."""
     path = _system_file(config_dir, os_family == "windows")
@@ -476,6 +493,10 @@ def check_machine(request: CheckRequest, make_executor: ExecutorFactory) -> Chec
                 result.what = "This app's settings were not found on the machine, so there is nothing here for it to change."
                 result.todo = ('The machine was set up some other way. Go back and use "Set up monitoring" on it instead; '
                                "that replaces what it collects with the choices you make.")
+            else:
+                # A change keeps sending to the collector the machine already reports to
+                result.collector = deployed_collector(executor, probe.get("config_dir"), machine.os == "windows",
+                                                      request.collectors)
             return result
 
         if not _check_collector(request, executor, result):

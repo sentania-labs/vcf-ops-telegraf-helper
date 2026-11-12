@@ -107,6 +107,12 @@ def machine_status(
         and now - last_change.at < _REMOVAL_GRACE_SECONDS
     )
     if reporting and not removed_recently:
+        if last_change and row and last_change.kind == "change" and not row.ok and row.counted:
+            # Still sending data with its old settings, but a change the person asked for did not happen
+            return MachineStatus(STATUS_ATTENTION, Problem(
+                f"The last change was not applied, so the machine still collects what it did before. {row.msg}",
+                row.todo or "Press Try again. Your choices from that attempt are kept.",
+            ), last)
         return MachineStatus(STATUS_SENDING, None, last)
     if last_change and row:
         if last_change.kind == KIND_REMOVE and row.ok:
@@ -128,6 +134,12 @@ def machine_status(
             "Press Try again. The app checks the machine, shows what is in the way, and sets it up again.",
         ), last)
     return MachineStatus(STATUS_NONE, None, last)
+
+
+def first_sentence(text: str) -> str:
+    """The first sentence of a longer explanation, for places with room for one line."""
+    found = re.match(r"(.+?[.!?])(?:\s|$)", (text or "").strip(), re.DOTALL)
+    return found.group(1) if found else (text or "").strip()
 
 
 def _last_sentence(entry: Optional[ActivityEntry], row: Any) -> str:

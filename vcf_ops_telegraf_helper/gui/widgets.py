@@ -9,7 +9,7 @@ from __future__ import annotations
 from html import escape as esc
 from typing import Callable, Iterable, List, Optional, Sequence
 
-from PySide6.QtCore import QPoint, QRect, QSize, Qt, Signal
+from PySide6.QtCore import QEvent, QPoint, QRect, QSize, Qt, Signal
 from PySide6.QtGui import QCursor
 from PySide6.QtWidgets import (
     QApplication,
@@ -35,7 +35,7 @@ from vcf_ops_telegraf_helper.workflow.plan import quote_note_for
 __all__ = [
     "esc", "adopt", "set_class", "label", "button", "link", "hbox", "vbox", "Banner", "Headline", "Card", "ListBox",
     "Row", "Pill", "Tags", "Progress", "Field", "OptionCard", "CommandBox", "Page", "FlowLayout", "Dialog",
-    "stretch", "busy_bar", "mark", "sentence", "grid", "EqualGrid", "reserve_bold", "plain",
+    "stretch", "busy_bar", "mark", "sentence", "grid", "EqualGrid", "reserve_bold", "reserve_chip", "plain",
 ]
 
 stretch = object()  # placed between widgets in hbox()/vbox()/Page.footer() to push the rest apart
@@ -104,21 +104,28 @@ def button(text: str, on_click: Optional[Callable[[], None]] = None, kind: str =
     if not any(word in kind.split() for word in ("nav", "conn")):
         # A button is as wide as its words, wherever it sits; it never stretches to fill a row
         widget.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Fixed)
-    if any(word in kind.split() for word in ("chip", "tab", "seg")):
+    if "chip" in kind.split():
+        reserve_chip(widget)
+    elif any(word in kind.split() for word in ("tab", "seg")):
         reserve_bold(widget)
     if on_click:
         widget.clicked.connect(lambda _checked=False: on_click())
     return widget
 
 
-def reserve_bold(widget: QPushButton, text: Optional[str] = None) -> None:
+def reserve_bold(widget: QPushButton, text: Optional[str] = None, size: int = 13, room: int = 34) -> None:
     """Keep room for the bold text a chip or tab shows when it is the chosen one, so it is never clipped."""
     font = widget.font()
     font.setBold(True)
-    font.setPixelSize(13)
+    font.setPixelSize(size)
     from PySide6.QtGui import QFontMetrics
 
-    widget.setMinimumWidth(QFontMetrics(font).horizontalAdvance(text if text is not None else widget.text()) + 34)
+    widget.setMinimumWidth(QFontMetrics(font).horizontalAdvance(text if text is not None else widget.text()) + room)
+
+
+def reserve_chip(widget: QPushButton) -> None:
+    """A filter chip: 12 px words with 8 px of padding each side, so the row of five fits the page."""
+    reserve_bold(widget, size=12, room=24)
 
 
 def link(text: str, on_click: Optional[Callable[[], None]] = None, name: Optional[str] = None) -> QPushButton:
@@ -465,8 +472,10 @@ class FlowLayout(QLayout):
 class Tags(QWidget):
     """A wrapping run of small labels. Each item is text, or (text, 'add' | 'rem')."""
 
-    def __init__(self, items: Iterable):
+    def __init__(self, items: Iterable, name: Optional[str] = None):
         super().__init__()
+        if name:
+            self.setObjectName(name)
         self.setProperty("class", "clear")
         flow = FlowLayout(self)
         for item in items:
@@ -499,9 +508,10 @@ class Field(QWidget):
         self.caption.setBuddy(self.input)
         self.input.setAccessibleName(text)
         self._hint_text = hint
-        self.note = label(hint, "hint")
+        self.note = label(hint, "hint", name=f"{name}-note" if name else None)
         self.note.setVisible(bool(hint))
-        self.setLayout(vbox(self.caption, self.input, self.note, spacing=4))
+        # The label sits right on its box. Beside a taller field, the spare room goes underneath, not in between.
+        self.setLayout(vbox(self.caption, self.input, self.note, stretch, spacing=4))
         self.input.textEdited.connect(self._edited)
 
     def text(self) -> str:
@@ -552,7 +562,10 @@ class OptionCard(QFrame):
             marker = label(esc(found), "found" if checked else "found found-off")
             marker.setToolTip("Found, and will be watched" if checked else "Found, but not watched unless you tick it")
             text.addWidget(marker)
-        self.setLayout(hbox(self.check, (box(text), 1), spacing=8, margins=(8, 4, 8, 4), align=Qt.AlignTop))
+        # The words fill the tile from the top, so each line gets the height it needs at this width;
+        # a tile that is taller than its words (its row is as tall as the tallest tile) keeps the room underneath
+        text.addStretch(1)
+        self.setLayout(hbox(self.check, (box(text), 1), spacing=8, margins=(8, 4, 8, 4)))
 
     def mouseReleaseEvent(self, event) -> None:  # noqa: N802 (Qt override)
         if event.button() == Qt.LeftButton and self.rect().contains(event.position().toPoint()):
@@ -715,6 +728,7 @@ class Page(QWidget):
 
     def footer(self, *items) -> "Page":
         _empty(self.foot_layout)
+        items = tuple(self._along_the_bar(item) for item in items)
         _fill(self.foot_layout, items)
         if items and not any(item is stretch or isinstance(item, tuple) for item in items):
             self.foot_layout.addStretch(1)
@@ -724,6 +738,18 @@ class Page(QWidget):
                 self.primary = item
         adopt(self.foot)
         return self
+
+    @staticmethod
+    def _along_the_bar(item):
+        """Words in the bar run along it. A label left to wrap would be squeezed into a narrow column."""
+        if not (isinstance(item, QLabel) and item.wordWrap()):
+            return item
+        item.setWordWrap(False)
+        if item.sizeHint().width() <= 700:
+            return item
+        # Too long for one line: let it wrap, across the whole bar
+        item.setWordWrap(True)
+        return (item, 1)
 
     def keyPressEvent(self, event) -> None:  # noqa: N802 (Qt override)
         if event.key() in (Qt.Key_Return, Qt.Key_Enter) and self.primary is not None and self.primary.isEnabled() \
@@ -774,6 +800,24 @@ class Dialog(QDialog):
     def showEvent(self, event) -> None:  # noqa: N802 (Qt override)
         adopt(self)
         super().showEvent(event)
+        self.fit()
+
+    def event(self, event) -> bool:
+        handled = super().event(event)
+        if event.type() == QEvent.LayoutRequest and self.isVisible():
+            # Something was added after the dialog opened (a hint under a box, the result of a test)
+            self.fit()
+        return handled
+
+    def fit(self) -> None:
+        """Grow to hold everything the dialog now shows; a dialog never squeezes or cuts off its contents."""
+        layout = self.layout()
+        if layout is None:
+            return
+        layout.activate()
+        needed = max(layout.totalHeightForWidth(self.width()), layout.totalMinimumSize().height())
+        if needed > self.height():
+            self.resize(self.width(), needed)
 
     def add_button(self, text: str, on_click: Callable[[], None], kind: str = "", name: Optional[str] = None) -> QPushButton:
         widget = button(text, on_click, kind, name)

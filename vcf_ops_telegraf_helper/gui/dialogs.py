@@ -328,9 +328,10 @@ def database_dialog(win, key: str, found: bool, test: Callable[[str, str, int], 
 
     def run_test() -> None:
         if not user.text().strip() or not password.text():
-            show(label("! Enter the database user name and password.", "hint-bad", name="database-error"))
+            # Each empty box says what is missing, once, right under it
+            show(None)
             if not user.text().strip():
-                user.set_error("Enter the database user name.")
+                user.set_error("Enter the user name.")
             if not password.text():
                 password.set_error("Enter the password.")
             return
@@ -367,6 +368,18 @@ def database_dialog(win, key: str, found: bool, test: Callable[[str, str, int], 
         answer.append(details(state["databases"] or []))
         dialog.accept()
 
+    def typed(_text: str) -> None:
+        # What was said about the last test no longer describes what is in the boxes
+        if state["tested"] or state["databases"]:
+            state["tested"], state["databases"] = False, None
+            show(None)
+            anyway.hide()
+            add_button.hide()
+            test_button.show()
+            test_button.setDefault(True)
+
+    user.input.textEdited.connect(typed)
+    password.input.textEdited.connect(typed)
     dialog.add_button("Cancel", dialog.reject, name="database-cancel")
     anyway = dialog.add_button("Add anyway", add, name="database-anyway")
     anyway.hide()

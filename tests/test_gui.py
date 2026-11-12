@@ -381,12 +381,20 @@ def test_found_database_asks_for_an_account_and_never_shows_its_password(session
     def fill() -> None:
         d.click("database-test", settle=False)
         d.pump(60)
-        assert "Enter the database user name and password." in d.text("database-error")
+        assert said(d.text("database-user-note")) == "! Enter the user name."
+        assert said(d.text("database-password-note")) == "! Enter the password."
+        assert not d.has("database-error"), "each empty box says it once; nothing repeats it underneath"
         d.type("database-user", "monitor")
         d.type("database-password", "db-secret-value")
+        assert not d.has("database-user-note") and not d.has("database-password-note"), "the messages go as you type"
         d.click("database-test", settle=False)
         d.wait(lambda: d.has("database-found"), what="databases found")
         assert "Found 3 databases" in d.find("database-found").text.text()
+        d.type("database-password", "another-value")
+        assert not d.has("database-found") and d.has("database-test"), "a result is not left standing over new values"
+        d.type("database-password", "db-secret-value")
+        d.click("database-test", settle=False)
+        d.wait(lambda: d.has("database-found"), what="databases found again")
         d.click("database-add", settle=False)
 
     d.in_dialog(fill, lambda: d.click("tick-pg", settle=False))
@@ -989,8 +997,23 @@ def test_macos_gui_does_not_require_linux_display_variables(qapp, monkeypatch, t
     monkeypatch.delenv("DISPLAY", raising=False)
     monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
     monkeypatch.setenv("VCF_HELPER_GUI_SMOKE_REPORT", str(tmp_path / "window.png"))
+    really_run = QApplication.exec
     monkeypatch.setattr(QApplication, "exec", lambda self=None: 0)
+    before = set(QApplication.topLevelWidgets())
     assert gui_app.run_gui() == 0
+    # The launch leaves its window open and a timer that ends the application once the window has
+    # been drawn. Ending it with no event loop running leaves Qt marked as quitting, and then every
+    # dialog opened afterwards returns at once. Let the timer fire here, close the window, and run
+    # the event loop for a moment so the mark is cleared for whichever test runs next.
+    from PySide6.QtCore import QTimer
+    from PySide6.QtTest import QTest
+
+    QTest.qWait(650)
+    assert (tmp_path / "window.png").exists(), "the launch drew its window"
+    for widget in set(QApplication.topLevelWidgets()) - before:
+        widget.close()
+    QTimer.singleShot(0, qapp.quit)
+    really_run()
 
 
 def test_fresh_window_does_not_touch_the_real_home(session, tmp_path):
@@ -1068,3 +1091,282 @@ def test_a_failed_line_offers_its_fix_and_claims_nothing_it_cannot_show(session)
     assert d.find("result-retry-web-prod-01").text() == "Try again"
     d.click("result-retry-web-prod-01")
     assert d.text("flow-title") == "CHANGE WHAT IS COLLECTED"
+
+
+# ---------------------------------------------------------------------------------------------
+# Found after the first review: settings-only changes, dialogs that gain content, words in the bar
+# ---------------------------------------------------------------------------------------------
+def test_new_settings_for_an_item_that_stays_ticked_are_a_change_and_are_applied(session):
+    from vcf_ops_telegraf_helper.renderer.renderer import TelegrafRenderer
+    from vcf_ops_telegraf_helper.workflow.collect import USUAL_SET, CollectChoices, monitoring_for
+
+    d, window, world = session.start()
+    path = "/etc/telegraf/telegraf.d/vcf-helper-system.conf"
+    web = world.machine("web-prod-01")
+    web.uploaded_files[path] = TelegrafRenderer.render_system_inputs(monitoring_for(
+        CollectChoices(keys=list(USUAL_SET) + ["ping"], details={"ping": {"addr": "10.20.0.1"}}), "linux"))
+    d.click("open-web-prod-01")
+    d.click("machine-change")
+    sign_in(d)
+    d.click("flow-next")
+    assert d.page() == "collect" and d.find("tick-ping").isChecked()
+
+    def another_address() -> None:
+        d.type("ping-address", "gateway.example.com")
+        d.click("ping-ok", settle=False)
+
+    d.in_dialog(another_address, lambda: d.click("change-ping", settle=False))
+    d.click("flow-next")
+    assert not d.has("review-nothing"), "a new address is a change even though the same things stay ticked"
+    assert said(d.find("review-set").text()) == "New settings for" and words(d, "review-set-tags") == "Ping test"
+    assert "Ping test" not in words(d, "review-keep-tags") and "Processor use" in words(d, "review-keep-tags")
+    assert d.find("flow-next").text() == "Apply the change to web-prod-01"
+    fits(d)
+    d.click("flow-next")
+    assert d.find("result-headline").title.text() == "The change is in effect on web-prod-01"
+    assert "gateway.example.com" in web.uploaded_files[path] and "10.20.0.1" not in web.uploaded_files[path]
+    assert "New settings for: Ping test." in window.history.entries()[0].rows[0].msg
+    assert "--ping gateway.example.com" in d.text("command-text")
+
+
+def _holds_its_contents(dialog) -> list:
+    """Anything in a dialog that is squeezed or cut off: a box shorter than it needs, words that do not fit."""
+    from PySide6.QtWidgets import QLineEdit
+
+    cut = []
+    for box in dialog.findChildren(QLineEdit):
+        if box.isVisible() and box.height() < box.minimumSizeHint().height():
+            cut.append(f"{box.objectName()} is {box.height()} px high, needs {box.minimumSizeHint().height()}")
+    for words_shown in dialog.findChildren(QLabel):
+        if words_shown.isVisible() and words_shown.wordWrap() and words_shown.height() < words_shown.heightForWidth(words_shown.width()):
+            cut.append(f"cut off: {said(words_shown.text())[:40]}")
+    return cut
+
+
+def test_a_dialog_grows_to_hold_what_appears_in_it_after_it_opens(session):
+    d, _window, _world = session.start()
+    d.click("action-db-pg-01")
+    sign_in(d)
+    d.click("flow-next")
+    d.click("flow-next")
+
+    def fill() -> None:
+        dialog = QApplication.activeModalWidget()
+        assert _holds_its_contents(dialog) == []
+        d.click("database-test", settle=False)
+        d.pump(60)
+        assert d.has("database-user-note") and d.has("database-password-note")
+        assert _holds_its_contents(dialog) == [] and d.overflow() == [], "both hints fit, and the boxes keep their height"
+        d.type("database-user", "monitor")
+        d.type("database-password", "db-secret-value")
+        d.click("database-test", settle=False)
+        d.wait(lambda: d.has("database-found"), what="databases found")
+        d.pump(60)
+        assert _holds_its_contents(dialog) == [] and d.overflow() == [], "the result fits without squeezing the boxes"
+        assert dialog.height() <= d.window.height(), "and the dialog still fits inside the window"
+        d.click("database-add", settle=False)
+
+    d.in_dialog(fill, lambda: d.click("tick-pg", settle=False))
+
+
+def test_the_hint_under_the_machines_list_runs_along_the_bar(session):
+    d, _window, _world = session.start()
+    hint = d.find("selection-hint")
+    assert "tick them" in said(hint.text())
+    one_line = hint.fontMetrics().horizontalAdvance(said(hint.text()))
+    assert hint.width() >= one_line, "wide enough for the sentence on one line, not a narrow column"
+    fits(d)
+
+
+# ---------------------------------------------------------------------------------------------
+# Found by the independent walk of the built app
+# ---------------------------------------------------------------------------------------------
+def test_a_change_goes_on_using_the_collector_the_machine_already_sends_to(session):
+    """k8s-node-01 reaches only the branch collector. Set up there, a later change must keep sending there."""
+    d, _window, _world = session.start()
+    d.click("action-k8s-node-01")
+    d.click("machine-retry")
+    sign_in(d)
+    d.click("flow-next")
+    d.in_dialog(lambda: d.click("collector-use-2", settle=False), lambda: d.click("check-fix-k8s-node-01", settle=False))
+    d.click("flow-next")
+    d.click("flow-next")
+    assert d.find("result-headline").title.text() == "k8s-node-01 is set up"
+    d.click("flow-next")
+    d.click("machine-change")
+    d.click("tick-diskio")
+    d.click("tick-swap")
+    d.click("flow-next")
+    assert "branch-cp-01" in d.text("review-collector") and "Main site" not in d.text("review-collector")
+    d.click("flow-next")
+    assert d.find("result-headline").title.text() == "The change is in effect on k8s-node-01"
+    command = d.text("command-text")
+    assert f"--collector {standins.BRANCH.address}" in command and standins.GROUP.address not in command
+
+
+def test_a_failed_change_is_never_shown_as_finished_and_try_again_keeps_the_ticks(session):
+    d, window, world = session.start()
+    web = world.machine("web-prod-01")
+    d.click("open-web-prod-01")
+    d.click("machine-change")
+    sign_in(d)
+    d.click("flow-next")
+    d.click("tick-diskio")
+    d.click("tick-swap")
+    d.click("flow-next")
+    web.reach = set()   # the way to the collector closes after the review
+    d.click("flow-next")
+    assert d.find("result-headline").title.text() == "The change was not applied to web-prod-01"
+    told = window.history.entries()[0].rows[0].todo
+    assert "your ticks are kept" in told and "offers one it can reach" not in told, "a change does not offer another collector"
+    d.click("result-retry-web-prod-01")
+    assert d.page() == "collect" and d.text("flow-title") == "CHANGE WHAT IS COLLECTED"
+    assert d.find("tick-diskio").isChecked() and not d.find("tick-swap").isChecked(), "the ticks of the failed attempt"
+    assert "your ticks from the last attempt" in d.text("page-sub")
+    d.click("flow-next")
+    assert d.has("review-add") and d.has("review-rem")
+    d.click("flow-next")
+    assert d.find("result-headline").title.text() == "The change was not applied to web-prod-01", "still no way through"
+    # Done, after a failure, goes back to the machine, and nothing there or on the list says it worked
+    d.click("flow-next")
+    assert d.page() == "machine"
+    assert d.find("machine-headline").title.text() == "The last change to this machine was not applied"
+    assert d.has("machine-retry") and d.has("machine-remove"), "it is still monitored, with its old settings"
+    assert "Swap use" in words(d, "machine-collecting") and "Disk activity" not in words(d, "machine-collecting")
+    assert "Main site" in said(d.text("machine-facts")) and "Not sending yet" not in said(d.text("machine-facts"))
+    d.click("nav-machines")
+    assert d.find("status-web-prod-01").status == "Needs attention"
+    assert not d.has("banner"), "no banner saying the change finished"
+    assert "The last change was not applied" in d.find("status-web-prod-01").parent().findChildren(QLabel)[-1].text()
+    fits(d)
+    # Put right: the same ticks go through, and the machine is fine again
+    web.reach = set(standins.ALL)
+    d.click("action-web-prod-01")
+    d.click("machine-retry")
+    assert d.find("tick-diskio").isChecked() and not d.find("tick-swap").isChecked()
+    d.click("flow-next")
+    d.click("flow-next")
+    assert d.find("result-headline").title.text() == "The change is in effect on web-prod-01"
+    deployed = web.uploaded_files["/etc/telegraf/telegraf.d/vcf-helper-system.conf"]
+    assert "[[inputs.diskio]]" in deployed and "[[inputs.swap]]" not in deployed
+    d.click("flow-next")
+    d.click("nav-machines")
+    assert d.find("status-web-prod-01").status == "Sending data"
+    assert window.history.facts("res-vm-001")["collecting"] == ["cpu", "mem", "disk", "net", "system", "diskio"]
+
+
+def test_done_after_a_run_with_a_failure_does_not_say_finished_in_green(session):
+    d, _window, world = session.start()
+    d.click("tick-db-pg-01")
+    d.click("tick-files-01")
+    d.click("selection-setup")
+    sign_in(d)
+    d.click("flow-next")
+    d.click("flow-next")
+    d.click("flow-next")
+    world.machine("files-01").internet = False   # the way out closes after the check
+    d.click("flow-next")
+    assert d.has("result-retry-files-01")
+    d.click("flow-next")
+    assert d.page() == "machines"
+    banner = d.find("banner")
+    assert "banner-bad" in banner.property("class"), "red, not green"
+    assert "did not work on files-01" in said(banner.text.text()) and "finished" not in said(banner.text.text())
+    assert d.find("status-files-01").status == "Needs attention"
+    fits(d)
+
+
+def test_good_news_does_not_share_the_machines_screen_with_a_problem_and_eight_rows_all_show(session):
+    d, window, _world = session.start()
+    assert d.has("banner"), "connected, ready"
+    listing = d.find("machines-list")
+    assert not listing.more.isVisible() and listing.scroll.verticalScrollBar().maximum() == 0, "eight rows, no inner scrolling"
+    window.inventory_note = "HTTP 502 while reading the agents"
+    window.banner = ("ok", "<b>Connected.</b> The app is ready.")
+    window.show_machines()
+    d.settle()
+    assert d.has("banner-inventory") and not d.has("banner"), "the problem is what needs reading"
+    listing = d.find("machines-list")
+    assert not listing.more.isVisible() and listing.scroll.verticalScrollBar().maximum() == 0
+    fits(d)
+
+
+def test_user_name_and_password_sit_level_on_the_first_screen(session):
+    d, window, _world = session.start(connect=False)
+
+    def top(name: str) -> int:
+        return d.find(name).mapTo(window, d.find(name).rect().topLeft()).y()
+
+    assert top("connect-user") == top("connect-password"), "the two boxes are level"
+    user = d.find("connect-user")
+    caption = user.parent().findChildren(QLabel)[0]
+    gap = top("connect-user") - (caption.mapTo(window, caption.rect().bottomLeft()).y() + 1)
+    assert 0 <= gap <= 8, f"the label sits right on its box, not {gap}px above it"
+    d.click("connect-go")
+    assert top("connect-user") == top("connect-password"), "and stay level with the messages showing"
+    fits(d)
+
+
+def test_the_sign_in_hints_are_shown_whole(session):
+    d, _window, _world = session.start()
+    d.click("tick-db-pg-01")
+    d.click("tick-db-sql-02")
+    d.click("selection-setup")
+    for os_family, ending in (("linux", "the account is not allowed."), ("windows", "tells you if it is not.")):
+        hint = d.find(f"signin-hint-{os_family}")
+        assert said(hint.text()).endswith(ending)
+        assert hint.height() >= hint.heightForWidth(hint.width()), f"the {os_family} hint is cut off"
+    fits(d)
+
+
+def test_review_and_result_say_which_databases_a_database_tick_watches(session):
+    d, window, _world = session.start()
+    d.click("action-db-pg-01")
+    sign_in(d)
+    d.click("flow-next")
+    d.click("flow-next")
+
+    def account() -> None:
+        d.type("database-user", "monitor")
+        d.type("database-password", "db-secret-value")
+        d.click("database-test", settle=False)
+        d.wait(lambda: d.has("database-found"), what="databases found")
+        d.click("database-add", settle=False)
+
+    d.in_dialog(account, lambda: d.click("tick-pg", settle=False))
+    d.click("flow-next")
+    # The stand-in database server holds orders, billing and postgres. Telegraf's PostgreSQL input, given
+    # no list of databases, reports on every database on the server; the address only names the one it signs in through.
+    stated = 'PostgreSQL: every database on that server is watched (orders, billing and postgres), not one of them alone.'
+    shown = said(d.text("review-databases"))
+    assert shown.startswith(stated) and 'signs in through "orders"' in shown
+    fits(d)
+    d.click("flow-next")
+    row = window.history.entries()[0].rows[0]
+    assert stated in row.msg and "dbname=orders" in row.cmd
+    assert stated in words(d, "result-list")
+    assert d.find("result-headline").title.text() == "db-pg-01 is set up", "saying it is not a warning"
+    fits(d)
+
+
+def test_the_smallest_window_is_one_every_screen_fits(session):
+    d, window, _world = session.start()
+    assert (window.minimumWidth(), window.minimumHeight()) == (1000, 700)
+    window.resize(window.minimumSize())
+    d.settle()
+    fits(d)
+    for name in ("db-pg-01", "web-prod-02", "db-sql-02", "files-01"):
+        d.click(f"tick-{name}")
+    fits(d)
+    d.click("selection-setup")
+    sign_in(d)
+    fits(d)
+    d.click("flow-next")
+    fits(d)
+    d.click("flow-next")
+    assert d.page() == "collect" and d.has("tick-winsvc"), "Linux and Windows machines together: all three groups"
+    fits(d)
+    d.click("flow-next")
+    fits(d)
+    d.click("flow-next")
+    fits(d)

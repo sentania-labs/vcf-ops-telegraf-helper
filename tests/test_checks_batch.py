@@ -606,3 +606,96 @@ def test_the_package_goes_to_a_folder_only_this_sign_in_can_write_to(tmp_path):
     workflow.run()
     script = next(cmd for cmd in win.executed_commands if "Get-FileHash" in cmd)
     assert "$destZip = 'C:\\Users\\O''Brien\\Temp\\" in script
+
+
+SYSTEM_FILE = "/etc/telegraf/telegraf.d/vcf-helper-system.conf"
+
+
+@pytest.mark.parametrize("key, setting, secret", [
+    ("pg", "postgres://monitor:s3cret-in-uri@localhost/metrics", "s3cret-in-uri"),
+    ("pg", "postgresql://monitor:p@ss:w0rd@db.example.com:5432/metrics?sslmode=disable", "p@ss:w0rd"),
+    ("pg", "postgres://monitor@localhost/metrics?password=s3cret-in-query&sslmode=disable", "s3cret-in-query"),
+    ("mssql", "sqlserver://sa:s3cret-in-uri@localhost:1433?database=master", "s3cret-in-uri"),
+    ("mysql", "monitor:s3cret-no-protocol@/metrics", "s3cret-no-protocol"),
+])
+def test_a_password_inside_a_deployed_address_is_never_shown_saved_or_copied(tmp_path, key, setting, secret):
+    """A machine already set up with the password inside the address (postgres://user:password@host/db).
+
+    The oracle is the secret itself: after reading that machine and changing something else on it,
+    the secret may be in one place only, the settings file on the machine.
+    """
+    from vcf_ops_telegraf_helper.storage.history import HistoryStore
+
+    deployed = c.monitoring_for(c.CollectChoices(keys=["cpu", "swap", key]), "linux")
+    if key == "pg":
+        deployed.postgresql.address = setting
+    elif key == "mssql":
+        deployed.mssql.servers = [setting]
+    else:
+        deployed.mysql.servers = [setting]
+    executor = MockExecutor(telegraf_installed=True)
+    executor.uploaded_files[SYSTEM_FILE] = TelegrafRenderer.render_system_inputs(deployed)
+
+    read = c.read_deployed_choices(executor.uploaded_files[SYSTEM_FILE], "linux")
+    assert read.details[key]["raw"] == setting
+    read.remove("swap")
+    change = _plan(kind=p.KIND_CHANGE, install=p.KEEP, choices=read)
+    runner = _runner([change], {"10.20.2.21": executor})
+    outcome = runner.run()["res-1"]
+    assert outcome.ok, outcome.msg
+    assert setting in executor.uploaded_files[SYSTEM_FILE], "the machine keeps the setting exactly as it was"
+
+    entry = batch.build_entry("change", [change], runner.outcomes, CONN, removed=["swap"])
+    HistoryStore(tmp_path / "history.json").add(entry)
+    written = (tmp_path / "history.json").read_text()
+    command = entry.rows[0].cmd
+    for text in (command, outcome.log, outcome.report, entry.report, entry.log, written):
+        assert secret not in text, f"{secret!r} was written down"
+    assert setting.replace(secret, "<password>") in command, "the command names the same address, password left out"
+
+
+def test_changing_something_else_keeps_the_status_page_address_already_in_use():
+    """A web server watched at its own address keeps that address when an unrelated tick changes."""
+    own = "http://localhost:8080/basic_status"
+    before = c.monitoring_for(c.CollectChoices(keys=["cpu", "swap", "nginx", "apache"]), "linux",
+                              web_urls={"nginx": own, "apache": "http://localhost:8081/server-status?auto"})
+    executor = MockExecutor(telegraf_installed=True)
+    executor.uploaded_files[SYSTEM_FILE] = TelegrafRenderer.render_system_inputs(before)
+
+    result = checks.check_machine(request(kind=checks.KIND_CHANGE), lambda target: executor)
+    choices = result.current
+    choices.remove("swap")
+    choices.add("diskio")
+    change = _plan(kind=p.KIND_CHANGE, install=p.KEEP, choices=choices, found=list(result.found), web_urls=dict(result.web_urls))
+    assert _runner([change], {"10.20.2.21": executor}).run()["res-1"].ok
+    after = executor.uploaded_files[SYSTEM_FILE]
+    assert own in after and "http://localhost:8081/server-status?auto" in after
+    assert c.DEFAULT_WEB_URL["nginx"] not in after and "[[inputs.diskio]]" in after and "[[inputs.swap]]" not in after
+    command = p.build_command(change, CONN)
+    assert f"--nginx {own}" in command, "and the command says the same address"
+
+
+def test_a_status_page_password_is_left_out_of_what_is_saved_and_shown():
+    own = "http://status:w3b-secret@localhost/nginx_status"
+    choices = c.CollectChoices(keys=["cpu", "nginx"], details={"nginx": {"url": own}})
+    change = _plan(kind=p.KIND_CHANGE, install=p.KEEP, choices=choices)
+    assert change.monitoring().nginx.urls == [own], "the machine keeps its working address"
+    assert "w3b-secret" not in p.build_command(change, CONN)
+    assert "w3b-secret" not in choices.without_secrets().model_dump_json()
+    assert "w3b-secret" in c.secrets_in(choices), "so the log and the report are scrubbed of it too"
+    # A saved address with its password left out cannot be written back to a machine
+    saved = choices.without_secrets()
+    assert c.monitoring_for(saved, "linux").nginx.urls == [c.DEFAULT_WEB_URL["nginx"]]
+
+
+def test_a_change_of_settings_alone_is_named_in_the_row_and_the_report():
+    executor = MockExecutor(telegraf_installed=True)
+    executor.uploaded_files[SYSTEM_FILE] = TelegrafRenderer.render_system_inputs(
+        c.monitoring_for(c.CollectChoices(keys=["cpu", "ping"], details={"ping": {"addr": "10.20.0.1"}}), "linux"))
+    change = _plan(kind=p.KIND_CHANGE, install=p.KEEP,
+                   choices=c.CollectChoices(keys=["cpu", "ping"], details={"ping": {"addr": "gateway.example.com"}}))
+    runner = _runner([change], {"10.20.2.21": executor})
+    assert runner.run()["res-1"].changed
+    assert "gateway.example.com" in executor.uploaded_files[SYSTEM_FILE]
+    entry = batch.build_entry("change", [change], runner.outcomes, CONN, edited=["Ping test"])
+    assert "New settings for: Ping test." in entry.rows[0].msg and "New settings for: Ping test." in entry.report
