@@ -30,27 +30,36 @@ Windows releases are Authenticode signed. Mac apps are Developer ID signed, nota
 
 ### Have these ready
 
-- Your VCF Operations URL and an API token, or a username and password.
-- The Cloud Proxy or collector group that should receive the agent's metrics.
-- Guest credentials for the target VM: SSH with root or passwordless sudo for Linux, or WinRM with administrative rights for Windows.
-- Any enterprise CA bundle needed to trust your Ops server.
+- The address of VCF Operations and your user name and password there (or an access token, if you were given one).
+- A sign-in for the machines you want to monitor: on Linux the `root` account or one with full `sudo` rights that is not asked for a password, on Windows an administrator account.
 
-### Follow the six steps in the app
+That is all. The app finds out the rest for itself: how to reach each machine, what is installed on it, what software is running, which collector it can reach, and which Telegraf version to install.
 
-1. **Connect:** enter the Ops connection details and validate them.
-2. **Select VM:** pick the VM from inventory. All agent states are shown by default; resize columns as needed.
-3. **Configure Target VM:** enter guest credentials, select the collector, and detect the endpoint. A missing agent defaults to the latest recommended version; an installed agent defaults to keeping it. If you pick a newer release than the installed agent, the app offers an upgrade and restarts the service when you apply; a release equal to or older than the installed one is never applied (no reinstall, no downgrade) and the app says so. From the CLI, `--install-telegraf --telegraf-version <ver>` installs a missing agent or upgrades an older one, and reports when the version is left unchanged.
-4. **Monitoring Inputs:** choose the metrics you want. Additional Windows Perfmon counters appear in the same panel. The Windows baseline includes **Windows OS Totals** (cpu, mem and swap with the `win.` prefix), the same inputs the Ops-managed agent collects, so the Windows OS object carries its full stat-key set. Re-running an existing Windows endpoint with **Replace existing helper inputs** adds them; if you added that fragment by hand as custom TOML, remove it to avoid collecting twice.
-5. **Review & Preview:** inspect the offline configuration template.
-6. **Execute & Verify:** use dry-run to inspect the exact prepared configuration, then apply it. After a successful apply, exit or go back to revise options and run again.
+### Using the app
 
-On Windows, desktop launch hides the executable's classic Command Prompt window. Commands launched in an existing terminal retain their output.
+The app opens on **Connect**: the address, your user name and your password. The address and name are remembered for next time; the password is asked each time and never saved. If VCF Operations uses a certificate your computer does not recognise (normal when a company issues its own), the app shows who the certificate was issued to and by and asks you to trust it once; it then accepts only that certificate and warns you if it ever changes. A certificate file from your IT team works too.
 
-A small **New version available** link beneath the app name opens the newer release page. The app checks GitHub in the background at most once a day, with no login or Ops credentials. Offline or failed checks stay silent.
+After connecting you land on **Machines**: every machine VCF Operations knows about, each with a plain status (Not set up, Sending data, Set up and waiting for first data, VCF Operations' own agent, Needs attention, Takeover interrupted) and the next step at the end of its row. **Activity** keeps everything the app has done, and **Settings** holds its own settings.
 
-The app shows progress while connecting and querying. Dry-run leaves endpoint files unchanged, but preparation may request a client certificate from Ops. Fresh agent data can take a collection cycle to appear; a running service alone does not establish ingestion.
+Anything you do to machines is a short guided path with its steps listed on the left:
 
-**Already running an Ops-managed agent?** The VM list marks it as "Reporting, Ops managed", and detecting the endpoint shows the managed services instead of letting ordinary onboarding continue. On Windows and Linux you can check **Take over existing Ops agent**: the helper captures the managed configuration and the Ops object, backs the configuration up on your workstation, asks VCF Operations to uninstall its agent (with the guest credential you entered, as typed), verifies the endpoint is clean, installs and enrolls open-source Telegraf with the same inputs, and then confirms that the same Ops object flipped to Open Source and is receiving samples. The Monitoring Inputs step starts from the imported configuration; the Baseline preset discards it. Executing asks you to type the VM name. Expect a monitoring gap of about 15 minutes between the Ops uninstall and the first open-source sample. If the app closes after the managed agent was retired, detect the endpoint again and the helper offers to resume from its journal (under the app's config directory, never holding passwords or keys); if it closes before that, nothing was changed and you start over. The Linux implementation follows the VCF Operations 9.1.1 layout on Ubuntu 24.04; see [docs/agent-takeover.md](docs/agent-takeover.md) for the Linux stages and what is retained. From the CLI: `run ... --vm-id <mor> [--vc-id <vcenter uuid>] --vm-name <name> --take-over-managed-agent --confirm-takeover <name>`; input flags other than workload additions are refused in takeover mode, and the exit code is 3 when VCF Operations created a different object.
+- **Set up monitoring** on one machine (the button on its row) or on several at once (tick them, then the button at the bottom). You sign in once per kind of machine. A **Check** step signs in, looks at what is installed and running, and tests the collector and the download; it changes nothing, and any problem is listed first with its own fix (a different sign-in for that machine, a collector that machine can reach, or sending Telegraf from this computer when the machine has no way out to the internet). **What to collect** has the usual set ticked; software the app found running is marked, a found web server is switched on for you, and a found database asks for a database account. **Review** says what will happen to each machine; **Practice run** goes through every step that does not change a machine. Two machines are worked on at a time, and you can stop the ones not yet changed.
+- **Test connection only** for machines, and **Test the connection now** under Settings for VCF Operations itself.
+- **Change what is collected** from a machine's page: tick or untick, or give an item new settings, see exactly what starts, stops and changes, then apply. What you tick is what is applied, the machine goes on sending to the collector it already uses, and the app reads the settings back from the machine to confirm. A change that could not be applied leaves the machine marked "Needs attention" until it is put right.
+- **Try again** after a failure keeps the choices from last time.
+- **Remove monitoring** from a machine's page.
+
+Every path ends on a result that says in a sentence what happened, counted against what you picked, with the reason and what to do next to anything that did not work. A database tick watches the whole database server; Review and the result say so, and name the databases the app found. Under it, **Do this again from the command line** shows the complete command for what was just done, one per machine, with each password shown as `<password>`. The same result, with its command, is kept under Activity.
+
+An installed Telegraf is kept at its version by default; you can update that one machine on the Check step, or change the default in Settings. A version is never moved down. On Windows the basics are collected the Windows way (the standard counter set with the `win.` totals the Ops-managed agent also collects), as one set.
+
+The window opens at 1000 by 700, which is also the smallest it goes: every screen is made to fit that size without scrolling.
+
+A small **New version available** link in the left column opens the newer release page. The app checks GitHub in the background at most once a day, with no login or Ops credentials; Settings can switch this off. Offline or failed checks stay silent. On Windows, desktop launch hides the executable's classic Command Prompt window. Commands launched in an existing terminal retain their output.
+
+A practice run leaves the machine unchanged, but preparing it may request a client certificate from VCF Operations. Fresh data can take a collection cycle to appear; until VCF Operations shows it, the machine says "waiting for first data" rather than "sending data".
+
+**Already running an Ops-managed agent?** The machine's status is "VCF Operations' own agent", and a setup leaves it out. Press **Take over** on its row (Windows and Linux): the Review screen lists what will happen in order and what stays the same, offers a practice run, and asks you to type the machine's name. The helper then saves the managed configuration and the Ops object on your workstation, asks VCF Operations to uninstall its agent (with the machine sign-in you gave), verifies the machine is clean, installs and enrolls open-source Telegraf with the same inputs, and confirms that the same Ops object flipped to Open Source and is receiving samples. Expect a monitoring gap of about 15 minutes. If the app closes after the managed agent was retired, the machine shows "Takeover interrupted" with **Finish takeover**, which carries on from the journal (under the app's config directory, never holding passwords or keys); if it closes before that, nothing was changed and you start over. The Linux implementation follows the VCF Operations 9.1.1 layout on Ubuntu 24.04; see [docs/agent-takeover.md](docs/agent-takeover.md) for the stages and what is retained. From the CLI: `run ... --vm-id <mor> [--vc-id <vcenter uuid>] --vm-name <name> --take-over-managed-agent --confirm-takeover <name>`; input flags other than workload additions are refused in takeover mode, and the exit code is 3 when VCF Operations created a different object.
 
 ## Verify downloads (optional)
 
@@ -70,7 +79,7 @@ gh attestation verify <file> --repo sentania-labs/vcf-ops-telegraf-helper
 
 ## Optional command-line use
 
-The app includes a CLI for administrators who want repeatable commands or a terminal workflow. The GUI also displays a command for repeating the selected workflow.
+The app includes a CLI for administrators who want repeatable commands or a terminal workflow. Every result in the app, and every saved result under Activity, shows the command that does the same thing.
 
 On Windows, invoke the downloaded executable with a command. On Linux, use `./vcf-telegraf-helper-linux`. On macOS, use the executable inside the app:
 
@@ -109,20 +118,22 @@ Add `$HOME/.local/bin` to your shell's `PATH` if needed. The command refuses to 
 
 ## Existing configuration and trust
 
-Reruns preserve deployed helper inputs unless you select **Replace existing inputs** (`--replace-inputs` in the CLI). Other configuration fragments are retained. Unrelated inputs in the main configuration require review before onboarding. The Baseline preset resets added Perfmon selections.
+In the app, what you tick is what the machine collects: changing a machine, or setting up one that is already monitored, replaces the helper's inputs after showing you what starts and stops. From the CLI, a rerun preserves deployed helper inputs unless you pass `--replace-inputs`. Other configuration fragments are retained either way, and settings in the helper's file that are outside its list are carried along. Unrelated inputs in the main configuration require review before onboarding.
 
-Desktop API trust uses the operating system certificate store, including Windows and macOS. An enterprise CA bundle affects desktop-to-Ops trust. Agent-to-collector TLS is a separate setting, enabled by default, using the collector CA deployed on the target.
+Desktop API trust uses the operating system certificate store, including Windows and macOS. A certificate the store does not know can be trusted by its fingerprint (the app offers this on first sight; `--trust-cert-sha256` in the CLI), or checked against a company certificate file (Settings, Advanced; `--ca-cert`). Agent-to-collector TLS is a separate setting, enabled by default, using the collector CA deployed on the target.
+
+A machine that cannot reach the Telegraf download site can be sent the release from your computer (the Check step offers it; `--send-telegraf` in the CLI). Your computer downloads it over HTTPS from InfluxData, and the machine verifies the SHA-256 of the copy it received before installing it.
 
 ## Product Principles
 
 * **Follows Broadcom Documentation**: Uses the official VCF Operations 9.1 open-source Telegraf workflow. See [docs/references.md](docs/references.md).
 * **Local-First Helper**: Behaves like an administrator utility (such as `vcf-cf-migrator`). No background daemons, databases, or centralized server infrastructure.
-* **Safe Changes (Low Blast Radius)**: Generates isolated configuration fragments in `/etc/telegraf/telegraf.d/` (`vcf-helper-system.conf` and `cloudproxy-http.conf`). Existing helper input selections and unrelated fragments are retained by default; replacing helper inputs is an explicit choice. Helper-managed collector output and security files are updated for the selected integration. A main configuration containing unrelated inputs requires review before onboarding.
+* **Safe Changes (Low Blast Radius)**: Generates isolated configuration fragments in `/etc/telegraf/telegraf.d/` (`vcf-helper-system.conf` and `cloudproxy-http.conf`). Unrelated fragments are always retained. The helper's own inputs are replaced only when you change them, and the app shows what starts and stops first. Helper-managed collector output and security files are updated for the selected integration. A main configuration containing unrelated inputs requires review before onboarding.
 * **Idempotent and Drift-Free**: Re-running configuration against an existing target produces deterministic files and reports whether updates were needed.
-* **Transparent**: The app offers configuration previews and dry-run so you can inspect the prepared configuration before applying it.
-* **Honest Validation**: Separately validates configuration syntax, endpoint reachability, collector connectivity, and service state. Failures in one layer are never masked.
-* **Direct Push**: Deploys over SSH (Linux) or WinRM (Windows). The GUI shows the equivalent `vcf-telegraf-helper run` command for anyone who needs to adapt it.
-* **Inventory-Driven Targeting**: Pick the VM from VCF Operations inventory (templates and deleted VMs excluded, powered-off VMs and platform VMs such as vCLS, Supervisor control plane and appliance nodes hidden by default; `vcf-telegraf-helper vms --include-platform-vms` and the GUI "Show platform VMs" toggle reveal the latter). Guest OS, IP, agent status, and the agent's current collector come from VCF Operations, and each step unlocks only when the previous one is complete.
+* **Transparent**: The Review step can show the exact settings files, and a practice run goes through every step that does not change a machine, so you can inspect what will be applied before applying it.
+* **Honest Validation**: Separately validates configuration syntax, endpoint reachability, collector connectivity, and service state. Failures in one layer are never masked, and the app never reports success for something it did not do: a result counts against what you picked and names every machine that was left out, stopped or failed.
+* **Direct Push**: Deploys over SSH (Linux) or WinRM (Windows). Every result shows the equivalent `vcf-telegraf-helper run` command for anyone who needs to adapt it.
+* **Inventory-Driven Targeting**: Pick the VM from VCF Operations inventory (templates and deleted VMs excluded, powered-off VMs and platform VMs such as vCLS, Supervisor control plane and appliance nodes hidden by default; `vcf-telegraf-helper vms --include-platform-vms` and the "Show" link under the Machines list reveal the latter). Guest OS, IP, agent status, and the agent's current collector come from VCF Operations.
 
 ## Python and development
 
@@ -147,4 +158,4 @@ On managed Windows, the pip-generated launcher is unsigned and may be blocked by
 
 ## License
 
-MIT; see [LICENSE](LICENSE). The app bundles third-party open-source components (including PySide6/Qt under LGPLv3 and paramiko under LGPL-2.1). Their notices and license texts are built into the app: open **About > Licenses** in the GUI or run `vcf-telegraf-helper --licenses`. Each release also attaches a `THIRD-PARTY-NOTICES-<platform>.txt` file.
+MIT; see [LICENSE](LICENSE). The app bundles third-party open-source components (including PySide6/Qt under LGPLv3 and paramiko under LGPL-2.1). Their notices and license texts are built into the app: open **About this app > Open-source licences** in the app or run `vcf-telegraf-helper --licenses`. Each release also attaches a `THIRD-PARTY-NOTICES-<platform>.txt` file.

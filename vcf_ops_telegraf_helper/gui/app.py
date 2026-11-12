@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import sys
+from typing import Optional
 
 
 def hide_console_window() -> None:
@@ -33,7 +34,7 @@ def hide_console_window() -> None:
             pass
 
 
-def run_gui(theme: str = "dark") -> int:
+def run_gui(theme: Optional[str] = None) -> int:
     """Launch the native Lattice-styled PySide6 GUI application."""
     hide_console_window()
 
@@ -92,7 +93,7 @@ def run_gui(theme: str = "dark") -> int:
         )
         return 1
 
-    app.setApplicationName("VCF Operations Open Telegraf Helper")
+    app.setApplicationName("Telegraf Helper")
     # Stylesheets size text in pixels, leaving the default font point size unset (-1),
     # which Qt warns about whenever a widget derives a font from it.
     default_font = app.font()
@@ -112,6 +113,7 @@ def run_gui(theme: str = "dark") -> int:
         else:
             window = MainWindow()
         if theme in ("light", "dark"):
+            # Asked for on the command line for this launch only; the remembered choice is not changed
             window.current_theme = theme
             window._apply_theme()
         window.show()

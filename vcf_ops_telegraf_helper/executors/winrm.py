@@ -153,6 +153,54 @@ class WinRMExecutor(EndpointExecutor):
             if not res.success:
                 raise RuntimeError(f"Failed to upload file to {destination_path}: {res.stderr or res.stdout}")
 
+    def upload_file(self, local_path: str, destination_path: str, mode: int = 0o644) -> None:
+        """Copy a large file by streaming it to a PowerShell process on the target.
+
+        The ordinary upload sends about a kilobyte per round trip, which is fine for settings
+        files and hopeless for an 80 MB package. Here one process reads its standard input into
+        the file and the content is sent in large pieces.
+        """
+        session = self._get_session()
+        protocol = session.protocol
+        if not hasattr(protocol, "send_command_input"):
+            super().upload_file(local_path, destination_path, mode)
+            return
+        safe_path = destination_path.replace("/", "\\").replace("'", "''")
+        script = (
+            f"$target = '{safe_path}'; "
+            "$parent = [System.IO.Path]::GetDirectoryName($target); "
+            "if ($parent -and -not (Test-Path $parent)) { New-Item -ItemType Directory -Path $parent -Force | Out-Null }; "
+            "$in = [System.Console]::OpenStandardInput(); "
+            "$out = [System.IO.File]::Create($target); "
+            "try { $in.CopyTo($out) } finally { $out.Close() }"
+        )
+        encoded = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
+        protocol.operation_timeout_sec = max(60, self.timeout)
+        protocol.read_timeout_sec = protocol.operation_timeout_sec + 15
+        protocol.transport.read_timeout_sec = protocol.read_timeout_sec
+        shell_id = protocol.open_shell()
+        try:
+            command_id = protocol.run_command(
+                shell_id, "powershell", ["-NoProfile", "-NonInteractive", "-EncodedCommand", encoded],
+                console_mode_stdin=False,
+            )
+            try:
+                with open(local_path, "rb") as handle:
+                    while True:
+                        # 96 KB is 128 KB once base64 is added: under the 150 KB envelope older Windows defaults to
+                        piece = handle.read(96 * 1024)
+                        if not piece:
+                            break
+                        protocol.send_command_input(shell_id, command_id, piece)
+                protocol.send_command_input(shell_id, command_id, b"", end=True)
+                _out, err, code = protocol.get_command_output(shell_id, command_id)
+            finally:
+                protocol.cleanup_command(shell_id, command_id)
+        finally:
+            protocol.close_shell(shell_id)
+        if code != 0:
+            raise RuntimeError(f"Failed to copy the file to {destination_path}: {err.decode('utf-8', errors='replace').strip()}")
+
     def download(self, source_path: str) -> str:
         """Download file content from the target Windows machine."""
         safe_path = source_path.replace("/", "\\").replace("'", "''")

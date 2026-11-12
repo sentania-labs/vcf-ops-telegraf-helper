@@ -763,6 +763,22 @@ class TakeoverWorkflow:
             return self._result(TakeoverStage.CONTINUITY, StageStatus.WARNING, f"Continuity could not be verified: {exc}", start)
 
     # ------------------------------------------------------------------ run
+    PRACTICE_STAGES = ("capture", "backup", "preflight")
+
+    def run_practice(self) -> List[StageResult]:
+        """Run only the stages that change nothing on the endpoint, then stop.
+
+        The managed agent's settings are read and saved, and the replacement is prepared and
+        validated (stage 3). Nothing is retired, removed or installed. Give the workflow its own
+        journal directory so a practice run never touches the record of a real takeover.
+        """
+        for name in self.PRACTICE_STAGES:
+            res = getattr(self, name)()
+            self.stage_results.append(res)
+            if res.status == StageStatus.FAIL:
+                break
+        return self.stage_results
+
     def run(self) -> TakeoverSummary:
         stages = [self.capture, self.backup, self.preflight, self.retire, self.clean, self.install, self.continuity]
         success = True

@@ -1,9 +1,6 @@
 """Unit tests for Windows Telegraf agent detection (issue #32)."""
 
-import os
 from unittest.mock import MagicMock
-
-os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from vcf_ops_telegraf_helper.executors.base import CommandResult
 from vcf_ops_telegraf_helper.models.endpoint import (
@@ -19,32 +16,12 @@ from vcf_ops_telegraf_helper.models.workflow import (
     StageStatus,
     WorkflowOptions,
 )
-from vcf_ops_telegraf_helper.storage.state import StateStore
-from vcf_ops_telegraf_helper.gui.main_window import MainWindow
 from vcf_ops_telegraf_helper.workflow.engine import ConfigureEndpointWorkflow
 from vcf_ops_telegraf_helper.workflow.windows import (
     WindowsTelegrafDetection,
     _extract_binary_path,
     detect_windows_telegraf,
 )
-import pytest
-
-try:
-    from PySide6.QtWidgets import QApplication
-    has_pyside6 = True
-except (ImportError, OSError):
-    has_pyside6 = False
-
-
-@pytest.fixture(scope="session")
-def qapp():
-    """Session-wide QApplication instance for offscreen GUI tests."""
-    if not has_pyside6:
-        pytest.skip("PySide6 not installed")
-    app = QApplication.instance()
-    if app is None:
-        app = QApplication([])
-    return app
 
 
 def test_extract_binary_path_variants():
@@ -191,8 +168,8 @@ def test_detect_windows_telegraf_not_installed():
     assert det.running is False
 
 
-def test_gui_and_engine_consistent_on_custom_path(qapp, tmp_path):
-    """GUI and engine return the same result for the same mocked responses."""
+def test_check_and_engine_consistent_on_custom_path():
+    """The window's check and the engine return the same result for the same mocked responses."""
     def _create_canned_executor():
         mock = MagicMock()
         mock.test_connection.return_value = True
@@ -239,22 +216,13 @@ def test_gui_and_engine_consistent_on_custom_path(qapp, tmp_path):
     assert wf.discovery.telegraf_installed is True
     assert wf.discovery.telegraf_bin_path == r"C:\Program Files\VMware\vcf-telegraf\telegraf.exe"
 
-    # 2. GUI check
-    gui_exec = _create_canned_executor()
-    state_file = tmp_path / "state.json"
-    store = StateStore(state_file=state_file)
-    window = MainWindow(state_store=store)
-    window.ep_os_combo.setCurrentText("Windows")
-    window._create_executor = lambda t: gui_exec
+    # 2. The check the window runs before a setup sees the same installation
+    from vcf_ops_telegraf_helper.workflow.probe import probe_endpoint
 
-    window.ep_user_input.setText("operator")
-    window._detect_endpoint()
-    assert window._endpoint_detected is True
-    assert window.ep_missing_banner.isHidden() is True
-    details = window.ep_details_box.toPlainText()
-    assert "Telegraf Installed: YES" in details
-    assert r"Telegraf Binary: C:\Program Files\VMware\vcf-telegraf\telegraf.exe" in details
-    assert "Service Name: vcf-telegraf" in details
+    found = probe_endpoint(target, _create_canned_executor())
+    assert found["installed"] is True
+    assert found["binary"] == r"C:\Program Files\VMware\vcf-telegraf\telegraf.exe"
+    assert found["service"] == "vcf-telegraf"
 
 
 def test_detect_windows_telegraf_rejects_non_telegraf_service():

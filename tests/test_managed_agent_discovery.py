@@ -27,7 +27,7 @@ from vcf_ops_telegraf_helper.workflow.windows import (
     detect_managed_installation,
     is_managed_detection,
 )
-from vcf_ops_telegraf_helper.gui.probes import probe_endpoint
+from vcf_ops_telegraf_helper.workflow.probe import probe_endpoint
 
 from test_workflow import _create_test_workflow
 
@@ -340,42 +340,27 @@ def test_probe_reports_managed_installation_instead_of_raising():
     assert plain["managed"] is None
 
 
-def test_gui_detection_blocks_managed_endpoint_with_service_names(tmp_path, monkeypatch):
-    pytest.importorskip("PySide6")
-    from PySide6.QtWidgets import QApplication
-    from vcf_ops_telegraf_helper.gui.main_window import MainWindow
-    from vcf_ops_telegraf_helper.storage.state import StateStore
+def test_setup_check_leaves_a_managed_endpoint_out_and_points_at_takeover():
+    """An ordinary setup never touches a machine that carries the Ops-managed agent."""
+    from vcf_ops_telegraf_helper.workflow import checks
 
-    QApplication.instance() or QApplication([])
-    window = MainWindow(state_store=StateStore(state_file=tmp_path / "state.json"))
-    window.ep_os_combo.setCurrentText("Windows")
-    window.ep_host_input.setText("tg-w22-01")
-    window.ep_user_input.setText("administrator")
-    window.ep_pass_input.setText("x")
-    monkeypatch.setattr(window, "_create_executor", lambda target: _ManagedEndpoint())
-    window._vcf_validated = True
-    window.bound_vm = VirtualMachineResource(resource_id="r", name="tg-w22-01", vm_mor="vm-6068", vc_id="vc")
-    window._selected_collector = lambda: CollectorInfo(address="10.10.10.50")
-    window._detect_endpoint()
-    # detection succeeds, but the next step stays locked until the takeover is explicitly selected
-    assert window._endpoint_detected is True
-    assert window.managed_installation is not None
-    assert not window.ep_managed_banner.isHidden()
-    assert "Ops-managed agent detected" in window.ep_status_label.text()
-    assert "ucp-telegraf" in window.ep_details_box.toPlainText()
-    assert window.takeover_check.isChecked() is False
-    assert "Take over existing Ops agent" in (window._gate_reason(window.STEP_MONITORING) or "")
-    assert window.ep_uninstall_btn.isEnabled() is False
-    window.close()
+    machine = checks.MachineRef(machine_id="r", name="tg-w22-01", address="tg-w22-01", os="windows", vm_mor="vm-6068", vc_id="vc")
+    request = checks.CheckRequest(machine=machine, username="administrator", password="x",
+                                  collectors=[CollectorInfo(address="10.10.10.50")])
+    result = checks.check_machine(request, lambda target: _ManagedEndpoint())
+    assert result.state == checks.SKIP and result.managed
+    assert "VCF Operations' own agent" in result.what and "Take over" in result.todo
+    tested = checks.check_machine(request.model_copy(update={"kind": checks.KIND_TEST}), lambda target: _ManagedEndpoint())
+    assert tested.ok and tested.managed
 
 
-def test_agent_status_text_marks_ops_managed():
-    from vcf_ops_telegraf_helper.gui.main_window import MainWindow
+def test_machine_status_marks_ops_managed():
+    from vcf_ops_telegraf_helper.workflow.plain import STATUS_MANAGED, STATUS_SENDING, machine_status
 
     vm = VirtualMachineResource(resource_id="r", name="tg-w22-01", telegraf_status="Reporting", managed_type="Product Managed", agent_registrations=1)
-    assert MainWindow._agent_status_text(vm) == "Reporting, Ops managed"
+    assert machine_status(vm).status == STATUS_MANAGED
     oss = VirtualMachineResource(resource_id="r", name="x", telegraf_status="Reporting", managed_type="Open Source", agent_registrations=2)
-    assert MainWindow._agent_status_text(oss) == "Reporting (2 registrations)"
+    assert machine_status(oss).status == STATUS_SENDING
 
 
 def test_stock_saltstack_minion_is_not_an_ops_agent():

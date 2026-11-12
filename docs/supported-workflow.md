@@ -46,5 +46,5 @@ The helper orchestrates these steps from an administrator workstation without re
 * **Recovery Mechanism**:
   Because configuration is modularized into drop-in fragments under `telegraf.d/`, rolling back changes requires only removing the managed `.conf` files and restarting Telegraf. In automated deployments, the helper restores `.bak` configuration automatically upon validation failure.
 * **Deployment Mode**:
-  The utility deploys by direct push only, over SSH (Linux) or WinRM (Windows). Where push needs adapting to local policy, the GUI's Execute step shows the equivalent `vcf-telegraf-helper run` command, which can be copied and modified.
+  The utility deploys by direct push only, over SSH (Linux) or WinRM (Windows). Where push needs adapting to local policy, every result in the app (and every saved result under Activity) shows the equivalent `vcf-telegraf-helper run` command, which can be copied and modified.
 
