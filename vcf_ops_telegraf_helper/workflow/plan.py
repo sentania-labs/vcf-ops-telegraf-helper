@@ -8,6 +8,7 @@ line are both built from the plan, so the command always matches what was really
 
 from __future__ import annotations
 
+import re
 import shlex
 import sys
 from typing import Dict, List, Optional
@@ -139,9 +140,14 @@ class MachinePlan(BaseModel):
 QUOTE_NOTE = "Keep the quotes around <password> in a database setting."
 
 
+def _without_sign_in_passwords(command: str) -> str:
+    return re.sub(r"--[a-z-]*pass(?:word)? \"<password>\"", "", command)
+
+
 def quote_note_for(commands) -> str:
     """The extra line the command box needs when a database password sits in quotes."""
-    needed = any(placeholder_for("pg") in cmd or "Password=" + placeholder_for("mssql") in cmd for cmd in commands)
+    quoted = (placeholder_for("pg"), placeholder_for("mssql"))
+    needed = any(any(form in _without_sign_in_passwords(cmd) for form in quoted) for cmd in commands)
     return QUOTE_NOTE if needed else ""
 
 

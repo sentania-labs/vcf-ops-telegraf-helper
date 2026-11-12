@@ -344,3 +344,11 @@ def test_the_command_for_a_database_with_a_password_carries_the_quoting_line():
     assert seen["monitoring"].postgresql.address == "host=localhost port=5432 user=monitor password='<password>' sslmode=disable"
     assert p.quote_note_for([command]) == p.QUOTE_NOTE
     assert p.quote_note_for([_same_run(_plan())[0]]) == ""
+
+
+def test_the_quoting_line_follows_a_deployed_setting_whatever_it_calls_the_password():
+    plan = _plan(os="windows", name="db-sql-02", address="10.20.2.32", username="administrator", found=["mssql"], single=False,
+                 choices=c.CollectChoices(keys=["mssql"], details={"mssql": {"raw": "Server=127.0.0.1;User Id=sa;PWD=secret;"}}))
+    command, seen, _target, _options = _same_run(plan)
+    assert 'PWD="<password>"' in seen["monitoring"].mssql.servers[0] and "secret" not in command
+    assert p.quote_note_for([command]) == p.QUOTE_NOTE
