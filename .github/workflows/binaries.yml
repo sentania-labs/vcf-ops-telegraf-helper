@@ -138,6 +138,8 @@ jobs:
           security import "$RUNNER_TEMP/dmg-cert.p12" -k "$DMG_KEYCHAIN" -P "$MACOS_CERT_PASSWORD" -T /usr/bin/codesign
           rm -f "$RUNNER_TEMP/dmg-cert.p12"
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$DMG_KEYCHAIN_PW" "$DMG_KEYCHAIN" > /dev/null
+          # Unquoted on purpose: the existing search list must split into one argument per keychain.
+          # shellcheck disable=SC2046
           security list-keychains -d user -s "$DMG_KEYCHAIN" $(security list-keychains -d user | tr -d '"')
           identities="$(security find-identity -v -p codesigning "$DMG_KEYCHAIN" | grep 'Developer ID Application' || true)"
           if [ "$(printf '%s\n' "$identities" | grep -c .)" != "1" ]; then
