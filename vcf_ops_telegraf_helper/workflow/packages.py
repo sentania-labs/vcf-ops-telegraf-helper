@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import threading
 from pathlib import Path
 from typing import Optional, Tuple
 
@@ -19,6 +20,7 @@ from vcf_ops_telegraf_helper.storage.state import DEFAULT_STATE_DIR
 
 logger = get_logger("packages")
 
+_fetch_lock = threading.Lock()
 RELEASES = "https://dl.influxdata.com/telegraf/releases"
 DOWNLOAD_HOST = "dl.influxdata.com"
 DEFAULT_PACKAGE_DIR = DEFAULT_STATE_DIR / "packages"
@@ -45,6 +47,12 @@ def fetch_telegraf_package(
     session: Optional[requests.Session] = None,
 ) -> Tuple[Path, str]:
     """Return (path, sha256) of the release archive, downloading it unless a complete copy is kept."""
+    # Two machines in one run may both need the package: the first downloads it, the second finds it kept
+    with _fetch_lock:
+        return _fetch(version, is_windows, is_arm, directory, session)
+
+
+def _fetch(version, is_windows, is_arm, directory, session) -> Tuple[Path, str]:
     directory = Path(directory) if directory else DEFAULT_PACKAGE_DIR
     directory.mkdir(parents=True, exist_ok=True)
     name = package_name(version, is_windows, is_arm)
@@ -58,7 +66,7 @@ def fetch_telegraf_package(
     http = session or requests.Session()
     url = f"{RELEASES}/{name}"
     logger.info("Downloading %s", url)
-    partial = target.with_suffix(target.suffix + ".part")
+    partial = directory / f"{name}.{os.getpid()}.{threading.get_ident()}.part"
     with http.get(url, stream=True, timeout=(10, 60)) as response:
         if response.status_code != 200:
             raise RuntimeError(f"the download site answered HTTP {response.status_code} for {name}")

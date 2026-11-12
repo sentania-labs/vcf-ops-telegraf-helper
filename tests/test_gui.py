@@ -91,7 +91,7 @@ def fits(d: Driver) -> None:
 
 def said(text: str) -> str:
     """What a label shows: its rich text without the markup."""
-    return html.unescape(re.sub(r"<[^>]+>", " ", text)).replace("\xa0", " ")
+    return " ".join(html.unescape(re.sub(r"<[^>]+>", " ", text)).replace("\xa0", " ").split())
 
 
 def words(d: Driver, name: str) -> str:
@@ -330,7 +330,7 @@ def test_set_up_one_machine_start_to_finish(session):
     assert headline.title.text() == "db-pg-01 is set up" and headline.kind == "ok"
     assert "PostgreSQL was found here but is not watched" in words(d, "result-db-pg-01")
     command = d.text("command-text")
-    assert command.startswith("vcf-telegraf-helper run \\\n") and "..." not in command
+    assert command.startswith("vcf-telegraf-helper run --replace-inputs \\\n") and "..." not in command
     assert '--vcf-pass "<password>"' in command and '--ssh-pass "<password>"' in command and "pw" not in command.split()
     assert "--vm-name db-pg-01" in command and "--install-telegraf --telegraf-version 1.40.1" in command
     d.click("command-copy")
@@ -798,8 +798,20 @@ def test_closing_is_refused_while_a_machine_is_being_changed(session, monkeypatc
     window.flow.run.changing.add("res-vm-003")
     event = QCloseEvent()
     window.closeEvent(event)
-    assert not event.isAccepted() and "cannot be stopped half-way" in warned[0]
+    assert not event.isAccepted() and "working on a machine right now" in warned[0]
+    # the whole of a real run is protected, not only the moment a machine is being written to
+    window.flow.run.changing.clear()
+    event = QCloseEvent()
+    window.closeEvent(event)
+    assert not event.isAccepted(), "closing mid-run would lose the record of machines already changed"
+    window.flow.run.practice = True
+    assert not window.flow.changing_now(), "a practice run changes nothing, so it does not hold the app open"
     window.flow.run = None
+    window.working_on = "res-vm-001"
+    event = QCloseEvent()
+    window.closeEvent(event)
+    assert not event.isAccepted(), "nor can the app be closed while monitoring is being removed"
+    window.working_on = None
 
 
 # ---------------------------------------------------------------------------------------------
@@ -929,3 +941,73 @@ def test_fresh_window_does_not_touch_the_real_home(session, tmp_path):
     assert tmp_path in window.state_store.state_file.parents
     assert tmp_path in window.history.history_file.parents and tmp_path in window.journal.directory.parents
     assert isinstance(window, MainWindow) and isinstance(window.state_store, StateStore)
+
+
+# ---------------------------------------------------------------------------------------------
+# Headlines count against what was picked, in every combination
+# ---------------------------------------------------------------------------------------------
+def _entry(rows, kind="setup", practice=False):
+    from vcf_ops_telegraf_helper.storage.history import ActivityEntry, ActivityRow
+
+    made = [ActivityRow(machine_id=f"m{i}", name=f"machine-{i}", **row) for i, row in enumerate(rows)]
+    return ActivityEntry(title="Set up monitoring", kind=kind, practice=practice, rows=made)
+
+
+OK, FAILED, LEFT, STOPPED, WAITING = {}, {"ok": False, "msg": "x"}, {"left": True}, {"skipped": True}, {"pending": True}
+
+
+@pytest.mark.parametrize("rows,practice,kind,expected,tone", [
+    ([OK, OK], False, "setup", "Both machines are set up", "ok"),
+    ([OK, OK, OK], False, "setup", "All 3 machines are set up", "ok"),
+    ([OK, WAITING], False, "setup", "Both machines are set up", "ok"),
+    ([WAITING], False, "setup", "machine-0 is set up", "info"),
+    ([OK, LEFT], False, "setup", "1 of the 2 machines you picked is set up. 1 was left out.", "warn"),
+    ([OK, OK, LEFT, STOPPED], False, "setup", "2 of the 4 machines you picked are set up. 2 were left out or stopped.", "warn"),
+    ([OK, FAILED], False, "setup", "1 of 2 machines set up. 1 needs attention.", "bad"),
+    ([OK, OK, OK, FAILED, LEFT], False, "setup",
+     "3 of the 5 machines you picked are set up. 1 needs attention, and 1 was left out.", "bad"),
+    ([STOPPED, STOPPED], False, "setup", "Stopped. Nothing was changed.", "info"),
+    ([OK], True, "setup", "Practice run finished. Nothing was changed.", "info"),
+    ([OK, STOPPED, LEFT], True, "setup",
+     "Practice run finished for 1 of the 3 machines you picked. Nothing was changed.", "warn"),
+    ([FAILED], True, "setup", "The practice run found a problem. Nothing was changed.", "bad"),
+    ([FAILED], False, "change", "The change was not applied to machine-0", "bad"),
+    ([FAILED], False, "takeover", "The takeover of machine-0 did not finish", "bad"),
+])
+def test_live_headline_never_overstates(qapp, rows, practice, kind, expected, tone):
+    from vcf_ops_telegraf_helper.gui.results import live_headline
+
+    headline = live_headline(_entry(rows, kind, practice))
+    assert said(headline.title.text()) == expected and headline.kind == tone
+
+
+def test_saved_headline_matches_what_the_run_really_did(session):
+    from vcf_ops_telegraf_helper.gui.results import saved_headline
+
+    _d, window, _world = session.start()
+    assert saved_headline(window, _entry([OK])).kind == "ok"
+    waiting = saved_headline(window, _entry([OK, WAITING]))
+    assert waiting.kind == "info" and "1 of 2 were still waiting for first data" in waiting.title.text()
+    assert saved_headline(window, _entry([{"note": True}])).kind == "ok", "a note on a setup is not a warning"
+    assert saved_headline(window, _entry([{"note": True}], kind="takeover")).kind == "warn"
+    failed = saved_headline(window, _entry([FAILED]))
+    assert failed.kind == "bad" and "put right since" not in failed.small.text(), "nothing later worked, so it does not say so"
+    partly = saved_headline(window, _entry([OK, LEFT]))
+    assert partly.kind == "warn" and "1 of the 2 machines picked was set up" in partly.title.text()
+
+
+def test_a_failed_line_offers_its_fix_and_claims_nothing_it_cannot_show(session):
+    d, window, _world = session.start()
+    # a change that failed on a machine that is still sending data: the remedy is shown, with a way to try again
+    from vcf_ops_telegraf_helper.storage.history import ActivityEntry, ActivityRow
+
+    window.history.add(ActivityEntry(id="failed-change", title="Change what is collected", kind="change", rows=[ActivityRow(
+        machine_id="res-vm-001", name="web-prod-01", ok=False, msg="Telegraf did not accept the new settings.",
+        todo="The machine is as it was before.")]))
+    d.click("nav-activity")
+    d.click("activity-open-failed-change")
+    line = words(d, "result-web-prod-01")
+    assert "What to do: The machine is as it was before." in line and "later attempt" not in line
+    assert d.find("result-retry-web-prod-01").text() == "Try again"
+    d.click("result-retry-web-prod-01")
+    assert d.text("flow-title") == "CHANGE WHAT IS COLLECTED"

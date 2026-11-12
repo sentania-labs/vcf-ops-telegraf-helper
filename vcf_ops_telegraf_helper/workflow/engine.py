@@ -6,6 +6,7 @@ import hashlib
 import ipaddress
 import os
 import ntpath
+import re
 import difflib
 import shlex
 import socket
@@ -58,6 +59,19 @@ from vcf_ops_telegraf_helper.utils import (
 from vcf_ops_telegraf_helper.workflow.managed_linux import detect_linux_managed_installation
 
 logger = get_logger("workflow.engine")
+
+
+_CONNECTION_SETTING = re.compile(r"^([+\- ]\s*(?:servers|address|dsn)\s*=\s*).*$", re.MULTILINE)
+
+
+def _hide_connection_settings(diff: str) -> str:
+    """Drop the value of every connection setting from a diff of inputs.
+
+    A database connection setting carries a password in a form no pattern can reliably pick out
+    (it may contain "@", ";" or spaces). The diff is kept in reports and history, so the whole
+    value is left out; that the line changed is still shown.
+    """
+    return _CONNECTION_SETTING.sub(lambda m: m.group(1) + '"[REDACTED]"', diff)
 
 
 def _is_stock_windows_sample(content: str) -> bool:
@@ -580,10 +594,10 @@ class ConfigureEndpointWorkflow:
             system_file = join(config_dir, "vcf-helper-system.conf")
             if self.executor.file_exists(system_file):
                 deployed = self.executor.download(system_file)
-                self.input_diff = self._sanitize("".join(difflib.unified_diff(
+                self.input_diff = self._sanitize(_hide_connection_settings("".join(difflib.unified_diff(
                     deployed.splitlines(keepends=True), self.system_conf_content.splitlines(keepends=True),
                     fromfile="deployed inputs", tofile="requested inputs",
-                ))) or ""
+                )))) or ""
                 if not self.options.replace_inputs:
                     self.system_conf_content = deployed
                     self.reporter.on_message("Preserving deployed inputs. Use Replace existing inputs to apply a new selection.")
@@ -895,7 +909,7 @@ class ConfigureEndpointWorkflow:
                         "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; "
                         f"$zipUrl = '{zip_url}'; "
                         + (
-                            f"$destZip = '{sent_path}'; "
+                            "$destZip = '" + sent_path.replace("'", "''") + "'; "
                             if sent_path
                             else "$destZip = \"$env:TEMP\\telegraf.zip\"; "
                         )
@@ -996,7 +1010,9 @@ class ConfigureEndpointWorkflow:
                         "\"; then "
                         "td=$(mktemp -d /tmp/telegraf.XXXXXX) && "
                         + (
-                            f"tar -xzf \"{sent_path}\" -C \"$td\" && rm -f \"{sent_path}\" && "
+                            (f"tar -xzf \"{sent_path}\" -C \"$td\" && rm -f \"{sent_path}\" && "
+                             + (f"rmdir \"{sent_path.rsplit('/', 1)[0]}\" 2>/dev/null; "
+                                if sent_path.startswith("/tmp/vcf-telegraf.") else ""))
                             if sent_path
                             else f"curl -fsSL \"{tar_url}\" | tar -xz -C \"$td\" && "
                         )
@@ -1763,7 +1779,12 @@ class ConfigureEndpointWorkflow:
             folder = temp.stdout.strip().splitlines()[-1].strip() if temp.success and temp.stdout.strip() else "C:\\Windows\\Temp"
             remote = ntpath.join(folder, name)
         else:
-            remote = f"/tmp/{name}"
+            # A folder only this sign-in can write to, so nothing else on the machine can swap the file
+            made = self.executor.execute("mktemp -d /tmp/vcf-telegraf.XXXXXX", timeout=10)
+            folder = made.stdout.strip().splitlines()[-1].strip() if made.success and made.stdout.strip() else ""
+            if not folder.startswith("/tmp/vcf-telegraf.") or any(ch in folder for ch in " '\"$`\\"):
+                folder = "/tmp"
+            remote = f"{folder}/{name}"
         self.reporter.on_message(f"Sending {name} to {self.target.hostname} ({remote})")
         self.executor.upload_file(str(local_path), remote)
         return remote, sha256

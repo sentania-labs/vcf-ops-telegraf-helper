@@ -98,6 +98,7 @@ from vcf_ops_telegraf_helper.workflow.plan import (
     PUSH,
     UPDATE,
     MachinePlan,
+    placeholder_monitoring,
 )
 
 SETUP, TEST, TAKEOVER, CHANGE = "setup", "test", "takeover", "change"
@@ -164,6 +165,7 @@ class Flow:
         self.test_entry_id: Optional[str] = None
         self.record = None  # the journal record of an interrupted takeover
         self._generation = 0
+        self._tickets: Dict[str, int] = {}
         self._lock = threading.Lock()
         self._refused: set = set()
         self._accepted: set = set()
@@ -261,7 +263,12 @@ class Flow:
         return self.coll.get(machine_id) or self.coll_all or (result.collector if result else None)
 
     def changing_now(self) -> bool:
-        return bool(self.run and not self.run.finished and self.run.changing)
+        """True from the start of a real run until its result is recorded.
+
+        A machine may already have been changed, or be about to be, at any moment of a real run,
+        and the record of the run is written when it ends. Closing is refused for all of it.
+        """
+        return bool(self.run and not self.run.finished and not self.run.practice)
 
     def abandon(self) -> None:
         """The window is closing or the person left: stop what can be stopped and ignore late answers."""
@@ -353,6 +360,10 @@ class Flow:
             # The database password is never kept on disk, so that item has to be asked again
             self.choices.remove(key)
             self.edit_collect = True
+        if self.choices.had_custom:
+            # Nor are someone's own Telegraf settings: they may hold a password
+            self.edit_collect = True
+            self.lost_custom = True
         if not self.choices.keys:
             self.choices = CollectChoices(keys=list(self.win.settings.defaults))
             self.edit_collect = True
@@ -557,15 +568,21 @@ class Flow:
         )
 
     def run_checks(self, ids: List[str], then=None) -> None:
-        """Check these machines, two at a time. Each reports on its own as it finishes."""
-        self._generation += 1
+        """Check these machines, two at a time. Each reports on its own as it finishes.
+
+        Every check carries a ticket for its machine. Testing one machine again while others are
+        still being checked replaces only that machine's ticket, so the others still report.
+        """
         generation = self._generation
         win = self.win
+        tickets = {}
         for machine_id in ids:
             previous = self.check.get(machine_id)
             if previous is not None and previous.state == chk.BAD:
                 self.previous_problem[machine_id] = previous.what
             self.check[machine_id] = None
+            self._tickets[machine_id] = self._tickets.get(machine_id, 0) + 1
+            tickets[machine_id] = self._tickets[machine_id]
         requests = {i: self._request(self.machine(i)) for i in ids}
 
         def one(machine_id: str) -> None:
@@ -594,15 +611,16 @@ class Flow:
                         self._refused.add(account)
                     elif result.signed_in:
                         self._accepted.add(account)
-            win.tasks.post(lambda: self._check_answer(generation, machine_id, result))
+            win.tasks.post(lambda: self._check_answer(generation, tickets[machine_id], machine_id, result))
 
         win.tasks.run(lambda: run_pool([lambda i=i: one(i) for i in ids]),
                       done=lambda _r: self._checks_done(generation, then),
                       failed=lambda _e: self._checks_done(generation, then), name="checks")
 
-    def _check_answer(self, generation: int, machine_id: str, result: CheckResult) -> None:
-        if not self._alive or generation != self._generation or machine_id not in self.ids:
-            return
+    def _check_answer(self, generation: int, ticket: int, machine_id: str, result: CheckResult) -> None:
+        if not self._alive or generation != self._generation or machine_id not in self.ids \
+                or self._tickets.get(machine_id) != ticket:
+            return  # the person moved on, or asked for this machine to be tested again
         before = self.previous_problem.pop(machine_id, None)
         if result.state == chk.BAD and before and before == result.what:
             result.same_as_before = True
@@ -924,6 +942,9 @@ class Flow:
             title = "What should be collected?"
             if self.retry:
                 sub = "These are the choices from the last attempt. Change them if you like, then continue."
+                if getattr(self, "lost_custom", False) and not self.choices.custom_toml.strip():
+                    sub += (" Your own Telegraf settings from last time were not kept, because they can hold a password: "
+                            "add them again with the link below if you still want them.")
             elif pending:
                 it = "it" if len(pending) == 1 else "them"
                 also = f", and so is {join_names(auto_on)}, which the app found running" if auto_on else ""
@@ -1150,25 +1171,9 @@ class Flow:
             winrm_ssl=result.winrm_ssl, collector=collector, collector_label=collector_label(collector),
             install=self.install_for(machine_id), version=self.version, installed_version=result.installed_version,
             choices=self.choices.model_copy(deep=True), found=list(result.found), web_urls=dict(result.web_urls),
-            single=single or self.kind == CHANGE, practice=practice,
-            replace=self.kind == CHANGE or bool(result.monitored), resume=self.resume,
+            single=single or self.kind == CHANGE, practice=practice, resume=self.resume,
         )
-        if self.choices.custom_toml.strip() and self.kind != TAKEOVER:
-            plan.custom_toml_file = self._custom_file(machine)
         return plan
-
-    def _custom_file(self, machine: Machine) -> str:
-        """Keep the person's own settings in a file so the command line can use the same ones."""
-        folder = self.win.state_store.state_file.parent / "own-settings"
-        folder.mkdir(parents=True, exist_ok=True)
-        safe = "".join(ch if ch.isalnum() or ch in "-_." else "_" for ch in machine.name)
-        path = folder / f"{safe}.toml"
-        path.write_text(self.choices.custom_toml.strip() + "\n", encoding="utf-8")
-        try:
-            path.chmod(0o600)
-        except OSError:
-            pass
-        return str(path)
 
     def _what_happens(self, machine_id: str) -> str:
         result = self.check[machine_id]
@@ -1354,8 +1359,7 @@ class Flow:
             machine = self.machine(machine_id)
             folder = "C:\\telegraf\\telegraf.d" if plan.windows else "/etc/telegraf/telegraf.d"
             sep = "\\" if plan.windows else "/"
-            inputs = redact_secrets(TelegrafRenderer.render_system_inputs(plan.monitoring()), [
-                str(d.get("password")) for d in plan.choices.details.values() if d.get("password")])
+            inputs = TelegrafRenderer.render_system_inputs(placeholder_monitoring(plan))
             output = TelegrafRenderer.render_vcf_output(
                 collector_address=plan.collector.address, hostname=machine.name, is_windows=plan.windows,
                 vm_mor=plan.vm_mor, vc_id=plan.vc_id, verify_ssl=self.win.conn.agent_verify_ssl,
@@ -1512,11 +1516,7 @@ class Flow:
                 return
             outcome = outcomes[machine_id]
             self.practice_state = {"done": True, "ok": outcome.ok, "what": outcome.msg, "todo": outcome.todo}
-            entry = build_entry(TAKEOVER, [plan], outcomes, win.conn, practice=True)
-            for row in entry.rows:
-                row.cmd = ""  # the command line has no practice run for a takeover
-            entry.log = entry.log.split("\n\nThe command to do this again")[0]
-            win.history.add(entry)
+            win.history.add(build_entry(TAKEOVER, [plan], outcomes, win.conn, practice=True))
             if win.flow is self and self.step == REVIEW:
                 self._show_takeover_review()
 

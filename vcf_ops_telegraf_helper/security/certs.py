@@ -106,6 +106,20 @@ class PinnedCertificateAdapter(HTTPAdapter):
         pool_kwargs["assert_fingerprint"] = self.fingerprint
         return super().init_poolmanager(connections, maxsize, block, **pool_kwargs)
 
+    def proxy_manager_for(self, proxy, **proxy_kwargs):
+        # A connection made through a proxy is built by a different manager; it needs the pin as well
+        proxy_kwargs["assert_fingerprint"] = self.fingerprint
+        return super().proxy_manager_for(proxy, **proxy_kwargs)
+
+    def get_connection_with_tls_context(self, request, verify, proxies=None, cert=None):
+        conn = super().get_connection_with_tls_context(request, verify, proxies=proxies, cert=cert)
+        if normalize_fingerprint(getattr(conn, "assert_fingerprint", None)) != self.fingerprint:
+            # Never fall back to an unchecked connection: without the pin there is no check at all
+            import requests
+
+            raise requests.exceptions.SSLError("The trusted certificate could not be enforced on this connection")
+        return conn
+
     def cert_verify(self, conn, url, verify, cert):
         # The pool asserts the fingerprint on every connection; no authority is consulted
         super().cert_verify(conn, url, False, cert)

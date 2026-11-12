@@ -407,7 +407,7 @@ def test_practice_run_changes_nothing_and_change_is_confirmed_by_reading_back():
     assert batch.run_title("takeover", resume=True) == "Finish a takeover"
     # a real setup, then a change that is read back from the machine
     _runner([_plan()], {"10.20.2.21": executor}).run()
-    change = _plan(kind=p.KIND_CHANGE, install=p.KEEP, replace=True, choices=c.CollectChoices(keys=["cpu", "mem", "diskio"]))
+    change = _plan(kind=p.KIND_CHANGE, install=p.KEEP, choices=c.CollectChoices(keys=["cpu", "mem", "diskio"]))
     outcome = _runner([change], {"10.20.2.21": executor}).run()["res-1"]
     assert outcome.ok and outcome.msg.startswith("Change applied. The app read the settings back from the machine")
     deployed = executor.uploaded_files["/etc/telegraf/telegraf.d/vcf-helper-system.conf"]
@@ -445,6 +445,9 @@ def test_takeover_through_the_runner_and_a_practice_run_that_touches_no_record(t
     assert sorted(set(steps)) == [0, 1, 2], "reading, saving and validating are reported as they happen"
     assert endpoint.managed and not adapters[-1].uninstall_calls, "a practice run removes nothing"
     assert TakeoverJournal(journal).list_records() == [], "and leaves no record of a takeover"
+    rehearsal = batch.build_entry("takeover", [plan.model_copy(update={"practice": True})], practice.outcomes, CONN, practice=True)
+    assert not rehearsal.rows[0].cmd and "--take-over-managed-agent" not in rehearsal.report, \
+        "the command line has no practice run for a takeover, so a practice run never hands out the real command"
 
     changing = []
     real = batch.BatchRunner([plan], CONN, adapter, lambda target: endpoint, on_changing=changing.append,
@@ -477,3 +480,115 @@ def test_takeover_that_cannot_be_prepared_changes_nothing_and_says_so(tmp_path):
 def test_stage_results_keep_their_status_for_the_log():
     summary = _workflow(MockExecutor(telegraf_installed=False), dry_run=True).run()
     assert summary.stages[-1].status == StageStatus.SKIPPED and WorkflowOptions().send_telegraf is False
+
+
+def test_data_is_arriving_is_said_only_when_vcf_operations_confirmed_it():
+    class Unsure(MockVCFOpsIntegration):
+        def verify_ingestion(self, *args, **kwargs):
+            raise RuntimeError("HTTP 502 from VCF Operations")
+
+    executor = MockExecutor(telegraf_installed=False)
+    outcome = batch.BatchRunner([_plan()], CONN, lambda env: Unsure(env), lambda target: executor).run()["res-1"]
+    assert outcome.ok and outcome.pending, "set up, but nobody saw data arrive"
+    assert "Waiting for first data" in outcome.msg and "Data is arriving" not in outcome.msg
+
+
+def test_a_database_password_never_reaches_the_log_the_report_or_the_history(tmp_path):
+    from vcf_ops_telegraf_helper.storage.history import HistoryStore
+
+    secret, old_secret = "p@ss w;rd", "0ld@pa ss"
+    executor = MockExecutor(telegraf_installed=True)
+    before = c.CollectChoices(keys=["cpu", "mysql", "pg"], details={
+        "mysql": {"user": "mon", "password": old_secret}, "pg": {"user": "mon", "password": old_secret}})
+    executor.uploaded_files["/etc/telegraf/telegraf.d/vcf-helper-system.conf"] = TelegrafRenderer.render_system_inputs(
+        c.monitoring_for(before, "linux"))
+    change = _plan(kind=p.KIND_CHANGE, install=p.KEEP, choices=c.CollectChoices(keys=["cpu", "mem", "mysql", "pg", "mssql"], details={
+        "mysql": {"user": "mon", "password": secret}, "pg": {"user": "mon", "password": secret},
+        "mssql": {"user": "mon", "password": secret}}))
+    runner = _runner([change], {"10.20.2.21": executor})
+    outcome = runner.run()["res-1"]
+    assert outcome.ok, outcome.msg
+    deployed = executor.uploaded_files["/etc/telegraf/telegraf.d/vcf-helper-system.conf"]
+    assert secret in deployed, "the machine itself does get the password"
+    entry = batch.build_entry("change", [change], runner.outcomes, CONN)
+    store = HistoryStore(tmp_path / "history.json")
+    store.add(entry)
+    written = (tmp_path / "history.json").read_text()
+    for text in (outcome.log, outcome.report, entry.report, entry.log, entry.rows[0].cmd, written):
+        for word in (secret, old_secret, "w;rd", "pa ss", "p@ss", "0ld@pa"):
+            assert word not in text, f"{word!r} was written down"
+    assert "Requested input changes" in outcome.report and 'servers = "[REDACTED]"' in outcome.report
+
+
+def test_two_machines_can_be_sent_the_same_package_at_once(tmp_path):
+    import time as clock
+
+    class Slow:
+        status_code = 200
+        headers = {"Content-Length": "9"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def iter_content(self, chunk_size=1):
+            clock.sleep(0.05)
+            yield b"archive-1"
+
+    class Session:
+        calls = 0
+
+        def get(self, url, **kwargs):
+            Session.calls += 1
+            return Slow()
+
+    results, errors = [], []
+
+    def fetch():
+        try:
+            results.append(fetch_telegraf_package("1.40.1", False, False, directory=tmp_path, session=Session()))
+        except Exception as exc:  # the test reports it below
+            errors.append(exc)
+
+    threads = [threading.Thread(target=fetch) for _ in range(4)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(10)
+    assert not errors and len(set(results)) == 1 and results[0][0].read_bytes() == b"archive-1"
+    assert Session.calls == 1, "the first download is kept; the others use it"
+    assert not list(tmp_path.glob("*.part"))
+
+
+def test_the_package_goes_to_a_folder_only_this_sign_in_can_write_to(tmp_path):
+    package = tmp_path / package_name("1.40.1", False, False)
+    package.write_bytes(b"pretend archive")
+    sha = hashlib.sha256(b"pretend archive").hexdigest()
+
+    class Receives(MockExecutor):
+        def execute(self, command, timeout=30):
+            if command.startswith("mktemp -d /tmp/vcf-telegraf."):
+                return CommandResult(exit_code=0, stdout="/tmp/vcf-telegraf.Ab12Cd\n", command=command)
+            if "sha256sum -c" in command:
+                self.executed_commands.append(command)
+                self.telegraf_installed, self.service_active, self.telegraf_version = True, True, "Telegraf 1.40.1"
+                return CommandResult(exit_code=0, command=command)
+            return super().execute(command, timeout)
+
+    executor = Receives(telegraf_installed=False)
+    workflow = _workflow(executor, _plan(install=p.PUSH))
+    workflow.package_fetcher = lambda version, windows, arm: (package, sha)
+    assert workflow.run().success
+    remote = f"/tmp/vcf-telegraf.Ab12Cd/{package.name}"
+    assert remote in executor.uploaded_files
+    install = next(cmd for cmd in executor.executed_commands if "sha256sum -c" in cmd)
+    assert f'"{sha}  {remote}"' in install and 'rmdir "/tmp/vcf-telegraf.Ab12Cd"' in install
+    # a Windows temp folder with an apostrophe in it does not break the install script
+    win = MockExecutor(telegraf_installed=False, custom_responses={"$env:TEMP": CommandResult(exit_code=0, stdout="C:\\Users\\O'Brien\\Temp\n")})
+    workflow = _workflow(win, _plan(os="windows", install=p.PUSH, port=5985))
+    workflow.package_fetcher = lambda version, windows, arm: (package, sha)
+    workflow.run()
+    script = next(cmd for cmd in win.executed_commands if "Get-FileHash" in cmd)
+    assert "$destZip = 'C:\\Users\\O''Brien\\Temp\\" in script

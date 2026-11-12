@@ -92,9 +92,7 @@ class MachinePlan(BaseModel):
     web_urls: Dict[str, str] = Field(default_factory=dict)
     single: bool = True
     practice: bool = False
-    replace: bool = False
     resume: bool = False
-    custom_toml_file: Optional[str] = None
 
     @property
     def windows(self) -> bool:
@@ -174,7 +172,10 @@ def _connection_flags(conn: ConnectionChoices, quote) -> List[str]:
     return lines
 
 
-def collect_flags(mon: MonitoringConfig, windows: bool, quote=None, custom_toml_file: Optional[str] = None) -> str:
+OWN_SETTINGS_PLACEHOLDER = '"<file with your own Telegraf settings>"'
+
+
+def collect_flags(mon: MonitoringConfig, windows: bool, quote=None) -> str:
     """The command-line flags that select exactly this monitoring configuration."""
     quote = quote or _quoter()
     parts: List[str] = []
@@ -203,9 +204,9 @@ def collect_flags(mon: MonitoringConfig, windows: bool, quote=None, custom_toml_
             parts.append("--diskio")
         if mon.processes.enabled:
             parts.append("--processes")
-    return " ".join(parts + software_flags(mon, quote) + (
-        [f"--custom-toml-file {quote(custom_toml_file)}"] if custom_toml_file else []
-    ))
+    # Own settings are never written to this computer by the app: the command names where they go
+    own = [f"--custom-toml-file {OWN_SETTINGS_PLACEHOLDER}"] if (mon.custom_toml or "").strip() else []
+    return " ".join(parts + software_flags(mon, quote) + own)
 
 
 def software_flags(mon: MonitoringConfig, quote=None) -> List[str]:
@@ -228,7 +229,7 @@ def software_flags(mon: MonitoringConfig, quote=None) -> List[str]:
     return parts
 
 
-def _placeholder_monitoring(plan: MachinePlan) -> MonitoringConfig:
+def placeholder_monitoring(plan: MachinePlan) -> MonitoringConfig:
     """The plan's monitoring settings with every database password replaced by a placeholder."""
     mon = plan.monitoring().model_copy(deep=True)
     details = plan.choices.details
@@ -264,7 +265,8 @@ def build_command(plan: MachinePlan, conn: ConnectionChoices) -> str:
     quote = _quoter()
     takeover = plan.kind == KIND_TAKEOVER
     first = "vcf-telegraf-helper run"
-    if not takeover and plan.replace:
+    if not takeover:
+        # The app always applies what is ticked, so the command must replace what is deployed too
         first += " --replace-inputs"
     if plan.practice and not takeover:
         first += " --dry-run"
@@ -276,13 +278,16 @@ def build_command(plan: MachinePlan, conn: ConnectionChoices) -> str:
         where += f" --install-telegraf --telegraf-version {quote(plan.version)}"
         if plan.install == PUSH:
             where += " --send-telegraf"
-    elif takeover and plan.version != DEFAULT_TELEGRAF_VERSION:
-        where += f" --telegraf-version {quote(plan.version)}"
+    elif takeover:
+        if plan.version != DEFAULT_TELEGRAF_VERSION:
+            where += f" --telegraf-version {quote(plan.version)}"
+        if plan.install == PUSH:
+            where += " --send-telegraf"
     lines.append(where)
     if takeover:
         lines.append(f"--take-over-managed-agent --confirm-takeover {quote(plan.name)}")
     else:
-        lines.append(collect_flags(_placeholder_monitoring(plan), plan.windows, quote, plan.custom_toml_file))
+        lines.append(collect_flags(placeholder_monitoring(plan), plan.windows, quote))
     return _join(lines)
 
 

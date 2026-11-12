@@ -174,12 +174,12 @@ def test_linux_setup_command_reproduces_the_run(keys):
     command, seen, target, options = _same_run(plan)
     assert _settings(seen["monitoring"]) == _settings(plan.monitoring())
     assert options.install_telegraf and options.telegraf_version == "1.40.1" and not options.dry_run
-    assert not options.replace_inputs and "--replace-inputs" not in command
+    assert options.replace_inputs and "--replace-inputs" in command, "the app applies what is ticked, so the command must too"
     assert command.count("<password>") == 2 and "..." not in command
 
 
 def test_change_practice_keep_and_key_file_are_all_in_the_command():
-    change = _plan(kind=p.KIND_CHANGE, install=p.KEEP, replace=True, key_file="/home/me/.ssh/id_ed25519", password=None,
+    change = _plan(kind=p.KIND_CHANGE, install=p.KEEP, key_file="/home/me/.ssh/id_ed25519", password=None,
                    choices=c.CollectChoices(keys=["cpu", "mem", "disk", "net", "system", "diskio"]))
     command, seen, target, options = _same_run(change)
     assert options.replace_inputs and not options.install_telegraf and target.key_filename == "/home/me/.ssh/id_ed25519"
@@ -187,7 +187,7 @@ def test_change_practice_keep_and_key_file_are_all_in_the_command():
     assert _settings(seen["monitoring"]) == _settings(change.monitoring())
     practice = _plan(practice=True)
     command, _seen, _target, options = _same_run(practice)
-    assert options.dry_run and command.splitlines()[0].startswith("vcf-telegraf-helper run --dry-run")
+    assert options.dry_run and command.splitlines()[0] == "vcf-telegraf-helper run --replace-inputs --dry-run \\"
 
 
 def test_windows_setup_command_reproduces_the_run():
@@ -221,13 +221,18 @@ def test_sending_telegraf_a_trusted_certificate_and_other_connection_choices_tra
     assert "--vcf-user" not in command
 
 
-def test_own_settings_travel_as_a_file(tmp_path):
-    own = tmp_path / "own.toml"
-    own.write_text('[[inputs.http_response]]\n  urls = ["http://localhost/health"]\n')
-    plan = _plan(custom_toml_file=str(own), choices=c.CollectChoices(keys=list(c.USUAL_SET), custom_toml=own.read_text()))
-    command, seen, _target, _options = _same_run(plan)
-    assert f"--custom-toml-file {own}" in command
-    assert seen["monitoring"].custom_toml.strip() == plan.monitoring().custom_toml.strip()
+def test_own_settings_are_named_in_the_command_and_never_kept_on_this_computer(tmp_path):
+    own = '[[inputs.http_response]]\n  urls = ["http://localhost/health"]\n  password = "own-secret"\n'
+    plan = _plan(choices=c.CollectChoices(keys=list(c.USUAL_SET), custom_toml=own))
+    command = p.build_command(plan, CONN)
+    assert '--custom-toml-file "<file with your own Telegraf settings>"' in command and "own-secret" not in command
+    saved = plan.choices.without_secrets()
+    assert saved.custom_toml == "" and saved.had_custom and "own-secret" not in saved.model_dump_json()
+    # with the person's own file in place of the placeholder, the command reproduces the run
+    file = tmp_path / "own.toml"
+    file.write_text(own)
+    seen = _parse(command.replace('"<file with your own Telegraf settings>"', str(file)))
+    assert _settings(seen["monitoring"]) == _settings(plan.monitoring())
 
 
 def test_takeover_command_names_the_machine_and_asks_for_its_name():
@@ -235,8 +240,10 @@ def test_takeover_command_names_the_machine_and_asks_for_its_name():
     command = p.build_command(plan, CONN)
     assert "--take-over-managed-agent --confirm-takeover app-win-01" in command
     assert "--vm-id vm-1003" in command and "--vc-id 423b-0003" in command
-    for flag in ("--install-telegraf", "--replace-inputs", "--cpu", "--win-perf", "--dry-run"):
+    for flag in ("--install-telegraf", "--replace-inputs", "--cpu", "--win-perf", "--dry-run", "--send-telegraf"):
         assert flag not in command, flag
+    sent = p.build_command(plan.model_copy(update={"install": p.PUSH}), CONN)
+    assert "--send-telegraf" in sent and _parse(sent)["options"].send_telegraf, "a takeover that sent Telegraf says so"
     seen = _parse(command)
     assert seen["takeover"].confirmation_text == "--confirm-takeover app-win-01"
     assert seen["target"].vm_mor == "vm-1003" and seen["monitoring"] is None
@@ -273,3 +280,31 @@ def test_command_line_refuses_flags_that_make_no_sense_together(tmp_path):
     assert "64 hexadecimal" in runner.invoke(cli, base + ["--trust-cert-sha256", "abcd"]).output
     both = runner.invoke(cli, base + ["--trust-cert-sha256", "ab" * 32, "--no-verify-ssl"])
     assert both.exit_code != 0 and "cannot be combined" in both.output
+
+
+@pytest.mark.parametrize("key,raw,secret", [
+    ("mysql", "mon:p@ssw0rd@tcp(127.0.0.1:3306)/", "p@ssw0rd"),
+    ("mysql", "mon:a:b@c@unix(/run/mysqld.sock)/db", "a:b@c"),
+    ("pg", 'host=x user=m password="sec ret" sslmode=disable', "sec ret"),
+    ("pg", "host=x user=m password='two words' dbname=d", "two words"),
+    ("pg", "host=x password=plain", "plain"),
+    ("mssql", 'Server=x;User Id=sa;Password="a;b";app name=t;', "a;b"),
+    ("mssql", "Server=x;User Id=sa;Password=x y;app name=t;", "x y"),
+    ("mssql", "Server=x;PWD={c;d};", "c;d"),
+])
+def test_a_deployed_password_is_masked_whole_whatever_it_contains(key, raw, secret):
+    masked = c._mask_password(key, raw)
+    assert masked.count("<password>") == 1 and len(masked) < len(raw) + len("<password>"), masked
+    # what is left is the setting with the whole password cut out, nothing more and nothing less
+    quoted = [f'"{secret}"', f"'{secret}'", "{" + secret + "}", secret]
+    assert masked in [raw.replace(form, "<password>", 1) for form in quoted if form in raw], masked
+    choices = c.CollectChoices(keys=[key], details={key: {"raw": raw}})
+    assert secret in c.secrets_in(choices)
+    assert secret not in choices.without_secrets().model_dump_json()
+    assert c.database_setting(key, choices.details[key]) == raw, "applied to the machine exactly as it was"
+
+
+def test_a_setting_without_a_password_is_left_alone():
+    assert c._mask_password("mysql", "tcp(127.0.0.1:3306)/") == "tcp(127.0.0.1:3306)/"
+    assert c.secrets_in(c.CollectChoices(keys=["mysql"], details={"mysql": {"raw": "tcp(127.0.0.1:3306)/"}})) == []
+    assert c.secrets_in(c.CollectChoices(keys=["pg"], details={"pg": {"user": "m", "password": "pw 1"}})) == ["pw 1"]

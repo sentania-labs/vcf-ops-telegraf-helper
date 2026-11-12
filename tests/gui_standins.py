@@ -402,7 +402,7 @@ def fake_package(version: str, is_windows: bool, is_arm: bool):
 
 def seed_history(window, world: World) -> None:
     """The past the mockup assumes: one machine set up on Nov 3, one that failed yesterday."""
-    command = ("vcf-telegraf-helper run \\\n  --vcf-url https://ops.example.com --vcf-user admin --vcf-pass \"<password>\" \\\n"
+    command = ("vcf-telegraf-helper run --replace-inputs \\\n  --vcf-url https://ops.example.com --vcf-user admin --vcf-pass \"<password>\" \\\n"
                "  --vm-name {name} --vm-id {mor} --vc-id {vc} \\\n  --target-host {addr} --os linux --connection ssh \\\n"
                "  --ssh-user svc-monitor --ssh-pass \"<password>\" \\\n"
                "  --collector 10.20.0.50 --collector-group 'Main site' --install-telegraf --telegraf-version 1.40.1 \\\n"

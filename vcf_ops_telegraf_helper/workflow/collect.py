@@ -119,6 +119,7 @@ class CollectChoices(BaseModel):
     details: Dict[str, Dict[str, Any]] = Field(default_factory=dict)
     notes: Dict[str, str] = Field(default_factory=dict, description="The line shown under a ticked item")
     custom_toml: str = ""
+    had_custom: bool = Field(default=False, description="The saved choices came with own settings that were not kept")
 
     def has(self, key: str) -> bool:
         return key in self.keys
@@ -139,6 +140,9 @@ class CollectChoices(BaseModel):
             detail.pop("password", None)
             if detail.get("raw") and key in DATABASE_KEYS:
                 detail["raw"] = _mask_password(key, detail["raw"])
+        # Someone's own Telegraf settings may hold anything, a password included, so they are not kept
+        copy.had_custom = bool(self.custom_toml.strip())
+        copy.custom_toml = ""
         return copy
 
     def missing_secrets(self) -> List[str]:
@@ -250,13 +254,39 @@ def database_setting(key: str, detail: Dict[str, Any], placeholder: bool = False
 
 
 def _mask_password(key: str, raw: str) -> str:
+    """A deployed database setting with its password replaced by the placeholder.
+
+    A password may itself contain "@", ";" or spaces, so each form is matched by its own structure
+    rather than by what a password usually looks like.
+    """
     import re
 
     if key == "mysql":
-        return re.sub(r"^([^:@/]+):[^@]*@", rf"\1:{PASSWORD_PLACEHOLDER}@", raw)
+        # user:password@protocol(address): the password runs to the last "@" before the protocol
+        return re.sub(r"^([^:@/]*):.*@(?=[A-Za-z0-9_]*\()", rf"\1:{PASSWORD_PLACEHOLDER}@", raw, count=1)
     if key == "pg":
-        return re.sub(r"(password\s*=\s*)('[^']*'|\S+)", rf"\1{PASSWORD_PLACEHOLDER}", raw, flags=re.IGNORECASE)
-    return re.sub(r"(Password\s*=\s*)[^;]*", rf"\1{PASSWORD_PLACEHOLDER}", raw, flags=re.IGNORECASE)
+        value = r"('(?:[^'\\]|\\.)*'|\"[^\"]*\"|[^\s]+)"
+        return re.sub(rf"(password\s*=\s*){value}", rf"\1{PASSWORD_PLACEHOLDER}", raw, flags=re.IGNORECASE)
+    value = r"(\"(?:[^\"]|\"\")*\"|'(?:[^']|'')*'|\{[^}]*\}|[^;]*)"
+    return re.sub(rf"((?:Password|PWD)\s*=\s*){value}", rf"\1{PASSWORD_PLACEHOLDER}", raw, flags=re.IGNORECASE)
+
+
+def secrets_in(choices: "CollectChoices") -> List[str]:
+    """Every database password these choices hold, for redacting anything that is written down."""
+    found: List[str] = []
+    for key in DATABASE_KEYS:
+        detail = choices.details.get(key, {})
+        if detail.get("password"):
+            found.append(str(detail["password"]))
+        raw = str(detail.get("raw") or "")
+        masked = _mask_password(key, raw) if raw else ""
+        if raw and masked != raw and PASSWORD_PLACEHOLDER in masked:
+            before, _, after = masked.partition(PASSWORD_PLACEHOLDER)
+            secret = raw[len(before):len(raw) - len(after)] if after else raw[len(before):]
+            if secret:
+                found.append(secret.strip("'\"{}") or secret)
+                found.append(secret)
+    return [s for s in dict.fromkeys(found) if s]
 
 
 def keys_from_monitoring(mon: MonitoringConfig, os_family: str) -> List[str]:

@@ -187,8 +187,8 @@ class WinRMExecutor(EndpointExecutor):
             try:
                 with open(local_path, "rb") as handle:
                     while True:
-                        # Well under the default 500 KB envelope once base64 is added
-                        piece = handle.read(256 * 1024)
+                        # 96 KB is 128 KB once base64 is added: under the 150 KB envelope older Windows defaults to
+                        piece = handle.read(96 * 1024)
                         if not piece:
                             break
                         protocol.send_command_input(shell_id, command_id, piece)

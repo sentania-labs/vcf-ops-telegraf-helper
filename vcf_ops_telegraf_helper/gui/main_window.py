@@ -120,6 +120,7 @@ class MainWindow(QMainWindow):
         self.show_infra = False
         self.banner: Optional[tuple] = None  # (kind, html) shown once on Machines
         self.flow: Any = None
+        self.working_on: Optional[str] = None  # a machine being changed outside a guided path (removal)
         self.screen = "connect"
         self.page: Optional[Page] = None
         self.machine_id: Optional[str] = None
@@ -238,6 +239,7 @@ class MainWindow(QMainWindow):
             nav = button(text, go, "nav", name=f"nav-{key}")
             nav.setCheckable(True)
             nav.setChecked(current == key)
+            nav.setEnabled(not self.working_on)
             if key == "machines" and fix:
                 badge = label(f"{fix} to fix", "nav-badge", wrap=False, name="nav-badge")
                 inner = hbox(stretch, badge, margins=(0, 0, 8, 0))
@@ -264,6 +266,7 @@ class MainWindow(QMainWindow):
         conn.setMinimumHeight(words.sizeHint().height() + 16)
         conn.setAccessibleName(f"Connected to {host} as {who}. Test or change")
         conn.setToolTip("Test the connection to VCF Operations, or connect as someone else")
+        conn.setEnabled(not self.working_on)
         self.side_layout.addWidget(conn)
         self.side_layout.addSpacing(6)
         self.side_layout.addWidget(link("About this app", self._show_about_dialog, name="side-about"))
@@ -315,12 +318,13 @@ class MainWindow(QMainWindow):
         dialog.exec()
 
     def closeEvent(self, event) -> None:  # noqa: N802 (Qt override)
-        if self.flow is not None and self.flow.changing_now():
+        if (self.flow is not None and self.flow.changing_now()) or self.working_on:
             QMessageBox.warning(
                 self, "Work in progress",
-                "A machine is being changed right now and cannot be stopped half-way. Wait for it to finish, then close "
-                "the app. If the app is closed anyway during a takeover, open it again and it will offer to finish from "
-                "where it stopped.",
+                "The app is working on a machine right now, and closing it would leave that half done with no record of "
+                "it. Wait for it to finish, then close the app. (On the running screen, Stop leaves alone the machines "
+                "not yet changed.) If the app is closed anyway during a takeover, open it again and it will offer to "
+                "finish from where it stopped.",
             )
             event.ignore()
             return
@@ -842,7 +846,13 @@ class MainWindow(QMainWindow):
             vms, collectors, warning, platform = answer
             self.platform_note = platform
             self.loading = False
-            self.machines = [Machine(vm=vm) for vm in sorted(vms, key=lambda v: v.name.lower())]
+            fresh = [Machine(vm=vm) for vm in sorted(vms, key=lambda v: v.name.lower())]
+            if self.flow is not None:
+                # A path in progress keeps the machines it is working on, even if VCF Operations stops listing one
+                listed = {m.id for m in fresh}
+                wanted = set(self.flow.ids) | set(self.flow.dropped)
+                fresh += [m for m in self.machines if m.id in wanted and m.id not in listed]
+            self.machines = fresh
             self.collectors = collectors
             self.inventory_note = warning
             self.arrived &= {m.id for m in self.machines}

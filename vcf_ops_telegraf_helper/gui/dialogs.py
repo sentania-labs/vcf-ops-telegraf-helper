@@ -229,6 +229,8 @@ def remove_monitoring(win, machine: Machine) -> None:
     page.title(f"Removing monitoring from {esc(machine.name)}…",
                "Signing in, stopping Telegraf, and removing it and its settings. Keep this app open.")
     page.add(busy_bar(420)).end()
+    # Nothing else can be started, and the app cannot be closed, until the removal has ended and is recorded
+    win.working_on = machine.id
     win.set_page(page, "machine")
 
     def work():
@@ -252,6 +254,7 @@ def remove_monitoring(win, machine: Machine) -> None:
         win.refresh_statuses()
 
     def done(summary) -> None:
+        win.working_on = None
         log = stage_log(machine.name, summary.stages,
                         extra=[f"{k:<26}: {v}" for k, v in summary.verifications.items()])
         if summary.success:
@@ -274,6 +277,7 @@ def remove_monitoring(win, machine: Machine) -> None:
         adopt(win.page)
 
     def failed(exc: Exception) -> None:
+        win.working_on = None
         record(False, "The app could not start removing monitoring from the machine.",
                "Press Remove monitoring again.", f"== {machine.name} ==\n{exc}")
         win.show_machine(machine.id)

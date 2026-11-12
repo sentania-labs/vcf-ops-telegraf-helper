@@ -22,7 +22,15 @@ from vcf_ops_telegraf_helper.storage.history import (
     ActivityEntry,
     ActivityRow,
 )
-from vcf_ops_telegraf_helper.workflow.plain import STATUS_ATTENTION, STATUS_INTERRUPTED, STATUS_NONE, plural
+from vcf_ops_telegraf_helper.workflow.plain import (
+    STATUS_ATTENTION,
+    STATUS_INTERRUPTED,
+    STATUS_MANAGED,
+    STATUS_NONE,
+    STATUS_SENDING,
+    STATUS_WAITING,
+    plural,
+)
 
 
 def _rank(row: ActivityRow) -> int:
@@ -34,14 +42,42 @@ def _rank(row: ActivityRow) -> int:
     return 2 if row.pending else 3
 
 
+def put_right_since(win, entry: ActivityEntry, row: ActivityRow) -> bool:
+    """True only when a later run on this machine really worked."""
+    later = win.history.last_change(row.machine_id)
+    if later is None or later.id == entry.id or later.at <= entry.at:
+        return False
+    after = later.row_for(row.machine_id)
+    return bool(after is not None and after.ok)
+
+
+def _fix_button(win, entry: ActivityEntry, row: ActivityRow, machine):
+    """The button that puts a failed line right, when the machine is still in a state where it applies."""
+    if machine is None or not machine.selectable:
+        return None
+    name = f"result-retry-{row.name}"
+    if machine.status == STATUS_INTERRUPTED:
+        return button("Finish the takeover", lambda: win.start_flow("takeover", [machine.id], resume=True), "primary sm",
+                      name=f"result-finish-{row.name}")
+    if entry.kind == KIND_TAKEOVER:
+        if machine.status == STATUS_MANAGED:
+            return button("Try again", lambda: win.start_flow("takeover", [machine.id]), "primary sm", name=name)
+        return None
+    if entry.kind == KIND_CHANGE:
+        if machine.status in (STATUS_SENDING, STATUS_WAITING):
+            return button("Try again", lambda: win.start_flow("change", [machine.id]), "primary sm", name=name)
+        return None
+    if entry.kind == KIND_SETUP and machine.status in (STATUS_ATTENTION, STATUS_NONE):
+        return button("Try again", lambda: win.start_flow("setup", [machine.id], retry=True), "primary sm", name=name)
+    return None
+
+
 def result_list(win, entry: ActivityEntry, max_height: Optional[int] = None) -> ListBox:
     """One line per machine: what happened, what to do, and the button that does it."""
     box = ListBox(max_height=max_height, name="result-list")
     tight = (14, 5, 14, 5) if len(entry.rows) > 4 else (14, 9, 14, 9)
     for row in sorted(entry.rows, key=_rank):
         machine = win.machine(row.machine_id)
-        still = bool(not row.ok and not row.test and machine is not None
-                     and machine.status in (STATUS_ATTENTION, STATUS_INTERRUPTED))
         line = Row(row.name, kind="" if row.ok else "bad", name_width=170, object_name=f"result-{row.name}", margins=tight)
         if row.left or row.skipped:
             symbol = mark("skip")
@@ -50,20 +86,17 @@ def result_list(win, entry: ActivityEntry, max_height: Optional[int] = None) -> 
         else:
             symbol = mark("wait") if row.pending else mark("ok")
         text = f"{symbol} " + (esc(row.msg) if row.ok else f"<b>{esc(row.msg)}</b>")
-        if row.todo and (still or row.test) and not row.ok:
-            text += f'<br><span style="font-size:12px"><b>What to do:</b> {esc(row.todo)}</span>'
-        elif not row.ok and not row.test and machine is not None:
+        fixed = bool(not row.ok and not row.test and put_right_since(win, entry, row))
+        if fixed:
             text += ('<br><span style="font-size:12px">A later attempt on this machine worked, so there is nothing left '
                      "to do.</span>")
+        elif not row.ok and row.todo:
+            text += f'<br><span style="font-size:12px"><b>What to do:</b> {esc(row.todo)}</span>'
         line.say(text)
-        if still and machine.status == STATUS_INTERRUPTED:
-            line.add_actions(button("Finish the takeover", lambda m=machine: win.start_flow("takeover", [m.id], resume=True),
-                                    "primary sm", name=f"result-finish-{row.name}"))
-        elif still:
-            kind = "takeover" if entry.kind == KIND_TAKEOVER else "setup"
-            line.add_actions(button(
-                "Try again", lambda m=machine, k=kind: win.start_flow(k, [m.id], retry=(k == "setup")), "primary sm",
-                name=f"result-retry-{row.name}"))
+        if not row.ok and not row.test and not fixed:
+            fix = _fix_button(win, entry, row, machine)
+            if fix is not None:
+                line.add_actions(fix)
         elif (row.left or row.skipped) and machine is not None and machine.status in (STATUS_NONE, STATUS_ATTENTION) \
                 and machine.selectable and entry.kind == KIND_SETUP:
             line.add_actions(button("Set it up now", lambda m=machine: win.start_flow("setup", [m.id]), "sm",
@@ -100,6 +133,15 @@ def live_headline(entry: ActivityEntry) -> Headline:
         if not real:
             return Headline("info", "i", "Stopped. Nothing was changed.", "You stopped the practice run before it finished.",
                             name=name)
+        if left or skipped:
+            gone = len(left) + len(skipped)
+            how = "left out or stopped" if (left and skipped) else ("left out" if left else "stopped")
+            return Headline(
+                "warn", "!",
+                f"Practice run finished for {len(real)} of the {picked} machines you picked. Nothing was changed.",
+                f"{'It' if len(real) == 1 else 'They'} passed every step that does not change a machine. {gone} "
+                f"{'was' if gone == 1 else 'were'} {how} and {'was' if gone == 1 else 'were'} not practised: see below.",
+                name=name)
         return Headline("info", "i", "Practice run finished. Nothing was changed.",
                         "Every step that does not change a machine was carried out, and all of them passed.", name=name)
     if entry.kind == KIND_TAKEOVER:
@@ -125,9 +167,18 @@ def live_headline(entry: ActivityEntry) -> Headline:
         return Headline("ok", mark("ok"), f"The change is in effect on {first}",
                         "The app read the settings back from the machine to confirm.", name=name)
     if bad:
-        return Headline("bad", "!", f"{len(real) - len(bad)} of {plural(len(real), 'machine')} set up. "
-                        f"{len(bad)} need{'s' if len(bad) == 1 else ''} attention.",
-                        "The ones that worked are not affected." if len(real) > len(bad)
+        worked = len(real) - len(bad)
+        gone = len(left) + len(skipped)
+        if gone:
+            # Count against what was picked, and name the ones that were not attempted as well
+            how = "left out or stopped" if (left and skipped) else ("left out" if left else "stopped")
+            title = (f"{worked} of the {picked} machines you picked {'is' if worked == 1 else 'are'} set up. "
+                     f"{len(bad)} need{'s' if len(bad) == 1 else ''} attention, and {gone} "
+                     f"{'was' if gone == 1 else 'were'} {how}.")
+        else:
+            title = (f"{worked} of {plural(len(real), 'machine')} set up. "
+                     f"{len(bad)} need{'s' if len(bad) == 1 else ''} attention.")
+        return Headline("bad", "!", title, "The ones that worked are not affected." if worked
                         else "What happened and what to do are below.", name=name)
     if not real:
         return Headline("info", "i", "Stopped. Nothing was changed.", "You stopped before any machine had been changed.",
@@ -156,11 +207,7 @@ def saved_headline(win, entry: ActivityEntry) -> Headline:
     bad = [r for r in entry.rows if not r.ok]
     name = "result-headline"
     if bad:
-        fixed = all(
-            win.machine(r.machine_id) is not None
-            and win.machine(r.machine_id).status not in (STATUS_ATTENTION, STATUS_INTERRUPTED)
-            for r in bad
-        ) and entry.kind != KIND_TEST
+        fixed = entry.kind != KIND_TEST and all(put_right_since(win, entry, r) for r in bad)
         if len(bad) == entry.total:
             title = "This did not work" if entry.total == 1 else "None of these worked"
         else:
@@ -183,8 +230,16 @@ def saved_headline(win, entry: ActivityEntry) -> Headline:
         return Headline("ok", mark("ok"), "The practice run passed. Nothing was changed.", name=name)
     if entry.kind == KIND_TEST:
         return Headline("ok", mark("ok"), "The test passed. Nothing was changed.", name=name)
-    if any(r.note for r in entry.rows):
+    if entry.kind == KIND_TAKEOVER and any(r.note for r in entry.rows):
         return Headline("warn", "!", "This worked, with one thing to know", "Read the line below.", name=name)
+    waiting = sum(1 for r in entry.rows if r.pending)
+    if waiting:
+        # What was true when the run ended; the Machines list says where each machine stands now
+        return Headline(
+            "info", mark("wait"),
+            "This worked. " + ("It was" if entry.total == 1 else f"{waiting} of {entry.total} were")
+            + " still waiting for first data when it finished",
+            "The Machines list shows whether the data has arrived since.", name=name)
     if entry.kind == KIND_REMOVE:
         return Headline("ok", mark("ok"), "Monitoring was removed", name=name)
     return Headline("ok", mark("ok"), "This worked", name=name)

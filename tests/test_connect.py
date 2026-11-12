@@ -96,6 +96,22 @@ def test_fingerprints_compare_however_they_are_written():
         PinnedCertificateAdapter("abcd")
 
 
+def test_the_pin_holds_through_a_proxy_and_is_never_silently_dropped():
+    adapter = PinnedCertificateAdapter("ab" * 32)
+    request = requests.Request("GET", "https://ops.example.com/suite-api/api/versions").prepare()
+    direct = adapter.get_connection_with_tls_context(request, verify=True)
+    proxied = adapter.get_connection_with_tls_context(request, verify=True, proxies={"https": "http://proxy.example.com:3128"})
+    assert direct.assert_fingerprint == "ab" * 32
+    assert proxied.proxy is not None and proxied.assert_fingerprint == "ab" * 32, "a proxy must not remove the check"
+
+    class Forgetful(PinnedCertificateAdapter):
+        def proxy_manager_for(self, proxy, **proxy_kwargs):
+            return requests.adapters.HTTPAdapter.proxy_manager_for(self, proxy, **proxy_kwargs)
+
+    with pytest.raises(requests.exceptions.SSLError, match="could not be enforced"):
+        Forgetful("ab" * 32).get_connection_with_tls_context(request, verify=True, proxies={"https": "http://p.example.com:1"})
+
+
 def test_trusted_certificates_are_remembered_per_host(tmp_path):
     store = StateStore(state_file=tmp_path / "state.json")
     assert store.trusted_certificate("ops.example.com") is None

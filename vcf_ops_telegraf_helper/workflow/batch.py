@@ -32,7 +32,7 @@ from vcf_ops_telegraf_helper.storage.history import (
 from vcf_ops_telegraf_helper.storage.journal import TakeoverJournal
 from vcf_ops_telegraf_helper.utils import local_now_formatted
 from vcf_ops_telegraf_helper.workflow.checks import _system_file, collector_label
-from vcf_ops_telegraf_helper.workflow.collect import DEFAULT_WEB_URL, effective_keys, name_of, names_of
+from vcf_ops_telegraf_helper.workflow.collect import DEFAULT_WEB_URL, effective_keys, name_of, names_of, secrets_in
 from vcf_ops_telegraf_helper.workflow.engine import ConfigureEndpointWorkflow
 from vcf_ops_telegraf_helper.workflow.plain import (
     FIRST_DATA_WAIT,
@@ -235,6 +235,8 @@ class BatchRunner:
             environment=env, target=plan.target(), monitoring=plan.monitoring(), executor=executor,
             adapter=adapter, options=plan.options(), reporter=reporter,
         )
+        # Database passwords are redacted from everything the run writes down, however they are spelt
+        workflow._secrets.extend(secrets_in(plan.choices))
         workflow.should_stop = self._stop.is_set
         workflow.phase_callback = reporter.on_phase
         workflow.package_fetcher = self.package_fetcher
@@ -264,9 +266,12 @@ class BatchRunner:
         base.update(collecting=collecting, telegraf=_short_version(version) or plan.version)
         if plan.kind == KIND_CHANGE:
             return self._change_outcome(plan, workflow, executor, summary, base)
-        pending = any(str(v).startswith("PENDING") for v in summary.verifications.values())
+        # "Data is arriving" is said only when VCF Operations itself confirmed it. Anything else, a check
+        # that is still pending or one that could not be made at all, is "waiting".
+        arriving = str(summary.verifications.get("VCF Ops ingestion", "")).startswith("PASS") and not any(
+            str(v).startswith("PENDING") for v in summary.verifications.values())
         extra = _unwatched_note(plan) + _status_page_note(plan)
-        if pending:
+        if not arriving:
             return MachineOutcome(
                 pending=True, note=bool(extra),
                 msg=f'Set up and running. Waiting for first data: {FIRST_DATA_WAIT} The Machines list says "waiting" until it arrives.' + extra,
@@ -472,7 +477,9 @@ def build_entry(
         rows.append(ActivityRow(
             machine_id=plan.machine_id, name=plan.name, os=plan.os, ok=outcome.ok, pending=outcome.pending,
             skipped=outcome.skipped, note=outcome.note, msg=outcome.msg, todo=outcome.todo,
-            cmd="" if outcome.skipped else build_command(plan, conn),
+            # No command for a machine that was never started, nor for a takeover practice run: the
+            # command line has no practice run for a takeover, and the real command retires the agent.
+            cmd="" if (outcome.skipped or (practice and kind == KIND_TAKEOVER)) else build_command(plan, conn),
             collecting=outcome.collecting, collector=plan.collector_label or collector_label(plan.collector),
             telegraf=outcome.telegraf,
         ))
