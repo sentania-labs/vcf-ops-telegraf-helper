@@ -308,3 +308,19 @@ def test_a_setting_without_a_password_is_left_alone():
     assert c._mask_password("mysql", "tcp(127.0.0.1:3306)/") == "tcp(127.0.0.1:3306)/"
     assert c.secrets_in(c.CollectChoices(keys=["mysql"], details={"mysql": {"raw": "tcp(127.0.0.1:3306)/"}})) == []
     assert c.secrets_in(c.CollectChoices(keys=["pg"], details={"pg": {"user": "m", "password": "pw 1"}})) == ["pw 1"]
+
+
+@pytest.mark.parametrize("key, password, expected", [
+    ("pg", "it's a\\pw", "password='it\\'s a\\\\pw'"),
+    ("pg", "plain", "password=plain"),
+    ("mssql", 'a;b"c', 'Password="a;b""c";'),
+    ("mssql", "plain", "Password=plain;"),
+])
+def test_database_password_is_quoted_so_it_reads_back_as_typed(key, password, expected):
+    detail = {"user": "m", "password": password}
+    setting = c.database_setting(key, detail)
+    assert expected in setting
+    shown = c.database_setting(key, detail, placeholder=True)
+    assert password not in shown and "<password>" in shown
+    assert c._mask_password(key, setting).count("<password>") == 1
+    assert password in c.secrets_in(c.CollectChoices(keys=[key], details={key: detail}))

@@ -239,7 +239,7 @@ def database_setting(key: str, detail: Dict[str, Any], placeholder: bool = False
         # Read back from the machine and not changed: keep it exactly as deployed
         return _mask_password(key, raw) if placeholder else raw
     user = detail.get("user") or ""
-    password = PASSWORD_PLACEHOLDER if placeholder else (detail.get("password") or "")
+    password = PASSWORD_PLACEHOLDER if placeholder else quoted_password(key, detail.get("password") or "")
     port = int(detail.get("port") or DATABASE_PORTS[key])
     databases = detail.get("databases") or []
     if key == "mysql":
@@ -251,6 +251,25 @@ def database_setting(key: str, detail: Dict[str, Any], placeholder: bool = False
         return f"host=localhost port={port} user={user or 'postgres'}{secret} sslmode=disable{name}"
     who = f"User Id={user};Password={password};" if user else ""
     return f"Server=127.0.0.1;Port={port};{who}app name=telegraf;log=1;"
+
+
+def _escaped_password(key: str, password: str) -> str:
+    if key == "pg":
+        return password.replace("\\", "\\\\").replace("'", "\\'")
+    if key == "mssql":
+        return password.replace('"', '""')
+    return password
+
+
+def quoted_password(key: str, password: str) -> str:
+    """The password as the database setting needs it written, quoted when it holds anything a parser would split on."""
+    import re
+
+    if key == "pg" and password and not re.fullmatch(r"[^\s'\\]+", password):
+        return f"'{_escaped_password(key, password)}'"
+    if key == "mssql" and password and not re.fullmatch(r"[^\s;\"'{}]+", password):
+        return f'"{_escaped_password(key, password)}"'
+    return password
 
 
 def _mask_password(key: str, raw: str) -> str:
@@ -278,6 +297,7 @@ def secrets_in(choices: "CollectChoices") -> List[str]:
         detail = choices.details.get(key, {})
         if detail.get("password"):
             found.append(str(detail["password"]))
+            found.append(_escaped_password(key, str(detail["password"])))
         raw = str(detail.get("raw") or "")
         masked = _mask_password(key, raw) if raw else ""
         if raw and masked != raw and PASSWORD_PLACEHOLDER in masked:

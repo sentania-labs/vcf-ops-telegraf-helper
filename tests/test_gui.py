@@ -489,6 +489,24 @@ def test_several_machines_problems_first_each_with_its_fix(session):
     fits(d)
 
 
+def test_a_refused_sign_in_is_tried_again_after_the_password_is_corrected(session):
+    d, _window, _world = session.start()
+    d.click("tick-db-pg-01")
+    d.click("selection-setup")
+    sign_in(d, linux=("svc-monitor", "wrong"))
+    d.click("flow-next")
+    assert d.find("check-fix-db-pg-01").text() == "Use a different sign-in"
+
+    def corrected() -> None:
+        d.type("signin-dialog-user", "svc-monitor")
+        d.type("signin-dialog-password", "right")
+        d.click("signin-dialog-ok", settle=False)
+
+    d.in_dialog(corrected, lambda: d.click("check-fix-db-pg-01", settle=False))
+    d.wait(lambda: d.title() == "The machine is ready", what="the machine to pass its check")
+    assert "Not tried here" not in words(d, "check-db-pg-01")
+
+
 def test_the_app_never_says_all_for_fewer_than_were_picked(session):
     d, _window, _world = session.start()
     d.click("tick-db-pg-01")

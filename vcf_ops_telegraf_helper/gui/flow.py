@@ -587,7 +587,7 @@ class Flow:
 
         def one(machine_id: str) -> None:
             request = requests[machine_id]
-            account = (request.machine.os, request.username, request.key_file or "")
+            account = self._account(request)
             with self._lock:
                 held = account in self._refused and account not in self._accepted
             if held:
@@ -616,6 +616,10 @@ class Flow:
         win.tasks.run(lambda: run_pool([lambda i=i: one(i) for i in ids]),
                       done=lambda _r: self._checks_done(generation, then),
                       failed=lambda _e: self._checks_done(generation, then), name="checks")
+
+    @staticmethod
+    def _account(request) -> tuple:
+        return (request.machine.os, request.username, request.key_file or "")
 
     def _check_answer(self, generation: int, ticket: int, machine_id: str, result: CheckResult) -> None:
         if not self._alive or generation != self._generation or machine_id not in self.ids \
@@ -872,6 +876,10 @@ class Flow:
             return
         self.per[machine_id] = signin
         self.win.session.machine[machine_id] = signin
+        account = self._account(self._request(machine))
+        with self._lock:
+            self._refused.discard(account)
+            self._accepted.discard(account)
         self.recheck(machine_id)
 
     def fix_send(self, machine_id: str) -> None:
