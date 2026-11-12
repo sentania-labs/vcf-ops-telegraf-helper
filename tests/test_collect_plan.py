@@ -202,7 +202,7 @@ def test_windows_setup_command_reproduces_the_run():
     assert "--winrm-ssl" in command and "--port 5986" in command and "db-secret" not in command
     parsed = seen["monitoring"]
     mine = plan.monitoring()
-    assert parsed.mssql.servers == ["Server=127.0.0.1;Port=1433;User Id=monitor;Password=<password>;app name=telegraf;log=1;"]
+    assert parsed.mssql.servers == ['Server=127.0.0.1;Port=1433;User Id=monitor;Password="<password>";app name=telegraf;log=1;']
     parsed.mssql.servers = mine.mssql.servers
     assert _settings(parsed) == _settings(mine)
 
@@ -324,3 +324,23 @@ def test_database_password_is_quoted_so_it_reads_back_as_typed(key, password, ex
     assert password not in shown and "<password>" in shown
     assert c._mask_password(key, setting).count("<password>") == 1
     assert password in c.secrets_in(c.CollectChoices(keys=[key], details={key: detail}))
+
+
+@pytest.mark.parametrize("key, password, typed", [
+    ("pg", "a b'c;d", "a b\\'c;d"),
+    ("mssql", 'a b"c;d', 'a b""c;d'),
+])
+def test_the_displayed_command_takes_a_hard_password_and_gives_the_apps_own_setting(key, password, typed):
+    detail = {"user": "monitor", "password": password}
+    shown = c.database_setting(key, detail, placeholder=True)
+    assert password not in shown
+    assert shown.replace("<password>", typed) == c.database_setting(key, detail)
+
+
+def test_the_command_for_a_database_with_a_password_carries_the_quoting_line():
+    plan = _plan(choices=c.CollectChoices(keys=["cpu", "pg"], details={"pg": {"user": "monitor", "password": "x y"}}),
+                 found=["pg"])
+    command, seen, _target, _options = _same_run(plan)
+    assert seen["monitoring"].postgresql.address == "host=localhost port=5432 user=monitor password='<password>' sslmode=disable"
+    assert p.quote_note_for([command]) == p.QUOTE_NOTE
+    assert p.quote_note_for([_same_run(_plan())[0]]) == ""

@@ -23,6 +23,7 @@ from vcf_ops_telegraf_helper.workflow.collect import (
     CollectChoices,
     database_setting,
     monitoring_for,
+    placeholder_for,
 )
 
 INSTALL = "install"      # Telegraf is not on the machine: install the chosen version
@@ -133,6 +134,15 @@ class MachinePlan(BaseModel):
 
     def monitoring(self) -> MonitoringConfig:
         return monitoring_for(self.choices, self.os, self.found, self.single, self.web_urls)
+
+
+QUOTE_NOTE = "Keep the quotes around <password> in a database setting."
+
+
+def quote_note_for(commands) -> str:
+    """The extra line the command box needs when a database password sits in quotes."""
+    needed = any(placeholder_for("pg") in cmd or "Password=" + placeholder_for("mssql") in cmd for cmd in commands)
+    return QUOTE_NOTE if needed else ""
 
 
 def _quoter():

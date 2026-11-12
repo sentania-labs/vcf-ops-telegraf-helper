@@ -237,9 +237,9 @@ def database_setting(key: str, detail: Dict[str, Any], placeholder: bool = False
     raw = detail.get("raw")
     if raw and not detail.get("user"):
         # Read back from the machine and not changed: keep it exactly as deployed
-        return _mask_password(key, raw) if placeholder else raw
+        return _mask_password(key, raw).replace(PASSWORD_PLACEHOLDER, placeholder_for(key)) if placeholder else raw
     user = detail.get("user") or ""
-    password = PASSWORD_PLACEHOLDER if placeholder else quoted_password(key, detail.get("password") or "")
+    password = placeholder_for(key) if placeholder else quoted_password(key, detail.get("password") or "")
     port = int(detail.get("port") or DATABASE_PORTS[key])
     databases = detail.get("databases") or []
     if key == "mysql":
@@ -251,6 +251,12 @@ def database_setting(key: str, detail: Dict[str, Any], placeholder: bool = False
         return f"host=localhost port={port} user={user or 'postgres'}{secret} sslmode=disable{name}"
     who = f"User Id={user};Password={password};" if user else ""
     return f"Server=127.0.0.1;Port={port};{who}app name=telegraf;log=1;"
+
+
+def placeholder_for(key: str) -> str:
+    """The placeholder written the way that database needs a password quoted, so a real one drops straight in."""
+    quotes = {"pg": "'", "mssql": '"'}.get(key, "")
+    return f"{quotes}{PASSWORD_PLACEHOLDER}{quotes}"
 
 
 def _escaped_password(key: str, password: str) -> str:

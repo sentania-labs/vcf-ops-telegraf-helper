@@ -30,6 +30,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from vcf_ops_telegraf_helper.workflow.plan import quote_note_for
+
 __all__ = [
     "esc", "adopt", "set_class", "label", "button", "link", "hbox", "vbox", "Banner", "Headline", "Card", "ListBox",
     "Row", "Pill", "Tags", "Progress", "Field", "OptionCard", "CommandBox", "Page", "FlowLayout", "Dialog",
@@ -632,6 +634,9 @@ class CommandBox(QFrame):
             layout.addLayout(which)
         layout.addWidget(self.text)
         layout.addWidget(note)
+        extra = quote_note_for([cmd for _name, cmd in self.commands])
+        if extra:
+            layout.addWidget(label(esc(extra), "small", name="command-quote-note"))
         self._show(0)
         self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
 

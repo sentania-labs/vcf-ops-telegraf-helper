@@ -50,6 +50,7 @@ from vcf_ops_telegraf_helper.workflow.plan import (
     ConnectionChoices,
     MachinePlan,
     build_command,
+    quote_note_for,
 )
 from vcf_ops_telegraf_helper.workflow.takeover import (
     RESULT_INGESTION,
@@ -547,6 +548,9 @@ def _report(title: str, rows: List[ActivityRow], detail: str, reports: List[str]
     if commands:
         lines += ["", "## Do this again from the command line", "",
                   "Passwords are never written out. Put your own in place of each <password> before you run it."]
+        extra = quote_note_for([r.cmd for r in commands])
+        if extra:
+            lines += ["", extra]
         for row in commands:
             lines += ["", f"### {row.name}", "", "```", row.cmd, "```"]
     for report in reports:

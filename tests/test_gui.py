@@ -391,7 +391,8 @@ def test_found_database_asks_for_an_account_and_never_shows_its_password(session
     d.in_dialog(look, lambda: d.click("review-files", settle=False))
     d.click("flow-next")
     command = d.text("command-text")
-    assert "--postgres" in command and "password=<password>" in command and "db-secret-value" not in command
+    assert "--postgres" in command and "<password>" in command and "db-secret-value" not in command
+    assert "Keep the quotes around" in d.text("command-quote-note")
     assert "db-secret-value" not in window.history.history_file.read_text()
 
 
