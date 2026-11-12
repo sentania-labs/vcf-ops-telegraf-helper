@@ -699,7 +699,18 @@ def test_settings_connection_test_says_three_things_in_words(session):
     assert d.page() == "settings"
     d.click("settings-test")
     assert "Everything works between this computer and VCF Operations." in d.find("settings-test-ok").text.text()
+    result = words(d, "settings-test-result")
+    assert re.search(r"Read the list of machines \(\d+\) and collectors \(\d+\)", result), result
+    assert result.count("collectors") == 1, result
     fits(d)
+
+
+@pytest.mark.parametrize("theme", ["dark", "light"])
+def test_no_text_is_set_smaller_than_eleven_and_a_half_pixels(theme):
+    from vcf_ops_telegraf_helper.gui.theme import build_stylesheet
+
+    sizes = [float(size) for size in re.findall(r"font-size:\s*([\d.]+)px", build_stylesheet(theme))]
+    assert sizes and min(sizes) >= 11.5, sorted(set(sizes))
 
 
 # ---------------------------------------------------------------------------------------------

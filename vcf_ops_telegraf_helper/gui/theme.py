@@ -163,7 +163,7 @@ QLabel.lattice-muted {{
 
 QLabel.lattice-caption {{
     color: {t["ink-subtle"]};
-    font-size: 11px;
+    font-size: 12px;
 }}
 
 /* Buttons (radius-lg: 6px) */
@@ -455,7 +455,7 @@ QFrame.status-badge-ok {{
 QLabel.status-badge-ok-text {{
     color: {t["ok-ink"]};
     font-weight: 600;
-    font-size: 11px;
+    font-size: 12px;
 }}
 
 QFrame.status-badge-warn {{
@@ -466,7 +466,7 @@ QFrame.status-badge-warn {{
 QLabel.status-badge-warn-text {{
     color: {t["warn-ink"]};
     font-weight: 600;
-    font-size: 11px;
+    font-size: 12px;
 }}
 
 QFrame.status-badge-bad {{
@@ -477,7 +477,7 @@ QFrame.status-badge-bad {{
 QLabel.status-badge-bad-text {{
     color: {t["bad-ink"]};
     font-weight: 600;
-    font-size: 11px;
+    font-size: 12px;
 }}
 
 /* Navigation step list */
@@ -533,7 +533,7 @@ QFrame.page, QWidget.page, QScrollArea.page-scroll {{
 }}
 
 QLabel.brand {{ font-size: 14px; font-weight: 700; color: {t["ink"]}; }}
-QLabel.brand-sub {{ font-size: 11px; color: {t["ink-subtle"]}; }}
+QLabel.brand-sub {{ font-size: 12px; color: {t["ink-subtle"]}; }}
 QLabel.h1 {{ font-size: 20px; font-weight: 650; color: {t["ink"]}; }}
 QLabel.h1-big {{ font-size: 22px; font-weight: 650; color: {t["ink"]}; }}
 QLabel.h2 {{ font-size: 14px; font-weight: 650; color: {t["ink"]}; }}
@@ -547,7 +547,7 @@ QLabel.saved {{ font-size: 12px; font-weight: 600; color: {t["ok-ink"]}; }}
 QLabel.field-label {{ font-size: 12px; font-weight: 600; color: {t["ink"]}; }}
 QLabel.note {{ font-size: 12px; color: {t["ink-muted"]}; }}
 QLabel.card-title, QLabel.grp-h, QLabel.flow-h {{
-    font-size: 11px;
+    font-size: 12px;
     font-weight: 650;
     color: {t["ink-subtle"]};
     letter-spacing: 0.7px;
@@ -580,7 +580,7 @@ QLabel.nav-badge {{
     border-radius: 8px;
     min-height: 16px;
     padding: 0px 7px;
-    font-size: 11px;
+    font-size: 12px;
     font-weight: 600;
 }}
 QPushButton.conn {{
@@ -605,21 +605,21 @@ QLabel.num {{
     border: 1px solid {t["ink-subtle"]};
     border-radius: 10px;
     color: {t["ink-subtle"]};
-    font-size: 11px;
+    font-size: 12px;
 }}
 QLabel.num-done {{
     border: 1px solid {t["ok"]};
     border-radius: 10px;
     background-color: {t["ok-soft"]};
     color: {t["ok-ink"]};
-    font-size: 11px;
+    font-size: 12px;
 }}
 QLabel.num-now {{
     border: 1px solid {t["accent"]};
     border-radius: 10px;
     background-color: {t["accent"]};
     color: {t["on-accent"]};
-    font-size: 11px;
+    font-size: 12px;
     font-weight: 600;
 }}
 
@@ -669,7 +669,7 @@ QLabel.found {{
     border-radius: 7px;
     min-height: 14px;
     padding: 0px 7px;
-    font-size: 11px;
+    font-size: 12px;
     background-color: {t["ok-soft"]};
     color: {t["ok-ink"]};
 }}
@@ -729,12 +729,12 @@ QFrame.mrow {{ border: none; border-bottom: 1px solid {t["line-soft"]}; backgrou
 QFrame.mrow-sel {{ background-color: {t["accent-soft"]}; }}
 QFrame.mrow-bad {{ background-color: {t["bad-soft"]}; border-bottom: 2px solid {t["surface"]}; }}
 QFrame.mrow QLabel.nm {{ font-size: 13px; font-weight: 600; color: {t["ink"]}; }}
-QFrame.mrow QLabel.nm-sub {{ font-size: 11px; color: {t["ink-subtle"]}; }}
+QFrame.mrow QLabel.nm-sub {{ font-size: 12px; color: {t["ink-subtle"]}; }}
 QFrame.mrow QLabel.msg {{ font-size: 13px; color: {t["ink-muted"]}; }}
 QFrame.mrow QLabel.cell {{ font-size: 13px; color: {t["ink-muted"]}; }}
 QFrame.mrow QLabel.why {{ font-size: 12px; color: {t["ink-muted"]}; }}
 QFrame.thead {{ border: none; border-bottom: 1px solid {t["line"]}; background: transparent; }}
-QFrame.thead QLabel {{ font-size: 10px; font-weight: 500; color: {t["ink-subtle"]}; letter-spacing: 0.6px; }}
+QFrame.thead QLabel {{ font-size: 12px; font-weight: 500; color: {t["ink-subtle"]}; letter-spacing: 0.6px; }}
 
 /* A choice on "What to collect" */
 QFrame.opt {{
@@ -746,7 +746,7 @@ QFrame.opt:hover {{ border-color: {t["ink-subtle"]}; }}
 QFrame.opt-on {{ border: 1px solid {t["accent"]}; background-color: {t["accent-soft"]}; }}
 QFrame.opt-sug {{ border: 1px dashed {t["warn"]}; }}
 QFrame.opt QLabel.opt-name {{ font-size: 13px; font-weight: 600; color: {t["ink"]}; }}
-QFrame.opt QLabel.opt-hint {{ font-size: 11px; color: {t["ink-muted"]}; }}
+QFrame.opt QLabel.opt-hint {{ font-size: 12px; color: {t["ink-muted"]}; }}
 
 /* Tabs and settings rows */
 QPushButton.tab {{

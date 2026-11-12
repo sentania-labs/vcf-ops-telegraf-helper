@@ -313,7 +313,7 @@ def settings_page(win, tab: str = "conn") -> Page:
             from vcf_ops_telegraf_helper.gui.widgets import _empty
 
             test.setEnabled(False)
-            lines = [f"Reached {host}", f"Signed in as {who}", "Read the list of machines and collectors"]
+            lines = [f"Reached {host}", f"Signed in as {who}", "Read the list of machines"]
             state = {"step": 0, "alive": True}
             page.on_leave = lambda: state.__setitem__("alive", False)
 

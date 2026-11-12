@@ -169,7 +169,8 @@ def collector_dialog(
         dialog.accept()
 
     for index, (collector, cannot) in enumerate(choices):
-        text = label(collector_label(collector)[0].upper() + collector_label(collector)[1:], "h2")
+        shown = collector_label(collector)
+        text = label(esc(shown[0].upper() + shown[1:]), "h2")
         kind = label(esc(collector_kind(collector)), "small")
         if cannot:
             reach = label(f'{mark("bad")} {esc(join_names(list(cannot))) if not one else "This machine"} cannot reach it',
