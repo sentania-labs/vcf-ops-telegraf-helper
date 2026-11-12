@@ -10,43 +10,68 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 pytest.importorskip("PySide6.QtWidgets")
 
 
-@pytest.mark.parametrize("kind", ["window", "services", "perfmon", "databases",
-                                  "mssql", "postgresql", "mysql"])
-def test_window_children_are_owned_by_qt(kind, tmp_path):
+def _owned_by_python(widget):
+    """Widgets under `widget` that Python, not Qt, would delete at exit although Qt is their parent."""
+    import gc
+
+    import shiboken6
+    from PySide6.QtWidgets import QWidget
+
+    # findChildren() can repair Shiboken's ownership as a side effect of
+    # wrapping native pointers, masking the bug. Inspect the wrappers Python holds.
+    gc.collect()
+    found = []
+    for candidate in gc.get_objects():
+        if not isinstance(candidate, QWidget) or candidate is widget:
+            continue
+        if not shiboken6.isValid(candidate) or not shiboken6.ownedByPython(candidate):
+            continue
+        parent = candidate.parentWidget()
+        while parent is not None and parent is not widget:
+            parent = parent.parentWidget()
+        if parent is widget:
+            found.append(f"{type(candidate).__name__}:{candidate.objectName()}")
+    return found
+
+
+@pytest.mark.parametrize("screen", ["connect", "machines", "machine", "activity", "settings", "dialog"])
+def test_window_children_are_owned_by_qt(screen, tmp_path):
     """A native parent must own its children before PySide's exit sweep."""
     import shiboken6
-    from PySide6.QtCore import QObject
     from PySide6.QtWidgets import QApplication
-    from vcf_ops_telegraf_helper.gui.main_window import MainWindow
-    from vcf_ops_telegraf_helper.gui.discovery_dialogs import (
-        DatabaseConnectDialog, DatabaseDiscoveryDialog,
-        PerfmonDiscoveryDialog, ServicesDiscoveryDialog,
-    )
-    from vcf_ops_telegraf_helper.storage.state import StateStore
+
+    import gui_standins as standins
+    from gui_driver import Driver
+    from vcf_ops_telegraf_helper.gui.widgets import Dialog
 
     app = QApplication.instance() or QApplication([])
-    if kind == "window":
-        window = MainWindow(StateStore(state_file=tmp_path / "state.json"))
-    elif kind == "services":
-        window = ServicesDiscoveryDialog(None, [])
-    elif kind == "perfmon":
-        window = PerfmonDiscoveryDialog(None, [])
-    elif kind == "databases":
-        window = DatabaseDiscoveryDialog(None, "mssql", [])
-    else:
-        window = DatabaseConnectDialog(None, kind, 1234)
+    window, _world = standins.make_window(tmp_path)
+    dialog = None
     try:
         window.show()
+        driver = Driver(window, tmp_path / "shots")
+        driver.settle()
+        if screen != "connect":
+            driver.type("connect-address", "ops.example.com")
+            driver.type("connect-user", "admin")
+            driver.type("connect-password", "pw")
+            driver.click("connect-go")
+        if screen == "machine":
+            driver.click("open-web-prod-01")
+        elif screen == "activity":
+            driver.click("nav-activity")
+        elif screen == "settings":
+            driver.click("nav-settings")
+        elif screen == "dialog":
+            dialog = Dialog(window, "A question")
+            dialog.add_button("Close", dialog.accept, "primary")
+            dialog.show()
         app.processEvents()
-        # findChildren() can repair Shiboken's ownership as a side effect of
-        # wrapping native pointers, masking the bug. Inspect held wrappers.
-        python_owned = [
-            name
-            for name, child in vars(window).items()
-            if isinstance(child, QObject) and shiboken6.ownedByPython(child)
-        ]
-        assert python_owned == []
+        assert _owned_by_python(window) == []
+        if dialog is not None:
+            assert _owned_by_python(dialog) == []
     finally:
+        window.close()
         shiboken6.delete(window)
 
 

@@ -192,6 +192,15 @@ class SSHExecutor(EndpointExecutor):
 
             sftp.chmod(destination_path, mode)
 
+    def upload_file(self, local_path: str, destination_path: str, mode: int = 0o644) -> None:
+        """Copy a file over SFTP without holding it in memory (used for the Telegraf package)."""
+        if self.use_sudo and self._is_privileged_path(destination_path):
+            super().upload_file(local_path, destination_path, mode)
+            return
+        sftp = self._get_sftp()
+        sftp.put(local_path, destination_path)
+        sftp.chmod(destination_path, mode)
+
     def download(self, source_path: str) -> str:
         if self.use_sudo and self._is_privileged_path(source_path):
             result = self.execute(f"sudo -n cat -- {shlex.quote(source_path)}")

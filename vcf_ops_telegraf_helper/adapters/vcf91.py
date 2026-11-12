@@ -16,7 +16,12 @@ import urllib.parse
 import zipfile
 import requests
 
-from vcf_ops_telegraf_helper.adapters.base import IntegrationArtifacts, VCFOpsIntegration
+from vcf_ops_telegraf_helper.adapters.base import (
+    CertificateNotTrusted,
+    CredentialsRejected,
+    IntegrationArtifacts,
+    VCFOpsIntegration,
+)
 from vcf_ops_telegraf_helper.logger import get_logger
 from vcf_ops_telegraf_helper.security.tls import note_unverified_host
 from vcf_ops_telegraf_helper.models.vcf import (
@@ -68,6 +73,13 @@ class VCF91OpenTelegrafIntegration(VCFOpsIntegration):
         if not env.verify_ssl:
             self.session.verify = False
             note_unverified_host(self.base_url)
+        elif env.pinned_cert_sha256:
+            # Trusted on first sight: only the certificate with this fingerprint is accepted, and only
+            # for VCF Operations itself; every other host keeps ordinary verification.
+            from vcf_ops_telegraf_helper.security.certs import PinnedCertificateAdapter
+            parts = urllib.parse.urlsplit(self.base_url)
+            self.session.mount(f"{parts.scheme}://{parts.netloc}/", PinnedCertificateAdapter(env.pinned_cert_sha256))
+            self.session.verify = get_default_ca_bundle(env.ca_cert_path)
         else:
             self.session.verify = get_default_ca_bundle(env.ca_cert_path)
 
@@ -78,14 +90,14 @@ class VCF91OpenTelegrafIntegration(VCFOpsIntegration):
             resp = self.session.get(url, timeout=10, headers={"Accept": "application/json"})
             return resp.status_code in (200, 401)
         except requests.exceptions.SSLError as exc:
-            raise RuntimeError("TLS certificate verification failed for VCF Operations. Trust its CA in the OS store or select an Enterprise CA Bundle.") from exc
+            raise CertificateNotTrusted("TLS certificate verification failed for VCF Operations. Trust its CA in the OS store or select an Enterprise CA Bundle.") from exc
         except Exception:
             # Fall back to root path check if versions path is blocked
             try:
                 resp = self.session.get(f"{self.base_url}/ui/", timeout=10)
                 return resp.status_code in (200, 301, 302, 401)
             except requests.exceptions.SSLError as exc:
-                raise RuntimeError("TLS certificate verification failed for VCF Operations") from exc
+                raise CertificateNotTrusted("TLS certificate verification failed for VCF Operations") from exc
             except Exception:
                 return False
 
@@ -113,7 +125,7 @@ class VCF91OpenTelegrafIntegration(VCFOpsIntegration):
             f"{self.base_url}/suite-api/api/versions/current", headers=self._api_headers(), timeout=10
         )
         if resp.status_code in (401, 403):
-            raise RuntimeError(f"VCF Operations rejected the credentials (HTTP {resp.status_code})")
+            raise CredentialsRejected(f"VCF Operations rejected the credentials (HTTP {resp.status_code})")
         if resp.status_code != 200:
             raise RuntimeError(f"Credential check failed with HTTP {resp.status_code}")
 
@@ -154,7 +166,11 @@ class VCF91OpenTelegrafIntegration(VCFOpsIntegration):
                 if token_str:
                     self.env.token = token_str
                     return AuthToken(token=token_str)
+            if resp.status_code in (401, 403):
+                raise CredentialsRejected(f"Authentication failed with status code {resp.status_code}")
             raise RuntimeError(f"Authentication failed with status code {resp.status_code}")
+        except requests.exceptions.SSLError as e:
+            raise CertificateNotTrusted("TLS certificate verification failed for VCF Operations") from e
         except Exception as e:
             if isinstance(e, RuntimeError):
                 raise
@@ -1048,7 +1064,7 @@ class VCF91OpenTelegrafIntegration(VCFOpsIntegration):
             try:
                 self.acquire_token(self.env.username, self.env.password)
             except requests.exceptions.SSLError as exc:
-                raise RuntimeError("TLS certificate verification failed for VCF Operations") from exc
+                raise CertificateNotTrusted("TLS certificate verification failed for VCF Operations") from exc
 
     def _fetch_paged_resources(self, strict: bool, **query: Any) -> List[Dict[str, Any]]:
         """Page through GET /resources. With strict=True a failure raises instead of truncating."""

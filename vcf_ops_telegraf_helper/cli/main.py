@@ -155,8 +155,9 @@ def wizard_cmd() -> None:
 
 
 @cli.command("gui")
-@click.option("--theme", type=click.Choice(["dark", "light"]), default="dark", help="Initial Lattice theme")
-def gui_cmd(theme: str) -> None:
+@click.option("--theme", type=click.Choice(["dark", "light"]), default=None,
+              help="Colours for this launch (default: the choice remembered in Settings)")
+def gui_cmd(theme: Optional[str]) -> None:
     """Launch the native desktop GUI styled with Lattice."""
     from vcf_ops_telegraf_helper.gui.app import run_gui
     sys.exit(run_gui(theme=theme))
@@ -302,6 +303,7 @@ def resolve_monitoring_config(
 @click.option("--winrm-ssl", is_flag=True, default=False, help="Use HTTPS/SSL for WinRM transport")
 @click.option("--install-telegraf", is_flag=True, default=False, help="Automatically install Telegraf agent if missing, or upgrade if older than requested version")
 @click.option("--telegraf-version", default="1.40.1", help="Telegraf agent release version to install or upgrade (default: 1.40.1)")
+@click.option("--send-telegraf", is_flag=True, default=False, help="Download Telegraf on this computer and copy it to the target, for a target that cannot reach the download site (use with --install-telegraf)")
 @click.option("--os", "target_os", type=click.Choice(["linux", "windows"], case_sensitive=False), default=None, help="Target operating system (defaults to windows for WinRM, linux otherwise)")
 @click.option("--hostname", default=None, help="Explicit hostname for VCF Operations registration (overrides discovery)")
 @click.option("--no-baseline", is_flag=True, default=False, help="Start from an empty canvas without default OS baseline metrics")
@@ -325,6 +327,7 @@ def resolve_monitoring_config(
 @click.option("--mssql", default=None, help="MSSQL connection string")
 @click.option("--docker", default=None, help="Docker daemon endpoint (e.g. unix:///var/run/docker.sock)")
 @click.option("--ping", default=None, help="Ping target IP or hostname")
+@click.option("--custom-toml-file", type=click.Path(exists=True, dir_okay=False, path_type=Path), default=None, help="File with your own Telegraf settings, added to the helper inputs as they are")
 @click.option("--replace-inputs", is_flag=True, help="Replace deployed helper inputs with this selection (default: preserve)")
 @click.option("--agent-verify-ssl/--no-agent-verify-ssl", default=True, help="Verify agent TLS to collector independently of desktop TLS")
 @click.option("--preview", is_flag=True, help="Show preview before execution")
@@ -337,6 +340,7 @@ def resolve_monitoring_config(
     default=None,
     help="Path to custom enterprise CA certificate bundle for VCF Operations TLS validation",
 )
+@click.option("--trust-cert-sha256", default=None, help="Accept only the VCF Operations certificate with this SHA-256 fingerprint (for a certificate your computer does not recognise)")
 @click.option("--vm-name", default=None, help="Target virtual machine name in vCenter / VCF Operations")
 @click.option("--vm-id", default=None, help="Target vCenter virtual machine MOR (e.g. vm-1042)")
 @click.option("--vc-id", default=None, help="vCenter instance UUID for --vm-id (resolved from inventory if omitted)")
@@ -402,9 +406,22 @@ def run_cmd(
     confirm_takeover: Optional[str] = None,
     accept_endpoint_state: bool = False,
     continuity_wait: int = 900,
+    send_telegraf: bool = False,
+    custom_toml_file: Optional[Path] = None,
+    trust_cert_sha256: Optional[str] = None,
 ) -> None:
     """Execute the guided workflow via command-line options."""
     display_banner(console)
+
+    if send_telegraf and not (install_telegraf or take_over_managed_agent):
+        raise click.UsageError("--send-telegraf only applies when Telegraf is installed: add --install-telegraf")
+    if trust_cert_sha256:
+        from vcf_ops_telegraf_helper.security.certs import normalize_fingerprint
+
+        if len(normalize_fingerprint(trust_cert_sha256)) != 64:
+            raise click.UsageError("--trust-cert-sha256 takes a SHA-256 fingerprint: 64 hexadecimal characters")
+        if not verify_ssl:
+            raise click.UsageError("--trust-cert-sha256 cannot be combined with --no-verify-ssl")
 
     if accept_endpoint_state and not take_over_managed_agent:
         raise click.UsageError("--accept-endpoint-state requires --take-over-managed-agent")
@@ -429,6 +446,7 @@ def run_cmd(
             ("--win-os/--no-win-os", win_os is not None), ("--win-services", win_services is not None),
             ("--no-win-services", no_win_services), ("--replace-inputs", replace_inputs),
             ("--install-telegraf", install_telegraf), ("--force-new-cert", force_new_cert),
+            ("--custom-toml-file", custom_toml_file is not None),
         ) if given]
         if ignored:
             raise click.UsageError(
@@ -466,6 +484,7 @@ def run_cmd(
         collector=CollectorInfo(address=collector, name=collector_group),
         verify_ssl=verify_ssl,
         ca_cert_path=str(ca_cert) if ca_cert else None,
+        pinned_cert_sha256=trust_cert_sha256,
     )
 
     if conn_method in (ConnectionMethod.SSH, ConnectionMethod.WINRM) and not ssh_pass and not ssh_key:
@@ -515,6 +534,8 @@ def run_cmd(
         docker=docker,
         ping=ping,
     )
+    if custom_toml_file is not None:
+        monitoring.custom_toml = custom_toml_file.read_text(encoding="utf-8").strip()
 
     if conn_method == ConnectionMethod.MOCK:
         executor = MockExecutor(connected=True, telegraf_installed=True)
@@ -550,6 +571,7 @@ def run_cmd(
         install_telegraf=install_telegraf,
         telegraf_version=telegraf_version,
         force_new_cert=force_new_cert,
+        send_telegraf=send_telegraf,
     )
 
     vcf_env.agent_verify_ssl = agent_verify_ssl
@@ -957,6 +979,7 @@ def env_add(name: str, url: str, collector: str, user: str) -> None:
 @click.option("--key-path", "-k", default=None, help="SSH private key path")
 @click.option("--password", "-p", default=None, help="Remote password")
 @click.option("--port", type=int, default=None, help="Remote connection port")
+@click.option("--winrm-ssl", is_flag=True, default=False, help="Use HTTPS/SSL for WinRM transport")
 @click.option("--purge-repo/--no-purge-repo", default=True, help="Remove InfluxData repository configuration")
 @click.option("--yes", "-y", is_flag=True, default=False, help="Confirm uninstall without prompting")
 def uninstall_cmd(
@@ -969,6 +992,7 @@ def uninstall_cmd(
     port: Optional[int],
     purge_repo: bool,
     yes: bool,
+    winrm_ssl: bool = False,
 ) -> None:
     """Safely stop, disable, and purge Telegraf agent from an endpoint."""
     display_banner(console)
@@ -1003,6 +1027,7 @@ def uninstall_cmd(
         username=target_user,
         password=password,
         key_filename=key_path,
+        winrm_use_ssl=winrm_ssl,
     )
 
     if conn_method == ConnectionMethod.SSH:
@@ -1019,6 +1044,7 @@ def uninstall_cmd(
             port=actual_port,
             username=ep_target.username or "Administrator",
             password=ep_target.password or "",
+            use_ssl=winrm_ssl,
         )
     else:
         executor = LocalExecutor()

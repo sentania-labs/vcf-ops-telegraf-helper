@@ -1,4 +1,4 @@
-"""Endpoint inspection without reading or changing GUI widgets."""
+"""Look at an endpoint without changing it: operating system, Telegraf, and any Ops-managed agent."""
 from vcf_ops_telegraf_helper.workflow.managed_linux import detect_linux_managed_installation
 from vcf_ops_telegraf_helper.models.endpoint import OSFamily
 from vcf_ops_telegraf_helper.workflow.windows import detect_managed_installation, detect_windows_telegraf

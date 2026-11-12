@@ -9,7 +9,7 @@ Its primary purpose is to safely configure open-source Telegraf on Linux (and fu
 ```text
 Admin Workstation
 ┌────────────────────────────────────────────────────────┐
-│ UI Layer: Lattice Web GUI / Terminal Wizard / CLI      │
+│ UI Layer: Desktop app / Terminal Wizard / CLI          │
 │  │                                                     │
 │  ▼                                                     │
 │ Workflow Engine (ConfigureEndpointWorkflow)            │
@@ -44,7 +44,17 @@ The workflow layer coordinates operations as explicit sequential stages:
 7. `RESTART`: Safely reload or restart the Telegraf service.
 8. `VERIFY`: Run validation checks (binary test run, service state, collector reachability).
 
-The UI layer (Lattice Web GUI, Terminal Wizard, and CLI) only renders inputs and displays output: it contains no direct operational logic.
+The UI layer (desktop app, Terminal Wizard, and CLI) only renders inputs and displays output: it contains no direct operational logic.
+
+The desktop app adds a thin layer between its screens and the engine, all of it usable without Qt:
+
+* `workflow/checks.py`: the check a machine gets before anything is done to it (sign-in, what is installed and running, collector and download reachability). It changes nothing.
+* `workflow/plan.py`: every choice of a run for one machine. The engine inputs and the command shown for doing the same thing from the command line are both built from it, so the command always matches what was done.
+* `workflow/batch.py`: works on several machines, two at a time, and turns the run into one history entry that counts against what was picked.
+* `workflow/collect.py` and `workflow/plain.py`: the plain names for what can be collected, the six machine statuses, and the table from a failed stage to a reason and something to do.
+* `storage/history.py`: everything the app has done, kept on the workstation, never holding passwords.
+
+The engine honours a stop request only before stage 6 (`APPLY`), the first stage that changes the endpoint.
 
 ### 2. VCF Operations Adapter
 VCF Operations integration details are isolated behind the `VCFOpsIntegration` interface.

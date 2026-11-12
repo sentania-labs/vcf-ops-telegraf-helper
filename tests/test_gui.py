@@ -1,1447 +1,931 @@
-"""Tests for native Lattice-styled PySide6 GUI.
+"""The window, driven the way a person drives it: real clicks and typing on real widgets.
 
-Adheres to the photoflow testing pattern:
-- Sets QT_QPA_PLATFORM=offscreen before importing QtWidgets so tests run headless.
-- Uses pytest.importorskip to guard Qt imports.
-- Tests window instantiation, step navigation, theme switching, preview rendering,
-  and worker signals.
+Each test does one of the jobs the screens exist for, start to finish, against the stand-ins in
+gui_standins. The rule under test throughout: the app never reports success for something it
+did not do. Results count against what was picked, everything not done is named, and a setting
+is shown at work in the place it applies.
 """
 
 from __future__ import annotations
 
+import html
 import os
+import re
+from pathlib import Path
+
 import pytest
 
-# Ensure Qt runs offscreen in headless test environments
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 try:
-    from PySide6.QtWidgets import QApplication, QLabel
-    from vcf_ops_telegraf_helper import __version__
+    from PySide6.QtWidgets import QApplication, QFileDialog, QLabel, QPushButton
+
+    import gui_standins as standins
+    from gui_driver import Driver
     from vcf_ops_telegraf_helper.gui.main_window import MainWindow
     from vcf_ops_telegraf_helper.gui.theme import build_stylesheet
-    from vcf_ops_telegraf_helper.models.endpoint import ConnectionMethod
     from vcf_ops_telegraf_helper.storage.state import StateStore
 except (ImportError, OSError) as exc:
-    pytest.skip(
-        f"PySide6 GUI tests skipped (missing library or display dependency: {exc})",
-        allow_module_level=True,
-    )
+    pytest.skip(f"PySide6 GUI tests skipped (missing library or display dependency: {exc})", allow_module_level=True)
+
+FAST = {"uninstall_poll_seconds": 0, "continuity_poll_seconds": 0, "continuity_wait_seconds": 20}
 
 
 @pytest.fixture(scope="session")
 def qapp():
-    """Session-wide QApplication instance for offscreen GUI tests."""
-    app = QApplication.instance()
-    if app is None:
-        app = QApplication([])
+    app = QApplication.instance() or QApplication([])
+    font = app.font()
+    if font.pointSize() <= 0:
+        font.setPointSize(9)
+        app.setFont(font)
     return app
 
 
+class Session:
+    """A window on the stand-ins, with the driver, closed again at the end of the test."""
+
+    def __init__(self, tmp_path: Path):
+        self.tmp_path = tmp_path
+        self.open: list = []
+
+    def start(self, name: str = "home", connect: bool = True, world=None, seed: bool = True):
+        window, world = standins.make_window(self.tmp_path / name, world=world, seed=seed, waits=FAST)
+        window.show()
+        driver = Driver(window, self.tmp_path / "shots")
+        driver.settle()
+        self.open.append(window)
+        if connect:
+            if not window.form["address"]:
+                driver.type("connect-address", "ops.example.com")
+                driver.type("connect-user", "admin")
+            driver.type("connect-password", "pw")
+            driver.click("connect-go")
+            assert driver.page() == "machines"
+        return driver, window, world
+
+    def close(self) -> None:
+        for window in self.open:
+            window.close()
+
+
+@pytest.fixture
+def session(qapp, tmp_path):
+    found = Session(tmp_path)
+    yield found
+    found.close()
+    qapp.processEvents()
+
+
+def sign_in(d: Driver, linux=("svc-monitor", "pw"), windows=("administrator", "pw")) -> None:
+    if d.has("signin-user-linux"):
+        d.type("signin-user-linux", linux[0])
+        d.type("signin-linux-password", linux[1])
+    if d.has("signin-user-windows"):
+        d.type("signin-user-windows", windows[0])
+        d.type("signin-windows-password", windows[1])
+
+
+def fits(d: Driver) -> None:
+    assert d.overflow() == [], d.overflow()
+
+
+def said(text: str) -> str:
+    """What a label shows: its rich text without the markup."""
+    return html.unescape(re.sub(r"<[^>]+>", " ", text)).replace("\xa0", " ")
+
+
+def words(d: Driver, name: str) -> str:
+    """Everything a row or a card says, as one string."""
+    return " ".join(said(part.text()) for part in d.find(name).findChildren(QLabel))
+
+
+# ---------------------------------------------------------------------------------------------
+# The frame
+# ---------------------------------------------------------------------------------------------
 def test_theme_generation():
-    """Verify Lattice tokens compile into valid QSS strings."""
-    dark_qss = build_stylesheet("dark")
-    assert "#1b1f24" in dark_qss  # bg
-    assert "#23282f" in dark_qss  # surface
-    assert "#363d47" in dark_qss  # line
-    assert "#199e70" in dark_qss  # ok
-    assert "#d95926" in dark_qss  # bad
-    assert "QComboBox::down-arrow" in dark_qss
-    assert "chevron_down_dark.svg" in dark_qss
-
-    light_qss = build_stylesheet("light")
-    assert "#f6f7f9" in light_qss  # bg
-    assert "#ffffff" in light_qss  # surface
-    assert "#d9dee5" in light_qss  # line
-    assert "QComboBox::down-arrow" in light_qss
-    assert "chevron_down_light.svg" in light_qss
+    dark = build_stylesheet("dark")
+    assert "#1b1f24" in dark and "#23282f" in dark and "#199e70" in dark
+    assert "chevron_down_dark.svg" in dark
+    light = build_stylesheet("light")
+    assert "#f6f7f9" in light and "#ffffff" in light and "chevron_down_light.svg" in light
 
 
-def test_main_window_theme_toggle(qapp, tmp_path):
-    """Verify toggling theme alternates between dark and light."""
-    state_file = tmp_path / "state.json"
-    store = StateStore(state_file=state_file)
-    window = MainWindow(state_store=store)
+def test_window_opens_on_connect_with_no_made_up_defaults(session):
+    d, window, _world = session.start(connect=False)
+    assert window.windowTitle() == "Telegraf Helper, for VCF Operations"
+    assert (window.width(), window.height()) == (1000, 700)
+    assert d.title() == "Connect to VCF Operations"
+    assert not window.side.isVisible()
+    for name in ("connect-address", "connect-user", "connect-password"):
+        assert d.text(name) == ""
+    fits(d)
 
+
+def test_first_launch_names_what_is_missing_and_clears_as_you_type(session):
+    d, window, _world = session.start(connect=False)
+    d.click("connect-go")
+    assert d.page() == "connect"
+    notes = [f.note.text() for f in window.connect_fields.values()]
+    assert notes == ["! Enter the address of VCF Operations.", "! Enter your user name.", "! Enter your password."]
+    d.type("connect-address", "o")
+    assert window.connect_fields["address"].input.property("class") != "bad"
+    assert "same address you type in a browser" in window.connect_fields["address"].note.text()
+
+
+def test_connect_lands_on_machines_ready_to_use_and_accepts_a_pasted_address(session):
+    d, window, _world = session.start(connect=False)
+    d.type("connect-address", "  https://ops.example.com/ui/login?x=1 ")
+    d.type("connect-user", "admin")
+    d.type("connect-password", " pw with spaces ")
+    d.click("connect-go")
+    assert d.page() == "machines"
+    assert window.conn.url == "https://ops.example.com"
+    assert window.conn.password == " pw with spaces ", "a password is used exactly as typed"
+    banner = d.find("banner").text.text()
+    assert "Connected to ops.example.com. The app is ready." in banner and "It found 8 machines" in banner
+    assert window.side.isVisible() and d.has("nav-machines") and d.has("nav-activity") and d.has("nav-settings")
+    assert d.text("nav-badge") == "1 to fix"
+    fits(d)
+
+
+def test_cannot_reach_refused_and_tried_again_are_three_different_messages(session):
+    d, window, world = session.start(connect=False)
+    d.type("connect-address", "ops.example.com")
+    d.type("connect-user", "admin")
+    d.type("connect-password", "pw")
+    world.connect = "unreachable"
+    d.click("connect-go")
+    first = d.find("connect-error").text.text()
+    assert "Could not reach ops.example.com." in first and "still the same" not in first
+    d.click("connect-go")
+    assert "Tried again at" in d.find("connect-error").text.text()
+    world.connect = "ok"
+    d.type("connect-password", "wrong")
+    d.click("connect-go")
+    refused = d.find("connect-error").text.text()
+    assert "did not accept that name or password" in refused and "still the same" not in refused
+    assert not window.connected
+    d.type("connect-password", "pw")
+    d.click("connect-go")
+    assert d.page() == "machines"
+
+
+def test_unknown_certificate_is_shown_trusted_once_and_remembered(session):
+    d, window, world = session.start(connect=False)
+    world.connect = "cert"
+    d.type("connect-address", "ops.example.com")
+    d.type("connect-user", "admin")
+    d.type("connect-password", "pw")
+    d.click("connect-go")
+    assert d.page() == "certificate" and d.title() == "One check before connecting"
+    details = d.text("certificate-details")
+    assert "Synthetic Corp Internal CA" in details and "March 4, 2028" in details and "ops.example.com" in details
+    d.click("certificate-cancel")
+    assert d.page() == "connect" and "you cancelled at the certificate check" in d.find("connect-note").text.text()
+    assert window.state_store.trusted_certificate("ops.example.com") is None
+    d.type("connect-password", "pw")
+    d.click("connect-go")
+    d.click("certificate-trust")
+    assert d.page() == "machines"
+    assert window.conn.pinned_cert_sha256 == standins.CERT_SHA and window.conn.verify_ssl
+    window.close()
+    # the next launch asks only for the password, and does not ask about the certificate again
+    d, window, _world = session.start(connect=False, world=world, seed=False)
+    assert d.title() == "Welcome back"
+    assert QApplication.focusWidget().objectName() == "connect-password"
+    assert d.text("connect-address") == "ops.example.com" and d.text("connect-user") == "admin"
+    assert d.text("connect-password") == ""
+    assert "is trusted on this computer" in d.text("connect-cert-trusted")
+    d.type("connect-password", "pw")
+    d.click("connect-go")
+    assert d.page() == "machines"
+
+
+def test_a_changed_certificate_is_refused_and_shown_again(session):
+    d, window, world = session.start(connect=False)
+    world.connect = "cert"
+    window.state_store.trust_certificate("ops.example.com", {"sha256": "aa" * 32})
+    d.type("connect-address", "ops.example.com")
+    d.type("connect-user", "admin")
+    d.type("connect-password", "pw")
+    d.click("connect-go")
+    assert d.page() == "certificate"
+    assert "has changed since you trusted it" in d.text("certificate-details")
+    assert d.find("certificate-trust").text() == "Trust the new certificate and connect"
+
+
+def test_access_token_instead_of_a_password(session):
+    d, window, _world = session.start(connect=False)
+    d.click("connect-use-token")
+    assert d.has("connect-token") and not d.has("connect-user")
+    d.type("connect-address", "ops.example.com")
+    d.click("connect-go")
+    assert window.connect_fields["token"].note.text() == "! Paste your access token."
+    d.type("connect-token", "a-token")
+    d.click("connect-go")
+    assert d.page() == "machines" and window.conn.use_token
+    assert "an access token" in d.find("side-connection").accessibleName()
+    assert window.state_store.list_environments()[0].token is None
+
+
+def test_company_login_uses_the_source_vcf_operations_offers(session):
+    d, window, _world = session.start(connect=False)
+    d.type("connect-address", "ops.example.com")
+    d.type("connect-user", "jsmith")
+    d.type("connect-password", "pw")
+    d.choose("connect-source", "My company login")
+    d.click("connect-go")
+    assert d.page() == "machines" and window.conn.auth_source == "corp.example.com"
+
+
+def test_no_machines_is_explained_not_shown_as_an_empty_table(session):
+    world = standins.World()
+    world.connect = "none"
+    d, _window, _world = session.start(world=world)
+    assert d.text("machines-none") == "VCF Operations did not list any machines"
+    assert d.has("machines-retry") and d.has("machines-sign-out")
+
+
+def test_inventory_failure_is_an_error_with_a_way_forward(session):
+    d, window, _world = session.start()
+    window.adapter.list_virtual_machines = lambda strict=False: (_ for _ in ()).throw(RuntimeError("HTTP 500"))
+    d.click("machines-refresh")
+    assert "could not be read from VCF Operations" in d.find("machines-error").text.text()
+    assert d.has("machines-retry")
+
+
+# ---------------------------------------------------------------------------------------------
+# Machines
+# ---------------------------------------------------------------------------------------------
+def test_machines_list_statuses_filters_search_and_ticks(session):
+    d, window, _world = session.start()
+    assert d.find("status-web-prod-01").status == "Sending data"
+    assert d.find("status-app-win-01").status == "VCF Operations' own agent"
+    assert d.find("status-k8s-node-01").status == "Needs attention"
+    assert d.find("action-db-pg-01").text() == "Set up" and d.find("action-k8s-node-01").text() == "See problem"
+    assert not d.has("status-legacy-app-01") and not d.has("open-vCLS-4f2a9c1e")
+    assert d.find("chip-all").text().split()[-1] == "8" and d.find("chip-none").text().split()[-1] == "5"
+    d.click("chip-attention")
+    assert d.has("status-k8s-node-01") and not d.has("status-db-pg-01")
+    d.click("chip-all")
+    d.type("machines-find", "10.20.2")
+    assert d.has("status-db-pg-01") and d.has("status-db-sql-02") and not d.has("status-web-prod-01")
+    assert d.find("chip-none").text().split()[-1] == "2", "counts follow the search"
+    d.type("machines-find", "nothing-like-this")
+    assert d.text("machines-empty") == "No machine matches"
+    d.click("machines-show-all")
+    assert d.has("selection-hint")
+    d.click("tick-db-pg-01")
+    d.click("tick-files-01")
+    assert "2 machines ticked" in d.text("selection-count")
+    assert d.find("selection-setup").text().startswith("Set up monitoring on 2 machines")
+    d.click("selection-clear")
+    assert window.selection == [] and d.has("selection-hint")
+    d.click("show-off")
+    assert d.has("status-legacy-app-01") and not d.has("tick-legacy-app-01")
+    d.click("show-infra")
+    assert not d.has("action-vCLS-4f2a9c1e") and not d.has("tick-vCLS-4f2a9c1e")
+    fits(d)
+
+
+def test_machine_page_shows_status_actions_and_history(session):
+    d, _window, _world = session.start()
+    d.click("open-web-prod-01")
+    assert d.title() == "web-prod-01"
+    assert "Sending data to VCF Operations" in d.find("machine-headline").title.text()
+    assert d.has("machine-change") and d.has("machine-remove") and d.has("history-seed-nov3")
+    d.click("machine-back")
+    d.click("action-k8s-node-01")
+    headline = d.find("machine-headline")
+    assert "did not finish" in headline.title.text()
+    assert "What happened:" in headline.small.text() and "What to do:" in headline.small.text()
+    assert d.find("machine-retry").text() == "Try again"
+    fits(d)
+
+
+# ---------------------------------------------------------------------------------------------
+# Set up one machine
+# ---------------------------------------------------------------------------------------------
+def test_set_up_one_machine_start_to_finish(session):
+    d, window, world = session.start()
+    d.click("action-db-pg-01")
+    assert d.page() == "signin" and d.text("flow-title") == "SET UP MONITORING"
+    d.click("flow-next")
+    assert d.page() == "signin", "empty fields keep the person on the step and say what is missing"
+    sign_in(d)
+    d.click("flow-next")
+    assert d.title() == "The machine is ready"
+    assert "Ready. Telegraf 1.40.1 will be installed." in words(d, "check-db-pg-01")
+    d.click("flow-next")
+    assert d.page() == "collect"
+    assert "also found PostgreSQL running" in d.text("page-sub")
+    assert "opt-sug" in d.find("opt-pg").property("class"), "found but not watched is dashed"
+    fits(d)
+    d.click("flow-next")
+    assert "Found but not watched:" in d.find("review-unwatched").text.text()
+    assert d.find("flow-next").text() == "Start setup on db-pg-01"
+    d.click("flow-next")
+    assert d.page() == "result"
+    headline = d.find("result-headline")
+    assert headline.title.text() == "db-pg-01 is set up" and headline.kind == "ok"
+    assert "PostgreSQL was found here but is not watched" in words(d, "result-db-pg-01")
+    command = d.text("command-text")
+    assert command.startswith("vcf-telegraf-helper run \\\n") and "..." not in command
+    assert '--vcf-pass "<password>"' in command and '--ssh-pass "<password>"' in command and "pw" not in command.split()
+    assert "--vm-name db-pg-01" in command and "--install-telegraf --telegraf-version 1.40.1" in command
+    d.click("command-copy")
+    assert QApplication.clipboard().text() == command
+    fits(d)
+    d.click("flow-next")
+    assert d.page() == "machines" and d.find("status-db-pg-01").status == "Sending data"
+    assert world.machine("db-pg-01").telegraf_installed
+    entry = window.history.entries()[0]
+    assert entry.title == "Set up monitoring" and entry.rows[0].cmd == command and entry.worked == 1
+    assert "pw" not in window.history.history_file.read_text().split('"')
+
+
+def test_found_database_asks_for_an_account_and_never_shows_its_password(session):
+    d, window, _world = session.start()
+    d.click("action-db-pg-01")
+    sign_in(d)
+    d.click("flow-next")
+    d.click("flow-next")
+
+    def fill() -> None:
+        d.click("database-test", settle=False)
+        d.pump(60)
+        assert "Enter the database user name and password." in d.text("database-error")
+        d.type("database-user", "monitor")
+        d.type("database-password", "db-secret-value")
+        d.click("database-test", settle=False)
+        d.wait(lambda: d.has("database-found"), what="databases found")
+        assert "Found 3 databases" in d.find("database-found").text.text()
+        d.click("database-add", settle=False)
+
+    d.in_dialog(fill, lambda: d.click("tick-pg", settle=False))
+    assert window.flow.choices.has("pg") and "3 databases found." in window.flow.choices.notes["pg"]
+    d.click("flow-next")
+    assert not d.has("review-unwatched")
+
+    def look() -> None:
+        text = d.text("text-dialog-text")
+        assert "[[inputs.postgresql]]" in text and "db-secret-value" not in text
+        d.click("text-dialog-close", settle=False)
+
+    d.in_dialog(look, lambda: d.click("review-files", settle=False))
+    d.click("flow-next")
+    command = d.text("command-text")
+    assert "--postgres" in command and "password=<password>" in command and "db-secret-value" not in command
+    assert "db-secret-value" not in window.history.history_file.read_text()
+
+
+def test_practice_run_changes_nothing_and_says_so(session):
+    d, window, world = session.start()
+    d.click("action-db-pg-01")
+    sign_in(d)
+    d.click("flow-next")
+    d.click("flow-next")
+    d.click("flow-next")
+    d.click("flow-practice")
+    assert d.page() == "result"
+    assert d.find("result-headline").title.text() == "Practice run finished. Nothing was changed."
+    assert "--dry-run" in d.text("command-text")
+    assert not world.machine("db-pg-01").telegraf_installed
+    assert d.find("flow-next").text() == "Start the real setup"
+    d.click("flow-done")
+    assert d.find("status-db-pg-01").status == "Not set up"
+    assert window.history.entries()[0].title == "Practice run: Set up monitoring"
+
+
+def test_test_connection_only_is_recorded_and_changes_nothing(session):
+    d, window, world = session.start()
+    d.click("tick-db-pg-01")
+    d.click("tick-k8s-node-01")
+    d.click("selection-test")
+    sign_in(d)
+    assert d.find("flow-next").text().startswith("Test connection")
+    d.click("flow-next")
+    assert d.title() == "1 machine passed. 1 did not."
+    assert "This test is saved" in d.text("check-saved")
+    assert not d.has("check-fix-k8s-node-01"), "a test names the problem; the fix belongs to a setup"
+    entry = window.history.entries()[0]
+    assert entry.kind == "test" and entry.worked == 1 and entry.failed == 1 and not any(r.cmd for r in entry.rows)
+    assert not world.machine("db-pg-01").telegraf_installed
+    d.click("flow-next")
+    assert d.page() == "machines"
+
+
+# ---------------------------------------------------------------------------------------------
+# Several machines
+# ---------------------------------------------------------------------------------------------
+def start_several(d: Driver) -> None:
+    for name in ("db-pg-01", "web-prod-02", "build-runner-03", "k8s-node-01", "app-win-01"):
+        d.click(f"tick-{name}")
+    d.click("selection-setup")
+    sign_in(d)
+    d.click("flow-next")
+
+
+def test_several_machines_problems_first_each_with_its_fix(session):
+    d, window, _world = session.start()
+    start_several(d)
+    assert "app-win-01 is left out of this run" not in d.title()
+    assert d.title() == "2 machines are ready. 2 have a problem."
+    assert d.text("flow-what") == "5 machines picked, 4 in this run"
+    from vcf_ops_telegraf_helper.gui.widgets import Row
+
+    rows = [w.objectName() for w in d.find("check-list").findChildren(Row)]
+    assert rows[:2] == ["check-build-runner-03", "check-k8s-node-01"], "problems are listed first"
+    assert d.find("check-fix-build-runner-03").text() == "Use a different sign-in"
+    assert d.find("check-fix-k8s-node-01").text() == "Pick a collector it can reach"
+    go = d.find("flow-next")
+    assert go.text().startswith("Continue with 2, leave 2 out") and "primary" not in go.property("class")
+    fits(d)
+
+    def own_signin() -> None:
+        d.type("signin-dialog-user", "runner")
+        d.type("signin-dialog-password", "pw")
+        d.click("signin-dialog-ok", settle=False)
+
+    d.in_dialog(own_signin, lambda: d.click("check-fix-build-runner-03", settle=False))
+    assert "build-runner-03 uses its own (runner)" in d.text("check-signed")
+    d.click("check-again-k8s-node-01")
+    assert "still the same" in words(d, "check-k8s-node-01")
+    d.click("check-leave-k8s-node-01")
+    assert d.title() == "All 3 machines are ready"
+    assert d.find("flow-next").text().startswith("Continue with 3, leave 1 out")
+    d.click("flow-next")
+    d.click("flow-next")
+    left = d.find("review-left-out").text.text()
+    assert "Left out of this run (2)" in left and "app-win-01" in left and "k8s-node-01" in left
+    assert d.find("flow-next").text() == "Start setup on 3 machines"
+    fits(d)
+    d.click("flow-next")
+    headline = d.find("result-headline")
+    assert headline.kind == "warn"
+    assert headline.title.text() == "3 of the 5 machines you picked are set up. 2 were left out."
+    assert d.has("result-setup-k8s-node-01") and not d.has("result-setup-app-win-01")
+    assert d.find("command-picker").count() == 3
+    d.click("command-copy-all")
+    assert QApplication.clipboard().text().count("vcf-telegraf-helper run") == 3
+    entry = window.history.entries()[0]
+    assert entry.total == 5 and entry.worked == 3 and entry.not_done == 2
+    fits(d)
+
+
+def test_the_app_never_says_all_for_fewer_than_were_picked(session):
+    d, _window, _world = session.start()
+    d.click("tick-db-pg-01")
+    d.click("tick-web-prod-02")
+    d.click("selection-setup")
+    sign_in(d)
+    d.click("flow-next")
+    d.click("flow-next")
+    d.click("flow-next")
+    d.click("flow-next")
+    assert d.find("result-headline").title.text() == "Both machines are set up"
+    assert d.find("result-headline").kind == "ok"
+
+
+def test_stop_leaves_machines_not_yet_changed_alone_and_says_which(session, monkeypatch):
+    monkeypatch.setattr(standins, "DELAY", 0.02)
+    d, window, world = session.start()
+    for name in ("db-pg-01", "db-sql-02", "files-01", "web-prod-02"):
+        d.click(f"tick-{name}")
+    d.click("selection-setup")
+    sign_in(d)
+    d.click("flow-next")
+    d.click("flow-next")
+    d.click("flow-next")
+    d.click("flow-next", settle=False)
+    d.wait(lambda: d.page() == "running" and d.has("run-stop"), what="stop button")
+    stop = d.find("run-stop")
+    assert stop.text() == "Stop the machines not yet changed"
+    d.click("run-stop", settle=False)
+    assert window.findChild(QPushButton, "run-stop") is stop, "the button is one persistent widget, never rebuilt"
+    assert not stop.isVisible(), "once pressed there is nothing more to stop"
+    d.settle()
+    entry = window.history.entries()[0]
+    stopped = [r.name for r in entry.rows if r.skipped]
+    assert stopped, "at least the machines waiting their turn are stopped"
+    for name in stopped:
+        assert not world.machine(name).telegraf_installed or name == "web-prod-02"
+        assert not world.machine(name).uploaded_files, f"{name} was stopped, so nothing was written to it"
+    title = d.find("result-headline").title.text()
+    done = len(entry.rows) - len(stopped)
+    assert d.find("result-headline").kind in ("warn", "info")
+    assert title.startswith(f"{done} of the 4 machines you picked") or title == "Stopped. Nothing was changed."
+    assert all(not r.cmd for r in entry.rows if r.skipped)
+
+
+def test_a_refused_sign_in_is_not_tried_on_more_machines(session):
+    d, window, world = session.start()
+    for machine in world.executors.values():
+        machine.accepts = {"someone-else"}
+    for name in ("db-pg-01", "web-prod-02", "build-runner-03", "k8s-node-01"):
+        d.click(f"tick-{name}")
+    d.click("selection-setup")
+    sign_in(d)
+    d.click("flow-next")
+    held = [r for r in window.flow.check.values() if "could lock the account" in r.what]
+    assert len(held) >= 2, "after the first refusals the same sign-in is not tried again"
+    assert d.title() == "0 machines are ready. 4 have a problem."
+    assert d.text("check-blocked").startswith("No machine is ready yet")
+
+
+# ---------------------------------------------------------------------------------------------
+# Failure, retry, sending Telegraf across
+# ---------------------------------------------------------------------------------------------
+def test_try_again_keeps_the_choices_and_offers_a_collector_the_machine_can_reach(session):
+    d, window, world = session.start()
+    d.click("action-k8s-node-01")
+    d.click("machine-retry")
+    assert d.text("flow-title") == "TRY AGAIN"
+    sign_in(d)
+    d.click("flow-next")
+    assert d.title() == "k8s-node-01 is not ready yet"
+
+    def pick() -> None:
+        assert "cannot reach it" in d.text("collector-reach-0") and "can reach it" in d.text("collector-reach-2")
+        assert not d.has("collector-use-0")
+        d.click("collector-use-2", settle=False)
+
+    d.in_dialog(pick, lambda: d.click("check-fix-k8s-node-01", settle=False))
+    assert d.title() == "The machine is ready"
+    d.click("flow-next")
+    assert d.page() == "review", "the choices from the last attempt are kept: no What to collect step"
+    assert d.text("review-same") == "The same choices as the last attempt."
+    d.click("flow-next")
+    assert d.find("result-headline").title.text() == "k8s-node-01 is set up"
+    assert "--collector 10.30.0.51" in d.text("command-text")
+    d.click("flow-next")
+    assert d.page() == "machine" and "Sending data" in d.find("machine-headline").title.text()
+    d.click("nav-activity")
+    d.click("activity-open-seed-yesterday")
+    assert d.find("result-headline").small.text() == "It has been put right since: see below."
+    assert not d.has("result-retry-k8s-node-01")
+
+
+def test_machine_without_internet_gets_telegraf_sent_from_this_computer(session):
+    d, window, world = session.start()
+    world.machine("files-01").internet = False
+    d.click("action-files-01")
+    sign_in(d)
+    d.click("flow-next")
+    assert d.find("check-fix-files-01").text() == "Send it from this computer"
+    d.click("check-fix-files-01")
+    assert d.title() == "The machine is ready"
+    d.click("flow-next")
+    d.click("flow-next")
+    assert "Send Telegraf 1.40.1 from this computer" in words(d, "review-files-01")
+    d.click("flow-next")
+    command = d.text("command-text")
+    assert "--install-telegraf --telegraf-version 1.40.1 --send-telegraf" in command and "--winrm-ssl" in command
+    machine = world.machine("files-01")
+    assert machine.telegraf_installed
+    assert any("Get-FileHash" in c for c in machine.executed_commands), "the machine checks the copy it received"
+    assert not any("Invoke-WebRequest" in c for c in machine.executed_commands)
+    headline = d.find("result-headline")
+    assert headline.kind == "info" and "Waiting for its first data" in headline.small.text()
+    d.click("flow-next")
+    assert d.find("status-files-01").status == "Set up, waiting for first data"
+    d.click("open-files-01")
+    d.click("machine-check-now")
+    assert "Sending data" in d.find("machine-headline").title.text()
+
+
+def test_a_failure_during_the_run_names_the_reason_and_the_remedy(session):
+    d, window, world = session.start()
+    d.click("tick-db-pg-01")
+    d.click("tick-files-01")
+    d.click("selection-setup")
+    sign_in(d)
+    d.click("flow-next")
+    d.click("flow-next")
+    d.click("flow-next")
+    world.machine("files-01").internet = False
+    d.click("flow-next")
+    headline = d.find("result-headline")
+    assert headline.kind == "bad" and headline.title.text() == "1 of 2 machines set up. 1 needs attention."
+    row = window.history.entries()[0].row_for("res-vm-008")
+    assert not row.ok and "could not download Telegraf" in row.msg and "send it across" in row.todo
+    assert d.has("result-retry-files-01")
+    d.click("flow-next")
+    assert d.find("status-files-01").status == "Needs attention"
+    assert d.find("status-db-pg-01").status == "Sending data"
+    assert d.text("nav-badge") == "2 to fix"
+
+
+# ---------------------------------------------------------------------------------------------
+# Change what is collected, and the app's own settings
+# ---------------------------------------------------------------------------------------------
+def test_change_applies_what_is_ticked_and_confirms_it(session):
+    d, window, world = session.start()
+    d.click("open-web-prod-01")
+    d.click("machine-change")
+    sign_in(d)
+    d.click("flow-next")
+    assert d.page() == "collect" and d.title() == "Change what web-prod-01 collects"
+    assert d.find("tick-cpu").isChecked() and not d.find("tick-diskio").isChecked()
+    d.click("flow-next")
+    assert "You have not changed anything yet" in d.find("review-nothing").text.text()
+    assert not d.has("flow-next"), "nothing to apply means no blue button"
+    d.click("flow-back")
+    d.click("tick-diskio")
+    d.click("tick-swap")
+    d.click("flow-next")
+    assert d.has("review-add") and d.has("review-rem")
+    assert d.find("flow-next").text() == "Apply the change to web-prod-01"
+    d.click("flow-next")
+    assert d.find("result-headline").title.text() == "The change is in effect on web-prod-01"
+    row = window.history.entries()[0].rows[0]
+    assert "read the settings back from the machine" in row.msg
+    assert "Newly collecting: Disk activity" in row.msg and "No longer collecting: Swap use" in row.msg
+    assert "--replace-inputs" in d.text("command-text") and "--no-swap" in d.text("command-text")
+    deployed = world.machine("web-prod-01").uploaded_files["/etc/telegraf/telegraf.d/vcf-helper-system.conf"]
+    assert "[[inputs.diskio]]" in deployed and "[[inputs.swap]]" not in deployed
+    d.click("flow-next")
+    assert d.page() == "machine"
+    assert window.history.facts("res-vm-001")["collecting"] == ["cpu", "mem", "disk", "net", "system", "diskio"]
+
+
+def test_settings_are_saved_and_shown_at_work_in_the_next_setup(session):
+    d, window, _world = session.start()
+    d.click("nav-settings")
+    d.click("settings-tab-defaults")
+    d.choose("setting-existing", "Update it")
+    assert d.find("saved-existing").isVisible()
+    assert "Check step of the next setup" in d.text("saved-says-existing")
+    d.choose("setting-version", "1.34.0")
+    d.choose("setting-collector", "main-cp-01")
+    d.click("default-diskio")
+    assert 'will also collect "Disk activity"' in d.text("saved-says-defaults")
+    fits(d)
+    window.close()
+    # the settings survive closing the app
+    d, window, _world = session.start(seed=False)
+    assert window.settings.existing == "update" and window.settings.version == "1.34.0"
+    d.click("action-web-prod-02")
+    sign_in(d)
+    d.click("flow-next")
+    row = words(d, "check-web-prod-02")
+    assert "It will be updated to version 1.34.0" in row and "(your choice in Settings, New setups)" in row
+    assert 'the collector "main-cp-01" (your choice in Settings, New setups)' in row
+    d.click("flow-next")
+    assert "(as you set it in Settings, New setups)" in d.text("page-sub")
+    assert d.find("tick-diskio").isChecked()
+    d.click("flow-next")
+    assert "This is the collector you chose in Settings, New setups." in " ".join(
+        part.text() for part in d.window.page.findChildren(QLabel))
+    d.click("flow-cancel")
+    assert d.page() == "machines"
+
+
+def test_colours_change_straight_away_and_are_remembered(session):
+    d, window, _world = session.start()
     assert window.current_theme == "dark"
-    window._toggle_theme()
+    d.click("nav-settings")
+    d.click("settings-tab-look")
+    d.click("setting-theme-light")
+    assert window.current_theme == "light" and d.find("saved-theme").isVisible()
+    window.close()
+    _d, window, _world = session.start(connect=False, seed=False)
     assert window.current_theme == "light"
-    window._toggle_theme()
-    assert window.current_theme == "dark"
 
 
-def test_main_window_about_and_licenses_dialog(qapp, tmp_path):
-    """Help -> About is the single entry point; its Licenses tab shows the embedded notices."""
-    from unittest.mock import patch
-    from PySide6.QtWidgets import QDialog, QMenu, QTabWidget, QPlainTextEdit
-    state_file = tmp_path / "state.json"
-    store = StateStore(state_file=state_file)
-    window = MainWindow(state_store=store)
-
-    assert not hasattr(window, "about_btn")
-    help_menu = next(a.menu() for a in window.menuBar().actions() if a.menu() and a.text() == "&Help")
-    assert isinstance(help_menu, QMenu)
-    assert len(help_menu.actions()) == 1
-
-    dialog_instances = []
-
-    def mock_exec(self):
-        dialog_instances.append(self)
-        return QDialog.DialogCode.Accepted
-
-    with patch.object(QDialog, "exec", mock_exec):
-        help_menu.actions()[0].trigger()
-        assert len(dialog_instances) == 1
-        dlg = dialog_instances[0]
-        tabs = dlg.findChild(QTabWidget)
-        assert tabs is not None
-        assert tabs.count() == 2
-        assert tabs.tabText(0) == "About"
-        assert tabs.tabText(1) == "Licenses"
-        assert tabs.currentIndex() == 0
-
-        edit = dlg.findChild(QPlainTextEdit)
-        assert edit is not None
-        assert edit.isReadOnly()
-        assert "THIRD-PARTY SOFTWARE NOTICES AND LICENSES" in edit.toPlainText()
-        assert "SOURCE CODE AVAILABILITY AND RELINKING INSTRUCTIONS" in edit.toPlainText()
-        assert "GNU LESSER GENERAL PUBLIC LICENSE Version 3" in edit.toPlainText()
-
-
-def test_main_window_endpoint_detection_linux(qapp, tmp_path):
-    """Verify Linux endpoint detection updates UI state with discovered details."""
-    from unittest.mock import MagicMock
-    from vcf_ops_telegraf_helper.executors.base import CommandResult
-
-    state_file = tmp_path / "state.json"
-    store = StateStore(state_file=state_file)
-    window = MainWindow(state_store=store)
-
-    window.ep_host_input.setText("linux-host.corp.local")
-    mock_exec = MagicMock()
-    mock_exec.test_connection.return_value = True
-    mock_exec.execute.side_effect = lambda cmd, **kw: CommandResult(
-        exit_code=0,
-        stdout="" if "--property=Id,LoadState" in cmd else ('PRETTY_NAME="Ubuntu 22.04 LTS"' if "os-release" in cmd else ("active" if "systemctl" in cmd else "x86_64")),
-        command=cmd,
-    )
-    window._create_executor = lambda target: mock_exec
-
-    window.ep_user_input.setText("operator")
-    window._detect_endpoint()
-    assert "Connected & Discovered" in window.ep_status_label.text()
-    assert "Ubuntu 22.04 LTS" in window.ep_details_box.toPlainText()
-
-
-def test_main_window_endpoint_detection_windows(qapp, tmp_path):
-    """Verify Windows endpoint detection adjusts defaults and shows Windows paths."""
-    state_file = tmp_path / "state.json"
-    store = StateStore(state_file=state_file)
-    window = MainWindow(state_store=store)
-
-    window.ep_os_combo.setCurrentText("Windows")
-    assert window.ep_user_input.text() == ""
-    assert window.ep_auth_radio_widget.isHidden() is True
-    target = window._get_endpoint_target()
-    assert target.connection_method == ConnectionMethod.WINRM
-    assert window.ep_port_input.text() == "5985"
-    assert "Latest Stable" in window.ep_version_combo.currentText()
-
-    from unittest.mock import MagicMock
-    mock_exec = MagicMock()
-    mock_exec.test_connection.return_value = True
-    mock_exec.file_exists.return_value = False
-    from vcf_ops_telegraf_helper.executors.base import CommandResult
-    mock_exec.execute.return_value = CommandResult(exit_code=1, stdout="", command="probe")
-    window._create_executor = lambda target: mock_exec
-
-    window.ep_user_input.setText("operator")
-    window._detect_endpoint()
-    assert "Connected & Discovered (Windows)" in window.ep_status_label.text()
-    assert "C:\\telegraf\\telegraf.d" in window.ep_details_box.toPlainText()
-    assert "InfluxData" in window.ep_details_box.toPlainText()
-    assert not window.ep_missing_banner.isHidden()
-
-
-def test_main_window_endpoint_detection_preserves_auto_install_opt_out(qapp, tmp_path):
-    """Verify endpoint detection does not re-enable auto-install if admin selected Do Not Install."""
-    state_file = tmp_path / "state.json"
-    store = StateStore(state_file=state_file)
-    window = MainWindow(state_store=store)
-
-    window.ep_version_combo.setCurrentText("Do Not Install (Use Existing Host Agent)")
-
-    from unittest.mock import MagicMock
-    mock_exec = MagicMock()
-    mock_exec.test_connection.return_value = True
-    mock_exec.file_exists.return_value = False
-    mock_exec.execute.side_effect = lambda cmd, **kw: MagicMock(success="--property=Id,LoadState" in cmd, stdout="")
-    window._create_executor = lambda target: mock_exec
-
-    window.ep_user_input.setText("operator")
-    window._detect_endpoint()
-    assert not window.ep_missing_banner.isHidden()
-    assert "NO (auto-install disabled)" in window.ep_details_box.toPlainText()
-
-
-def test_main_window_endpoint_detection_resets_missing_banner_on_failure(qapp, tmp_path):
-    """Verify endpoint detection hides missing banner when connection fails or raises exception."""
-    state_file = tmp_path / "state.json"
-    store = StateStore(state_file=state_file)
-    window = MainWindow(state_store=store)
-
-    window.ep_missing_banner.setVisible(True)
-    assert not window.ep_missing_banner.isHidden()
-
-    from unittest.mock import MagicMock
-    mock_exec = MagicMock()
-    mock_exec.test_connection.return_value = False
-    window._create_executor = lambda target: mock_exec
-
-    window.ep_user_input.setText("operator")
-    window._detect_endpoint()
-    assert window.ep_missing_banner.isHidden()
-    assert "Connection failed" in window.ep_status_label.text()
-
-
-def test_main_window_docker_endpoint_os_adaptation(qapp, tmp_path):
-    """Verify Docker endpoint defaults adapt between Windows named pipe and Linux Unix socket."""
-    state_file = tmp_path / "state.json"
-    store = StateStore(state_file=state_file)
-    window = MainWindow(state_store=store)
-
-    window.ep_os_combo.setCurrentText("Linux")
-    assert window.docker_endpoint_input.text() == "unix:///var/run/docker.sock"
-    mon_linux = window._get_monitoring_config()
-    assert mon_linux.docker.endpoint == "unix:///var/run/docker.sock"
-
-    window.ep_os_combo.setCurrentText("Windows")
-    assert window.docker_endpoint_input.text() == "npipe:////./pipe/docker_engine"
-    mon_win = window._get_monitoring_config()
-    assert mon_win.docker.endpoint == "npipe:////./pipe/docker_engine"
-
-
-def test_main_window_vcf_connection(qapp, tmp_path):
-    """Verify VCF connection test with adapter updates UI status."""
-    from unittest.mock import MagicMock, patch
-
-    state_file = tmp_path / "state.json"
-    store = StateStore(state_file=state_file)
-    window = MainWindow(state_store=store)
-
-    mock_adapter = MagicMock()
-    mock_adapter.validate_connection.return_value = True
-    with patch("vcf_ops_telegraf_helper.gui.main_window.get_adapter", return_value=mock_adapter):
-        window._test_vcf_connection()
-
-    assert "PASS" in window.vcf_status_label.text()
-
-
-def test_main_window_step3_plugins_and_preview(qapp, tmp_path):
-    """Verify plugin catalog, selection, and preview updates."""
-    state_file = tmp_path / "state.json"
-    store = StateStore(state_file=state_file)
-    window = MainWindow(state_store=store)
-
-    assert window.plugin_catalog_list.count() == 19
-    assert window.plugin_config_stack.count() == 19
-
-    # Test catalog item selection switches stack
-    window.plugin_catalog_list.setCurrentRow(10)  # NGINX
-    assert window.plugin_config_stack.currentIndex() == 10
-
-    window.nginx_check.setChecked(True)
-    window.nginx_url_input.setText("http://127.0.0.1/status")
-    window.custom_toml_input.setPlainText("[[inputs.ping]]\n  urls = ['8.8.8.8']")
-
-    mon = window._get_monitoring_config()
-    assert mon.nginx.enabled is True
-    assert mon.nginx.urls == ["http://127.0.0.1/status"]
-    window.ep_version_combo.setCurrentIndex(0)
-    window._update_preview()
-    preview_txt = window.preview_system_box.toPlainText()
-    assert "[[inputs.nginx]]" in preview_txt
-    assert "[[inputs.ping]]" in preview_txt
-    summary_linux = window.review_summary_box.toPlainText()
-    assert "Install official InfluxData agent 1.40.1 via native package manager" in summary_linux
-    assert "downloads/salt" not in summary_linux
-
-    window.ep_os_combo.setCurrentText("Windows")
-    window._update_preview()
-    summary_win = window.review_summary_box.toPlainText()
-    assert "Install official InfluxData agent release 1.40.1 package" in summary_win
-    assert "downloads/salt" not in summary_win
-
-    window.ep_version_combo.setCurrentText("Do Not Install (Use Existing Host Agent)")
-    window._update_preview()
-    assert "Verify existing pre-installed Telegraf agent" in window.review_summary_box.toPlainText()
-
-
-def test_main_window_workflow_worker(qapp):
-    """Verify WorkflowWorker executes and emits stage_updated and finished signals."""
-    from unittest.mock import MagicMock
-    from vcf_ops_telegraf_helper.executors.mock import MockExecutor
-    from vcf_ops_telegraf_helper.gui.main_window import WorkflowWorker
-    from vcf_ops_telegraf_helper.models.endpoint import EndpointTarget
-    from vcf_ops_telegraf_helper.models.vcf import CollectorInfo, VCFEnvironment
-    from vcf_ops_telegraf_helper.models.monitoring import MonitoringConfig
-    from vcf_ops_telegraf_helper.models.workflow import RunSummary, WorkflowOptions
-
-    env = VCFEnvironment(
-        name="test",
-        url="https://vcf.local",
-        username="admin",
-        collector=CollectorInfo(address="10.10.10.50"),
-    )
-    target = EndpointTarget(hostname="10.10.10.101")
-    mon = MonitoringConfig()
-    executor = MockExecutor(connected=True, telegraf_installed=True)
-    adapter = MagicMock()
-    adapter.get_integration_artifacts.return_value = MagicMock(
-        cluster_id="c1",
-        thumbprint="th",
-        ca_cert="ca",
-        client_cert="cert",
-        client_key="key",
-    )
-    opts = WorkflowOptions(dry_run=True)
-
-    worker = WorkflowWorker(
-        environment=env,
-        target=target,
-        monitoring=mon,
-        executor=executor,
-        adapter=adapter,
-        options=opts,
-    )
-
-    stages_seen = []
-    worker.stage_updated.connect(lambda res: stages_seen.append(res))
-    results_summary = []
-    worker.finished.connect(lambda sumry: results_summary.append(sumry))
-
-    worker.run()
-
-    assert len(stages_seen) == 8
-    assert len(results_summary) == 1
-    assert isinstance(results_summary[0], RunSummary)
-
-
-def test_main_window_plugin_catalog_two_pane_and_presets(qapp, tmp_path):
-    """Verify Approach A two-pane catalog presets and two-way synchronization."""
-    from PySide6.QtCore import Qt
-
-    state_file = tmp_path / "state.json"
-    store = StateStore(state_file=state_file)
-    window = MainWindow(state_store=store)
-
-    # 1. Verify preset: Clear Workloads
-    window.nginx_check.setChecked(True)
-    window.mysql_check.setChecked(True)
-    assert window.nginx_check.isChecked() is True
-
-    window._clear_workload_plugins()
-    assert window.nginx_check.isChecked() is False
-    assert window.mysql_check.isChecked() is False
-    assert window.cpu_check.isChecked() is True
-
-    # 2. Verify preset: Select All respects target OS
-    window.ep_os_combo.setCurrentText("Linux")
-    window._select_all_plugins()
-    assert window.nginx_check.isChecked() is True
-    assert window.docker_check.isChecked() is True
-    assert window.mssql_check.isChecked() is True
-    assert window.sys_check.isChecked() is True
-    assert window.swap_check.isChecked() is True
-    assert window.win_perf_check.isChecked() is False
-    assert window.win_svc_check.isChecked() is False
-
-    window.ep_os_combo.setCurrentText("Windows")
-    window._select_all_plugins()
-    assert window.win_perf_check.isChecked() is True
-    assert window.win_os_check.isChecked() is True
-    assert window.win_svc_check.isChecked() is True
-    assert window.sys_check.isChecked() is False
-    assert window.swap_check.isChecked() is False
-
-    # 3. Verify preset: Baseline
-    window.ep_os_combo.setCurrentText("Linux")
-    window._apply_baseline_preset()
-    assert window.cpu_check.isChecked() is True
-    assert window.mem_check.isChecked() is True
-    assert window.disk_check.isChecked() is True
-    assert window.net_check.isChecked() is True
-    assert window.sys_check.isChecked() is True
-    assert window.swap_check.isChecked() is True
-    assert window.win_perf_check.isChecked() is False
-    assert window.nginx_check.isChecked() is False
-
-    # 4. Baseline on Windows enables win_perf and win_svc while excluding Linux-only system/swap
-    window.ep_os_combo.setCurrentText("Windows")
-    window._apply_baseline_preset()
-    assert window.win_perf_check.isChecked() is True
-    assert window.win_os_check.isChecked() is True
-    assert window.win_svc_check.isChecked() is True
-    assert window.sys_check.isChecked() is False
-    assert window.swap_check.isChecked() is False
-
-    # 5. List check state syncs to checkbox
-    nginx_row = next(i for i, (key, *_) in enumerate(window.catalog_items) if key == "nginx")
-    nginx_item = window.plugin_catalog_list.item(nginx_row)
-    assert nginx_item is not None
-    nginx_item.setCheckState(Qt.Checked)
-    assert window.nginx_check.isChecked() is True
-
-    nginx_item.setCheckState(Qt.Unchecked)
-    assert window.nginx_check.isChecked() is False
-
-    # 6. Custom TOML auto-check respects manual disable
-    window.custom_toml_input.setPlainText("[[inputs.mem]]")
-    assert window.custom_toml_check.isChecked() is True
-
-    window.custom_toml_check.setChecked(False)
-    assert getattr(window, "_custom_toml_manually_unchecked", False) is True
-
-    window.custom_toml_input.setPlainText("[[inputs.mem]]\n  fielddrop = [\"active\"]")
-    assert window.custom_toml_check.isChecked() is False
-
-    window.custom_toml_input.setPlainText("")
-    assert window.custom_toml_check.isChecked() is False
-    assert getattr(window, "_custom_toml_manually_unchecked", False) is False
-
-
-def test_main_window_endpoint_detection_installed_hides_banner(qapp, tmp_path):
-    """Verify missing agent banner is hidden when Telegraf is already installed."""
-    from unittest.mock import MagicMock
-    from vcf_ops_telegraf_helper.executors.base import CommandResult
-
-    state_file = tmp_path / "state.json"
-    store = StateStore(state_file=state_file)
-    window = MainWindow(state_store=store)
-
-    mock_exec = MagicMock()
-    mock_exec.test_connection.return_value = True
-    mock_exec.execute.side_effect = lambda cmd, **kw: CommandResult(
-        exit_code=0,
-        stdout="" if "--property=Id,LoadState" in cmd else ("/usr/bin/telegraf" if "which telegraf" in cmd else "active"),
-        command=cmd,
-    )
-    window._create_executor = lambda target: mock_exec
-
-    window.ep_user_input.setText("operator")
-    window._detect_endpoint()
-    assert "Connected & Discovered" in window.ep_status_label.text()
-    assert window.ep_missing_banner.isHidden() is True
-
-
-def test_main_window_vcf_auth_toggle(qapp, tmp_path):
-    """Verify Step 1 VCF Operations authentication toggle between API Token/Key and Username/Password."""
-    state_file = tmp_path / "state.json"
-    store = StateStore(state_file=state_file)
-    window = MainWindow(state_store=store)
-
-    # Default is API Token / Key: token visible, user/pass hidden
-    assert window.vcf_auth_type_combo.currentText() == "API Token / Key"
-    assert window.vcf_token_input.isHidden() is False
-    assert window.vcf_user_input.isHidden() is True
-    assert window.vcf_pass_input.isHidden() is True
-
-    window.vcf_token_input.setText("test-secret-token")
-    env = window._get_vcf_env()
-    assert env.token == "test-secret-token"
-    assert env.password is None
-
-    # Switch to Username & Password: token hidden, user/pass visible
-    window.vcf_auth_type_combo.setCurrentText("Username & Password")
-    assert window.vcf_token_input.isHidden() is True
-    assert window.vcf_user_input.isHidden() is False
-    assert window.vcf_pass_input.isHidden() is False
-
-    window.vcf_user_input.setText("opsadmin")
-    window.vcf_pass_input.setText("secretpass123")
-    env = window._get_vcf_env()
-    assert env.token is None
-    assert env.username == "opsadmin"
-    assert env.password == "secretpass123"
-
-    # Verify preference was persisted to store
-    assert store.get_preference("vcf_auth_mode") == "Username & Password"
-
-    # Verify a new window reloads the saved preference correctly
-    window2 = MainWindow(state_store=store)
-    assert window2.vcf_auth_type_combo.currentText() == "Username & Password"
-    assert window2.vcf_token_input.isHidden() is True
-    assert window2.vcf_user_input.isHidden() is False
-    assert window2.vcf_pass_input.isHidden() is False
-
-
-def test_main_window_uninstall_agent_button(qapp, monkeypatch):
-    """Verify GUI uninstall button triggers confirmation and updates status."""
+def test_settings_connection_test_says_three_things_in_words(session):
+    d, _window, _world = session.start()
+    d.click("side-connection")
+    assert d.page() == "settings"
+    d.click("settings-test")
+    assert "Everything works between this computer and VCF Operations." in d.find("settings-test-ok").text.text()
+    fits(d)
+
+
+# ---------------------------------------------------------------------------------------------
+# Takeover
+# ---------------------------------------------------------------------------------------------
+def test_take_over_needs_the_name_typed_and_keeps_the_same_record(session):
+    d, window, world = session.start()
+    d.click("action-app-win-01")
+    assert d.text("flow-title") == "TAKE OVER A MACHINE"
+    assert not d.has("signin-key-toggle"), "VCF Operations needs a password to remove its own agent"
+    sign_in(d)
+    d.click("flow-next")
+    assert d.title() == "The machine is ready"
+    d.click("flow-next")
+    assert d.page() == "takeover-review" and d.title() == "Take over app-win-01"
+    fits(d)
+    d.click("flow-next")
+    assert d.page() == "takeover-review"
+    assert said(window.flow.typed_field.note.text()) == "! Type the machine's name to confirm."
+    d.type("takeover-typed", "app-win-1")
+    d.click("flow-next")
+    assert window.flow.typed_field.note.text() == "! That does not match. Type app-win-01 exactly."
+    assert world.machine("app-win-01").managed, "nothing happens without the right name"
+    d.click("flow-practice")
+    assert "Practice run passed. Nothing was changed." in d.find("takeover-practice").text.text()
+    assert world.machine("app-win-01").managed and window.journal.list_records() == []
+    d.type("takeover-typed", "app-win-01")
+    d.click("flow-next", settle=False)
+    assert not d.has("run-stop"), "a takeover cannot be stopped part-way, so no Stop is offered"
+    d.settle(90)
+    assert d.page() == "result"
+    assert d.find("result-headline").title.text() == "app-win-01 has been taken over"
+    command = d.text("command-text")
+    assert "--take-over-managed-agent --confirm-takeover app-win-01" in command and "--vm-id vm-1005" in command
+    assert "--install-telegraf" not in command and "--replace-inputs" not in command
+    assert not world.machine("app-win-01").managed and world.machine("app-win-01").telegraf_installed
+    record = window.journal.list_records()[0]
+    assert record.state == "verified" and "Typed 'app-win-01' to confirm" in record.confirmation_text
+    d.click("flow-next")
+    assert d.find("status-app-win-01").status == "Sending data"
+
+
+def interrupted_world(home: Path):
+    from test_takeover import FIXTURE
+
+    from vcf_ops_telegraf_helper.models.vcf import AgentObjectInfo
+    from vcf_ops_telegraf_helper.storage.journal import TakeoverJournal, TakeoverRecord
+
+    world = standins.World()
+    world.retired = True
+    world.machine("app-win-01").retire()
+    journal = TakeoverJournal(home / "state" / "takeovers")
+    record = TakeoverRecord(
+        vm_name="app-win-01", vm_mor="vm-1005", vc_id=standins.vc_id(5), vm_resource_id="res-vm-005",
+        target_hostname="10.20.3.41", os_family="windows", ops_url="https://ops.example.com",
+        collector_address=standins.GROUP.address, state="retired", confirmation_text="Typed 'app-win-01'",
+        managed_services=["ucp-telegraf"], uninstall_task_id="task-standin-1",
+        agent_object_before=AgentObjectInfo(resource_id="agent-vm-1005", managed_type="Product Managed", stat_key_count=137))
+    journal.write_backup(record, {"telegraf.conf": FIXTURE.read_text(), "agent-object-before.json": "{}"})
+    journal.save(record)
+    return world
+
+
+def test_interrupted_takeover_is_surfaced_and_finished_without_repeating_anything(session, tmp_path):
+    world = interrupted_world(tmp_path / "home")
+    d, window, world = session.start(world=world)
+    assert d.find("status-app-win-01").status == "Takeover interrupted"
+    assert "stopped half-way" in d.find("banner-interrupted").text.text()
+    assert d.find("action-app-win-01").text() == "Finish takeover"
+    d.click("banner-finish-takeover")
+    assert d.text("flow-title") == "FINISH A TAKEOVER"
+    sign_in(d)
+    d.click("flow-next")
+    assert d.page() == "takeover-resume" and "stopped after step 2" in d.text("page-sub")
+    fits(d)
+    d.click("flow-next", settle=False)
+    d.settle(90)
+    assert d.find("result-headline").title.text() == "app-win-01 has been taken over"
+    assert window.history.entries()[0].title == "Finish a takeover"
+    assert world.task_polls == 0, "the removal was not asked for a second time"
+    d.click("flow-next")
+    assert d.find("status-app-win-01").status == "Sending data"
+
+
+def test_closing_is_refused_while_a_machine_is_being_changed(session, monkeypatch):
+    from PySide6.QtGui import QCloseEvent
     from PySide6.QtWidgets import QMessageBox
-    from vcf_ops_telegraf_helper.models.workflow import UninstallSummary
 
-    win = MainWindow()
-    assert hasattr(win, "ep_uninstall_btn")
-    assert win.ep_uninstall_btn.text() == "Uninstall Agent..."
+    d, window, _world = session.start()
+    d.click("action-db-pg-01")
+    warned = []
+    monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: warned.append(a[2]))
+    from vcf_ops_telegraf_helper.gui.flow import RunState
+
+    window.flow.run = RunState(["res-vm-003"], 5, False)
+    window.flow.run.changing.add("res-vm-003")
+    event = QCloseEvent()
+    window.closeEvent(event)
+    assert not event.isAccepted() and "cannot be stopped half-way" in warned[0]
+    window.flow.run = None
+
+
+# ---------------------------------------------------------------------------------------------
+# Activity, removal
+# ---------------------------------------------------------------------------------------------
+def test_activity_finds_a_past_run_with_its_command_and_saves_a_report(session, tmp_path, monkeypatch):
+    d, window, _world = session.start()
+    d.click("nav-activity")
+    assert d.title() == "Activity"
+    d.type("activity-find", "web-prod")
+    assert d.has("activity-open-seed-nov3") and not d.has("activity-open-seed-yesterday")
+    d.type("activity-find", "zzz")
+    assert d.text("activity-no-match") == 'Nothing matches "zzz"'
+    d.type("activity-find", "")
+    d.click("activity-open-seed-nov3")
+    assert d.page() == "entry" and d.title() == "Set up monitoring"
+    assert d.find("result-headline").title.text() == "This worked"
+    assert d.text("command-text").startswith("vcf-telegraf-helper run")
+    fits(d)
+    report = tmp_path / "report.md"
+    monkeypatch.setattr(QFileDialog, "getSaveFileName", staticmethod(lambda *a, **k: (str(report), "")))
+    d.click("entry-report")
+    text = report.read_text()
+    assert "web-prod-01" in text and "Do this again from the command line" in text and "<password>" in text
+    d.click("entry-back")
+    assert d.page() == "activity"
+
+
+def test_activity_empty_state(session):
+    d, _window, _world = session.start(seed=False)
+    d.click("nav-activity")
+    assert d.text("activity-empty") == "Nothing has been done yet"
+    d.click("activity-go-machines")
+    assert d.page() == "machines"
+
+
+def test_remove_monitoring_asks_first_and_is_recorded_with_its_command(session):
+    d, window, world = session.start()
+    d.click("open-web-prod-01")
+
+    def keep() -> None:
+        d.click("remove-cancel", settle=False)
+
+    d.in_dialog(keep, lambda: d.click("machine-remove", settle=False))
+    assert d.page() == "machine" and world.machine("web-prod-01").telegraf_installed
+    from PySide6.QtCore import QTimer
+
+    def give_signin() -> None:
+        d.type("signin-dialog-user", "svc-monitor")
+        d.type("signin-dialog-password", "pw")
+        d.click("signin-dialog-ok", settle=False)
+
+    def confirm() -> None:
+        d.click("remove-ok", settle=False)
+        QTimer.singleShot(150, give_signin)
+
+    d.in_dialog(confirm, lambda: d.click("machine-remove", settle=False))
+    d.settle()
+    assert d.page() == "machines"
+    assert "Monitoring was removed from web-prod-01." in d.find("banner").text.text()
+    assert d.find("status-web-prod-01").status == "Not set up"
+    assert not world.machine("web-prod-01").telegraf_installed
+    entry = window.history.entries()[0]
+    assert entry.kind == "remove" and entry.rows[0].cmd.startswith("vcf-telegraf-helper uninstall --target 10.20.1.11")
+    assert '--password "<password>"' in entry.rows[0].cmd
+
+
+# ---------------------------------------------------------------------------------------------
+# Things that must stay true of every screen
+# ---------------------------------------------------------------------------------------------
+def test_an_ampersand_in_a_machine_name_is_shown_not_swallowed(session):
+    from vcf_ops_telegraf_helper.gui.widgets import button
+
+    assert button("Take over R&D-01").text() == "Take over R&&D-01"
+    d, _window, _world = session.start()
+    for widget in d.window.findChildren(QPushButton):
+        assert "&amp;" not in widget.text()
+
+
+def test_about_names_the_app_and_shows_the_licences(session):
+    d, _window, _world = session.start()
+
+    def look() -> None:
+        assert d.text("dialog-title") == "Telegraf Helper"
+
+        def licences() -> None:
+            assert "PySide6" in d.text("text-dialog-text")
+            d.click("text-dialog-close", settle=False)
 
-    # 1. User cancels prompt
-    monkeypatch.setattr(QMessageBox, "question", lambda *args, **kwargs: QMessageBox.StandardButton.No)
-    win._on_uninstall_agent_clicked()
-    assert "Uninstalling" not in win.ep_status_label.text()
+        from PySide6.QtCore import QTimer
 
-    # 2. User confirms prompt
-    monkeypatch.setattr(QMessageBox, "question", lambda *args, **kwargs: QMessageBox.StandardButton.Yes)
-    monkeypatch.setattr(QMessageBox, "information", lambda *args, **kwargs: None)
-    monkeypatch.setattr(
-        "vcf_ops_telegraf_helper.workflow.uninstall.UninstallEndpointWorkflow.run",
-        lambda self: UninstallSummary(target_hostname="10.10.10.101", success=True),
-    )
+        QTimer.singleShot(100, licences)
+        d.click("about-licences", settle=False)
+        d.click("about-close", settle=False)
 
-    win._on_uninstall_agent_clicked()
-    if win.uninstall_worker_thread:
-        win.uninstall_worker_thread.wait(2000)
-    qapp.processEvents()
-    assert win.ep_status_label.text() == "Telegraf completely uninstalled"
-    assert win.ep_missing_banner.isHidden() is False
+    d.in_dialog(look, lambda: d.click("side-about", settle=False))
 
 
-def test_main_window_telegraf_version_selection(qapp, tmp_path):
-    """Verify Telegraf version combobox presets, custom editing, toggle handling, and CLI export."""
-    state_file = tmp_path / "state.json"
-    store = StateStore(state_file=state_file)
-    window = MainWindow(state_store=store)
+def test_update_notice_is_shown_in_the_left_column_and_can_be_switched_off(session):
+    from vcf_ops_telegraf_helper.updates import ReleaseNotice
 
-    assert hasattr(window, "ep_version_combo")
-    assert window.ep_version_combo.isEditable() is True
-    assert window.ep_version_combo.count() >= 4
-    assert window.ep_version_combo.minimumWidth() <= 300
-    assert window.ep_version_combo.lineEdit().cursorPosition() == 0
-    assert window._get_selected_telegraf_version() == "1.40.1"
-
-    # Selecting Do Not Install sets install_telegraf to False
-    window.ep_version_combo.setCurrentText("Do Not Install (Use Existing Host Agent)")
-    assert window._get_endpoint_target().install_telegraf is False
-    window.ep_version_combo.setCurrentIndex(0)
-    assert window._get_endpoint_target().install_telegraf is True
-
-    # Select preset 1.34.0
-    window.ep_version_combo.setCurrentIndex(1)
-    assert window._get_selected_telegraf_version() == "1.34.0"
-    target = window._get_endpoint_target()
-    assert target.telegraf_version == "1.34.0"
-
-    cli_cmd = window._build_cli_command()
-    assert "--telegraf-version 1.34.0" in cli_cmd
-
-    # Type custom version
-    window.ep_version_combo.setEditText("1.39.2")
-    assert window._get_selected_telegraf_version() == "1.39.2"
-    target_custom = window._get_endpoint_target()
-    assert target_custom.telegraf_version == "1.39.2"
-
-
-def test_main_window_cli_command_cleared_linux_baseline(qapp, tmp_path):
-    """Verify GUI emits explicit negative flags when Linux core plugins are cleared."""
-    state_file = tmp_path / "state.json"
-    store = StateStore(state_file=state_file)
-    window = MainWindow(state_store=store)
-
-    window.ep_os_combo.setCurrentText("Linux")
-    window.cpu_check.setChecked(False)
-    window.mem_check.setChecked(False)
-    window.disk_check.setChecked(False)
-    window.net_check.setChecked(False)
-    window.sys_check.setChecked(False)
-    window.swap_check.setChecked(False)
-    window.diskio_check.setChecked(False)
-    window.proc_check.setChecked(False)
-
-    cmd = window._build_cli_command()
-    assert "--no-baseline" in cmd
-
-
-def test_main_window_cli_command_cleared_windows_baseline(qapp, tmp_path):
-    """Verify GUI emits --no-baseline when Windows core plugins are cleared."""
-    state_file = tmp_path / "state.json"
-    store = StateStore(state_file=state_file)
-    window = MainWindow(state_store=store)
-
-    window.ep_os_combo.setCurrentText("Windows")
-    window.win_perf_check.setChecked(False)
-    window.win_svc_check.setChecked(False)
-    assert "--no-win-os" not in window._build_cli_command()
-    window.win_os_check.setChecked(False)
-
-    cmd = window._build_cli_command()
-    assert "--no-baseline" in cmd
-
-
-def test_main_window_cli_command_selective_flags(qapp, tmp_path):
-    """Verify GUI emits selective negative and positive flags when some plugins are toggled."""
-    state_file = tmp_path / "state.json"
-    store = StateStore(state_file=state_file)
-    window = MainWindow(state_store=store)
-
-    window.ep_os_combo.setCurrentText("Linux")
-    window.swap_check.setChecked(False)
-    window.diskio_check.setChecked(True)
-
-    cmd = window._build_cli_command()
-    assert "--no-swap" in cmd
-    assert "--diskio" in cmd
-
-
-def test_main_window_worker_finished_summary_handling(qapp, tmp_path):
-    """Verify _on_worker_finished handles RunSummary without AttributeError on verifications."""
-    from vcf_ops_telegraf_helper.models.workflow import RunSummary, StageResult, StageStatus, WorkflowStage
-
-    state_file = tmp_path / "state.json"
-    store = StateStore(state_file=state_file)
-    window = MainWindow(state_store=store)
-
-    summary = RunSummary(
-        target_hostname="10.10.10.101",
-        vcf_environment="https://vcf-ops.local",
-        collector_address="10.10.10.50",
-        success=True,
-        stages=[
-            StageResult(stage=WorkflowStage.CONNECT, status=StageStatus.PASS, message="Connected"),
-            StageResult(stage=WorkflowStage.RESTART, status=StageStatus.PASS, message="Restarted"),
-        ],
-        verifications={
-            "Telegraf installed": "PASS",
-            "Config valid": "PASS",
-            "Service running": "PASS",
-            "Collector reachable": "PASS",
-        },
-        managed_files=["/etc/telegraf/telegraf.d/vcf-helper-system.conf"],
-    )
-
-    # Should not raise AttributeError: 'dict' object has no attribute 'collector_reachable'
-    window._on_worker_finished(summary)
-    assert not window.execute_btn.isEnabled()
-    assert "You may exit" in window.result_banner.text()
-    assert window.export_md_btn.isEnabled()
-    assert window.export_json_btn.isEnabled()
-    log_text = window.stage_list_box.toPlainText()
-    assert "WORKFLOW RESULT: SUCCESS" in log_text
-    assert "Telegraf installed" in log_text
-    assert "Collector reachable" in log_text
-
-
-def test_discovery_dialogs_instantiation_and_selection(qapp):
-    """Verify live discovery modal dialogs populate tables and accept selections."""
-    from vcf_ops_telegraf_helper.gui.discovery_dialogs import (
-        DatabaseConnectDialog,
-        DatabaseDiscoveryDialog,
-        PerfmonDiscoveryDialog,
-        ServicesDiscoveryDialog,
-    )
-    from vcf_ops_telegraf_helper.models.discovery import (
-        DiscoveredDatabase,
-        DiscoveredPerfmonSet,
-        DiscoveredService,
-    )
-
-    # Services dialog
-    services = [
-        DiscoveredService(name="telegraf", display_name="Telegraf Data Collector", status="running"),
-        DiscoveredService(name="w3svc", display_name="World Wide Web Publishing", status="running"),
-    ]
-    svc_dlg = ServicesDiscoveryDialog(None, services, initial_selected=["telegraf"])
-    assert svc_dlg.table.rowCount() == 2
-    svc_dlg._on_accept()
-    assert "telegraf" in svc_dlg.selected_services
-
-    # Perfmon dialog
-    p_sets = [
-        DiscoveredPerfmonSet(name="Processor", description="CPU performance", counters=["% Processor Time"]),
-    ]
-    p_dlg = PerfmonDiscoveryDialog(None, p_sets)
-    assert p_dlg.table.rowCount() == 1
-
-    # Database connect dialog
-    conn_dlg = DatabaseConnectDialog(None, "Microsoft SQL Server", default_port=1433)
-    assert conn_dlg.port == 1433
-    assert conn_dlg.auth_mode == "integrated"
-    # The display title must still enable the SQL Server auth choices and report "sql"
-    assert conn_dlg.engine_name == "mssql"
-    conn_dlg.radio_sql.setChecked(True)
-    conn_dlg.user_input.setText("telegraf")
-    conn_dlg.pass_input.setText("pw")
-    conn_dlg._on_submit()
-    assert conn_dlg.auth_mode == "sql"
-    assert conn_dlg.username == "telegraf"
-
-    # Database discovery dialog
-    dbs = [
-        DiscoveredDatabase(name="master", state="ONLINE", db_type="system", size_mb=10.0),
-        DiscoveredDatabase(name="ProductionDB", state="ONLINE", db_type="user", size_mb=500.0),
-    ]
-    db_dlg = DatabaseDiscoveryDialog(None, "MSSQL", dbs)
-    assert db_dlg.table.rowCount() == 2
-    db_dlg._on_accept()
-    assert "ProductionDB" in db_dlg.selected_databases
-
-
-def _mock_window(qapp, tmp_path, monkeypatch):
-    """MainWindow wired to the mock VCF adapter and a mock endpoint executor."""
-    from vcf_ops_telegraf_helper.adapters.mock import MockVCFOpsIntegration
-    from vcf_ops_telegraf_helper.executors.mock import MockExecutor
-    from vcf_ops_telegraf_helper.gui import main_window as mw
-
-    monkeypatch.setattr(mw, "get_adapter", lambda env, session=None: MockVCFOpsIntegration(env=env, connected=True))
-    window = MainWindow(state_store=StateStore(state_file=tmp_path / "state.json"))
-    window._create_executor = lambda target: MockExecutor(connected=True, telegraf_installed=True)
-    return window
-
-
-def _select_vm(window, name):
-    window.vm_status_filter.setCurrentText("All Agent States")
-    row = next(r for r in range(window.vm_table.rowCount()) if window.vm_table.item(r, 0).text() == name)
-    window.vm_table.selectRow(row)
-
-
-def _unlock_all(window):
-    window._test_vcf_connection()
-    _select_vm(window, "oraclesrv01")
-    window.ep_pass_input.setText("secret")
-    window.ep_user_input.setText("operator")
-    window._detect_endpoint()
-
-
-def test_main_window_initialization(qapp, tmp_path):
-    """MainWindow starts with six steps, push-only, and only Step 1 unlocked."""
-    window = MainWindow(state_store=StateStore(state_file=tmp_path / "state.json"))
-    assert window.windowTitle() == "VCF Operations Open Telegraf Helper"
-    labels = [lbl.text() for lbl in window.findChildren(QLabel)]
-    assert f"VCF Operations Open Telegraf Helper v{__version__}" in labels
-    assert window.step_list.count() == 6
-    assert window.page_stack.count() == 6
-    assert window.current_theme == "dark"
-    assert not hasattr(window, "deployment_mode_combo")
-    assert window._max_unlocked_step() == window.STEP_CONNECT
-
-
-def test_main_window_step_gating(qapp, tmp_path, monkeypatch):
-    """Each step stays locked until the one before it has what it needs."""
-    window = _mock_window(qapp, tmp_path, monkeypatch)
-
-    window.step_list.setCurrentRow(1)
-    assert window.page_stack.currentIndex() == 0
-    assert window._next_buttons[0].isEnabled() is False
-
-    window._test_vcf_connection()
-    assert window._max_unlocked_step() == window.STEP_SELECT_VM
-    window.step_list.setCurrentRow(2)
-    assert window.page_stack.currentIndex() == 0
-
-    _select_vm(window, "oraclesrv01")
-    assert window._max_unlocked_step() == window.STEP_TARGET
-    window.step_list.setCurrentRow(3)
-    assert window.page_stack.currentIndex() == 0
-
-    window.ep_pass_input.setText("secret")
-    window.ep_user_input.setText("operator")
-    window._detect_endpoint()
-    assert window._max_unlocked_step() == window.STEP_EXECUTE
-
-    # Changing how we reach the endpoint re-locks everything after Step 3
-    window.ep_pass_input.setText("other")
-    assert window._max_unlocked_step() == window.STEP_TARGET
-    window.ep_user_input.setText("operator")
-    window._detect_endpoint()
-
-    # No monitoring inputs locks Review and Execute
-    for *_, chk in window.catalog_items:
-        chk.setChecked(False)
-    assert window._max_unlocked_step() == window.STEP_MONITORING
-    assert "monitoring input" in window._next_buttons[window.STEP_MONITORING].toolTip()
-    window._apply_baseline_preset()
-
-    window.step_list.setCurrentRow(window.STEP_REVIEW)
-    assert window.page_stack.currentIndex() == window.STEP_REVIEW
-    assert "[[inputs.cpu]]" in window.preview_system_box.toPlainText()
-    assert "[[outputs.http]]" in window.preview_output_box.toPlainText()
-
-    # Editing the connection settings re-locks everything after Step 1
-    window.vcf_url_input.setText("https://other.example")
-    assert window._max_unlocked_step() == window.STEP_CONNECT
-
-
-def test_main_window_ca_bundle_follows_tls_verification(qapp, tmp_path):
-    """The enterprise CA bundle field is only shown when certificate verification is on."""
-    window = MainWindow(state_store=StateStore(state_file=tmp_path / "state.json"))
-    window.vcf_ssl_check.setChecked(True)
-    assert window.vcf_ca_widget.isHidden() is False
-    window.vcf_ssl_check.setChecked(False)
-    assert window.vcf_ca_widget.isHidden() is True
-
-
-def test_main_window_endpoint_auth_and_advanced_options_visibility(qapp, tmp_path):
-    """Target page toggles auth modes, WinRM SSL, and hides the port by default."""
-    window = MainWindow(state_store=StateStore(state_file=tmp_path / "state.json"))
-
-    assert window.ep_os_combo.currentText() == "Linux"
-    assert window._get_endpoint_target().connection_method == ConnectionMethod.SSH
-    assert window.ep_port_input.text() == "22"
-    assert window.ep_port_input.isHidden() is True
-    assert window.ep_winrm_ssl_check.isHidden() is True
-    assert window.ep_auth_radio_pass.isChecked() is True
-    assert window.ep_pass_label.text() == "Password:"
-
-    window.ep_auth_radio_key.setChecked(True)
-    assert window.ep_pass_label.text() == "SSH Key Path:"
-
-    window.ep_os_combo.setCurrentText("Windows")
-    assert window._get_endpoint_target().connection_method == ConnectionMethod.WINRM
-    assert window.ep_port_input.text() == "5985"
-    assert window.ep_auth_radio_widget.isHidden() is True
-    assert window.ep_winrm_ssl_check.isHidden() is False
-
-    window.ep_winrm_ssl_check.setChecked(True)
-    assert window.ep_port_input.text() == "5986"
-    assert window._get_endpoint_target().winrm_use_ssl is True
-    window.ep_winrm_ssl_check.setChecked(False)
-    assert window.ep_port_input.text() == "5985"
-    assert window._get_endpoint_target().winrm_use_ssl is False
-
-    window.ep_advanced_check.setChecked(True)
-    assert window.ep_port_input.isHidden() is False
-
-    # A custom port survives an OS switch while advanced options are open
-    window.ep_port_input.setText("2222")
-    window.ep_os_combo.setCurrentText("Linux")
-    assert window.ep_port_input.text() == "2222"
-
-
-def test_main_window_cli_command_generation_and_copy(qapp, tmp_path, monkeypatch):
-    """Step 6 shows a push-only CLI command matching the selections, and copies it."""
-    window = _mock_window(qapp, tmp_path, monkeypatch)
-    _unlock_all(window)
-    window._update_cli_command()
-
-    cmd = window.cli_command_box.toPlainText()
-    assert "vcf-telegraf-helper run" in cmd
-    assert "--target-host 172.18.2.14" in cmd
-    assert "--connection ssh" in cmd
-    assert "--collector 10.10.10.50" in cmd
-    assert "--collector-group 'Simulated CP Group'" in cmd
-    assert "--vm-id vm-1004" in cmd
-    assert "--install-telegraf" not in cmd
-    assert "--mode" not in cmd and "--output-dir" not in cmd
-    assert "--dry-run" not in cmd
-
-    window.dry_run_check.setChecked(True)
-    cmd_dry = window.cli_command_box.toPlainText()
-    assert "--dry-run" in cmd_dry
-
-    window._copy_cli_command()
-    clipboard = QApplication.clipboard()
-    if clipboard:
-        assert clipboard.text() == cmd_dry
-
-    window.ep_port_input.setText("2222")
-    window._update_cli_command()
-    assert "--port 2222" in window.cli_command_box.toPlainText()
-
-    window.vcf_auth_type_combo.setCurrentText("API Token / Key")
-    window._update_cli_command()
-    assert '--vcf-token "<token>"' in window.cli_command_box.toPlainText()
-
-
-def test_main_window_vm_inventory_filter_and_binding(qapp, tmp_path, monkeypatch):
-    """Inventory hides powered-off VMs by default, filters by agent state, and binds the selection."""
-    window = _mock_window(qapp, tmp_path, monkeypatch)
-    window._test_vcf_connection()
-
-    assert window.vm_table.rowCount() == 10
-    assert window.vm_table.columnCount() == 6
-    headers = [window.vm_table.horizontalHeaderItem(c).text() for c in range(6)]
-    assert "Collector Group" not in headers and "Power" in headers
-    window.vm_status_filter.setCurrentText("All Agent States")
-    # platform VMs (vCLS, Supervisor control plane) are hidden by default and counted; look-alikes and
-    # Supervisor workloads stay listed
-    assert not window.vm_show_platform_check.isChecked()
-    assert "7 / 10 VMs (2 platform VMs hidden)" in window.vm_count_label.text()
-    visible = {window.vm_table.item(r, 0).text() for r in range(10) if not window.vm_table.isRowHidden(r)}
-    assert {"tkc-workers-7f9d", "vcls-migration-tool"} <= visible
-    assert not visible & {"vCLS-4f2a9c1e", "SupervisorControlPlaneVM (1)"}
-
-    window.vm_show_platform_check.setChecked(True)
-    assert "9 / 10 VMs" in window.vm_count_label.text() and "hidden" not in window.vm_count_label.text()
-    window.vm_show_platform_check.setChecked(False)
-
-    window.vm_show_off_check.setChecked(True)
-    assert "8 / 10 VMs" in window.vm_count_label.text()
-    window.vm_show_off_check.setChecked(False)
-
-    # a platform VM already excluded by another filter is not counted as hidden by the platform checkbox
-    window.vm_search_input.setText("tkc-workers")
-    assert "1 / 10 VMs" in window.vm_count_label.text() and "hidden" not in window.vm_count_label.text()
-    window.vm_search_input.setText("")
-
-    window.vm_status_filter.setCurrentText("Reporting")
-    # webapp01 (open source) and dbdemo01 (Ops managed) both report
-    assert "2 / 10 VMs" in window.vm_count_label.text()
-    window.vm_status_filter.setCurrentText("All Agent States")
-
-    window.vm_os_filter.setCurrentText("Windows")
-    assert "2 / 10 VMs" in window.vm_count_label.text()
-    window.vm_os_filter.setCurrentText("All OS Families")
-
-    # Selecting a Windows VM binds it and sets OS and address from VCF Operations
-    _select_vm(window, "mssqldemo2")
-    assert window.bound_vm.name == "mssqldemo2"
-    assert window.ep_os_combo.currentText() == "Windows"
-    assert window.ep_host_input.text() == "172.16.3.80"
-    target = window._get_endpoint_target()
-    assert target.vm_mor == "vm-1042"
-    assert target.vc_id == "423b-81f0-91a2-0002"
-
-    # Editing the address keeps the binding: the VM identity comes from Step 2
-    window.ep_host_input.setText("mssqldemo2.corp.local")
-    assert window._get_endpoint_target().vm_mor == "vm-1042"
-
-    # A VM with an existing agent preselects the collector group it reports through
-    _select_vm(window, "webapp01")
-    assert window._selected_collector().is_collector_group is True
-    assert window._selected_collector().name == "Simulated CP Group"
-    window._update_target_summary()
-    assert "webapp01" in window.target_summary_label.text()
-    assert "10.10.10.51" in window.target_summary_label.text()
-
-
-def test_main_window_switching_vcf_instance_clears_vm(qapp, tmp_path, monkeypatch):
-    """Validating a different VCF Operations URL drops the VM bound against the previous one."""
-    window = _mock_window(qapp, tmp_path, monkeypatch)
-    _unlock_all(window)
-    assert window._max_unlocked_step() == window.STEP_EXECUTE
-
-    window.vcf_url_input.setText("https://other-ops.example")
-    window._test_vcf_connection()
-    assert window.bound_vm is None
-    assert window._get_endpoint_target().vm_mor is None
-    assert window._max_unlocked_step() == window.STEP_SELECT_VM
-
-
-def test_main_window_revalidation_keeps_collector_choice(qapp, tmp_path, monkeypatch):
-    """Re-validating the same instance must not silently move the chosen collector."""
-    window = _mock_window(qapp, tmp_path, monkeypatch)
-    _unlock_all(window)
-    window.ep_collector_combo.setCurrentIndex(2)
-    chosen = window._selected_collector().address
-
-    window._test_vcf_connection()
-    assert window._selected_collector().address == chosen
-    assert window.bound_vm is not None and window.bound_vm.name == "oraclesrv01"
-
-
-def test_main_window_refresh_drops_vm_missing_from_inventory(qapp, tmp_path, monkeypatch):
-    """If the bound VM disappears from a refreshed inventory, the binding and later steps are cleared."""
-    from vcf_ops_telegraf_helper.adapters.mock import MockVCFOpsIntegration
-
-    window = _mock_window(qapp, tmp_path, monkeypatch)
-    _unlock_all(window)
-    remaining = [vm for vm in MockVCFOpsIntegration(env=window._get_vcf_env()).list_virtual_machines() if vm.name != "oraclesrv01"]
-    adapter = MockVCFOpsIntegration(env=window._get_vcf_env())
-    adapter._vms = remaining
-    window._fetch_vcf_inventory(adapter)
-    assert window.bound_vm is None
-    assert window._max_unlocked_step() == window.STEP_SELECT_VM
-
-
-def test_main_window_inventory_error_is_shown_not_empty(qapp, tmp_path, monkeypatch):
-    """An inventory failure is reported in the UI rather than shown as zero VMs."""
-    window = _mock_window(qapp, tmp_path, monkeypatch)
-    window._test_vcf_connection()
-
-    class Broken:
-        inventory_warning = None
-
-        def list_virtual_machines(self, strict=False):
-            raise RuntimeError("inventory query failed on page 1 with HTTP 503")
-
-    window._fetch_vcf_inventory(Broken())
-    assert "Query error" in window.vm_count_label.text()
-    assert "503" in window.vm_count_label.text()
-
-
-def test_main_window_collector_dropdown_lists_ops8_proxies_and_flags_unrecognised(qapp, tmp_path, monkeypatch):
-    """Ops 8 proxies fill the dropdown; a 200 response yielding none says none were recognised, not none exist."""
-    from vcf_ops_telegraf_helper.adapters.vcf91 import VCF91OpenTelegrafIntegration
-    from test_adapters import _ops8_suite_api, _patched_api
-
-    window = _mock_window(qapp, tmp_path, monkeypatch)
-    env = window._get_vcf_env()
-    env.token = "ops8-token"
-    ops8_adapter = VCF91OpenTelegrafIntegration(env, session=_ops8_suite_api())
-    window._load_collector_targets(ops8_adapter)
-    assert window.ep_collector_combo.count() == 4
-    labels = [window.ep_collector_combo.itemText(i) for i in range(window.ep_collector_combo.count())]
-    assert labels == [
-        "Collector group: Ops8 HA Proxy Group (virtual IP 198.51.100.30)",
-        "Cloud proxy: Cloud Proxy-cp8-01 (198.51.100.31) in Ops8 HA Proxy Group",
-        "Cloud proxy: Cloud Proxy-cp8-02 (198.51.100.32) in Ops8 HA Proxy Group",
-        "Cloud proxy: Cloud Proxy-standalone (198.51.100.33)",
-    ]
-
-    bad_adapter = VCF91OpenTelegrafIntegration(
-        env,
-        session=_patched_api({"/collectors": (200, {"unexpectedShape": []})}),
-    )
-    window._load_collector_targets(bad_adapter)
-    assert window.ep_collector_combo.count() == 0
-    assert window.ep_collector_combo.placeholderText() == "No cloud proxies recognised (see log)"
-
-
-
-def test_main_window_rejected_credentials_do_not_unlock(qapp, tmp_path, monkeypatch):
-    """A reachable instance that rejects the credentials leaves Step 2 locked."""
-    from vcf_ops_telegraf_helper.adapters.mock import MockVCFOpsIntegration
-    from vcf_ops_telegraf_helper.gui import main_window as mw
-
-    class Rejecting(MockVCFOpsIntegration):
-        def verify_credentials(self):
-            raise RuntimeError("VCF Operations rejected the credentials (HTTP 401)")
-
-    monkeypatch.setattr(mw, "get_adapter", lambda env, session=None: Rejecting(env=env, connected=True))
-    window = MainWindow(state_store=StateStore(state_file=tmp_path / "state.json"))
-    window._test_vcf_connection()
-    assert window._vcf_validated is False
-    assert "rejected the credentials" in window.vcf_status_label.text()
-    assert window._max_unlocked_step() == window.STEP_CONNECT
-
-
-def test_main_window_execute_button_in_nav_bar(qapp, tmp_path):
-    """Execute sits at the right end of the Step 6 navigation bar, like every other advance button."""
-    window = MainWindow(state_store=StateStore(state_file=tmp_path / "state.json"))
-    execute_bar = window.execute_btn.parentWidget()
-    next_bar = window._next_buttons[window.STEP_REVIEW].parentWidget()
-    assert execute_bar.property("class") == next_bar.property("class") == "lattice-card"
-    layout = execute_bar.layout()
-    assert layout.itemAt(layout.count() - 1).widget() is window.execute_btn
-    assert window.execute_btn.property("class") == "primary"
-
-
-def test_main_window_nav_labels_show_ampersand(qapp, tmp_path):
-    """Step names containing '&' render literally on navigation buttons, not as a shortcut underline."""
-    window = MainWindow(state_store=StateStore(state_file=tmp_path / "state.json"))
-    assert window._next_buttons[window.STEP_MONITORING].text() == "Next: Review && Preview ->"
-    assert window._next_buttons[window.STEP_REVIEW].text() == "Next: Execute && Verify ->"
-
-
-def test_gui_ampersand_texts_escaped(qapp, tmp_path):
-    """Buttons and checkboxes that contain '&' escape it so Qt shows it instead of a shortcut underline."""
-    from PySide6.QtWidgets import QAbstractButton, QDialogButtonBox
-
-    from vcf_ops_telegraf_helper.gui.discovery_dialogs import DatabaseConnectDialog
-
-    window = MainWindow(state_store=StateStore(state_file=tmp_path / "state.json"))
-    dlg = DatabaseConnectDialog(None, "Microsoft SQL Server", default_port=1433)
-    buttons = window.findChildren(QAbstractButton) + dlg.findChildren(QAbstractButton)
-    texts = [b.text() for b in buttons if "&" in b.text()]
-    assert texts, "expected some buttons with ampersands"
-    for text in texts:
-        assert "&" not in text.replace("&&", ""), f"unescaped ampersand in {text!r}"
-    assert window.sys_check.text() == "Enable System Load && Uptime"
-    assert dlg.findChild(QDialogButtonBox).button(QDialogButtonBox.Ok).text() == "Connect && Discover"
-
-
-def test_main_window_execute_recovers_when_setup_fails(qapp, tmp_path, monkeypatch):
-    """If the run fails before the worker starts, Execute is usable again and the error is shown (#33)."""
-    from vcf_ops_telegraf_helper.gui import main_window as mw
-
-    window = MainWindow(state_store=StateStore(state_file=tmp_path / "state.json"))
-    monkeypatch.setattr(mw.QMessageBox, "critical", lambda *a, **k: None)
-    monkeypatch.setattr(window, "_create_executor", lambda target: (_ for _ in ()).throw(RuntimeError("no route to host")))
-    window.ep_user_input.setText("operator")
-    window._run_workflow()
-    assert window.execute_btn.isEnabled() is True
-    assert "no route to host" in window.stage_list_box.toPlainText()
-
-
-def test_main_window_pages_fit_at_minimum_size(qapp, tmp_path):
-    """At the smallest allowed window size no step, and no plugin card, needs a sideways scroll."""
-    from PySide6.QtWidgets import QScrollArea
-
-    window = MainWindow(state_store=StateStore(state_file=tmp_path / "state.json"))
-    window.show()
-    window.resize(window.minimumSize())
-    overflowing = []
-    for page in range(window.page_stack.count()):
-        window.page_stack.setCurrentIndex(page)
-        rows = range(window.plugin_catalog_list.count()) if page == window.STEP_MONITORING else [None]
-        for row in rows:
-            if row is not None:
-                window.plugin_catalog_list.setCurrentRow(row)
-            qapp.processEvents()
-            scroll = window.page_stack.currentWidget().findChild(QScrollArea)
-            if scroll.horizontalScrollBar().isVisible():
-                overflowing.append((page + 1, row))
-    assert window.plugin_catalog_list.horizontalScrollBar().isVisible() is False
-    assert overflowing == []
-
-
-def test_main_window_login_source(qapp, tmp_path, monkeypatch):
-    """The login source is offered from the instance, sent for username auth, and kept in the CLI command."""
-    from vcf_ops_telegraf_helper.adapters.mock import MockVCFOpsIntegration
-    from vcf_ops_telegraf_helper.gui import main_window as mw
-
-    class WithSources(MockVCFOpsIntegration):
-        def list_auth_sources(self):
-            return ["VCF SSO"]
-
-    monkeypatch.setattr(mw, "get_adapter", lambda env, session=None: WithSources(env=env, connected=True))
-    window = MainWindow(state_store=StateStore(state_file=tmp_path / "state.json"))
-    window.vcf_url_input.setText("https://ops.corp.local")
-    window._load_auth_sources(sync=True)
-    assert [window.vcf_auth_source_combo.itemText(i) for i in range(window.vcf_auth_source_combo.count())] == ["Local", "VCF SSO"]
-
-    window.vcf_auth_type_combo.setCurrentText("Username & Password")
-    assert window.vcf_auth_source_combo.isHidden() is False
-    assert window._get_vcf_env().auth_source == "local"
-    window.vcf_user_input.setText("operator")
-    window.vcf_auth_source_combo.setCurrentText("VCF SSO")
-    assert window._get_vcf_env().auth_source == "VCF SSO"
-    assert "--vcf-auth-source 'VCF SSO'" in window._build_cli_command()
-
-    # Token auth has no login source
-    window.vcf_auth_type_combo.setCurrentText("API Token / Key")
-    assert window.vcf_auth_source_combo.isHidden() is True
-    assert window._get_vcf_env().auth_source == "local"
-
-
-def test_main_window_passwords_are_not_trimmed(qapp, tmp_path):
-    """Leading or trailing spaces can be part of a real password."""
-    window = MainWindow(state_store=StateStore(state_file=tmp_path / "state.json"))
-    window.vcf_auth_type_combo.setCurrentText("Username & Password")
-    window.vcf_pass_input.setText(" pw with spaces ")
-    window.ep_pass_input.setText(" pw2 ")
-    assert window._get_vcf_env().password == " pw with spaces "
-    assert window._get_endpoint_target().password == " pw2 "
-
-
-def test_main_window_login_source_async(qapp, tmp_path, monkeypatch):
-    """Auth sources load asynchronously off the GUI thread when editing completes or saved state loads."""
-    from vcf_ops_telegraf_helper.adapters.mock import MockVCFOpsIntegration
-    from vcf_ops_telegraf_helper.gui import main_window as mw
-
-    class WithSources(MockVCFOpsIntegration):
-        def list_auth_sources(self):
-            return ["Corp Active Directory"]
-
-    monkeypatch.setattr(mw, "get_adapter", lambda env, session=None: WithSources(env=env, connected=True))
-    window = MainWindow(state_store=StateStore(state_file=tmp_path / "state.json"))
-    window.vcf_url_input.setText("https://ops.corp.local")
-    window._load_auth_sources()  # runs async
-    assert window.auth_sources_thread is not None
-    window.auth_sources_thread.wait(5000)
-    qapp.processEvents()
-    assert [window.vcf_auth_source_combo.itemText(i) for i in range(window.vcf_auth_source_combo.count())] == [
-        "Local",
-        "Corp Active Directory",
-    ]
-
-
-
-
-def test_target_change_clears_credentials_and_results(qapp, tmp_path):
-    window = MainWindow(state_store=StateStore(state_file=tmp_path / 'state.json'))
-    window.ep_user_input.setText('old-admin')
-    window.ep_pass_input.setText('secret')
-    window.stage_list_box.setPlainText('old target files')
-    window.ep_host_input.setText('new-target')
-    assert window.ep_pass_input.text() == ''
-    assert window.ep_user_input.text() == ''
-    assert window.stage_list_box.toPlainText() == ''
-
-
-def test_fresh_profile_has_no_privileged_defaults(qapp, tmp_path):
-    window = MainWindow(state_store=StateStore(state_file=tmp_path / 'state.json'))
-    assert window.ep_user_input.text() == ''
-    assert window.vcf_user_input.text() == ''
-    assert window.minimumWidth() <= 1000
-
-
-def test_prepared_preview_survives_return_to_review(qapp, tmp_path):
-    window = MainWindow(state_store=StateStore(state_file=tmp_path / 'state.json'))
-    window._running_preview_key = window._preview_key()
-    window._show_prepared_config('deployed inputs', 'prepared output')
-    window._update_preview()
-    assert window.preview_output_box.toPlainText() == 'prepared output'
-    window.ep_host_input.setText('another-host')
-    window._update_preview()
-    assert window.preview_output_box.toPlainText() != 'prepared output'
-
-
-def test_powershell_repeat_command_quotes_paths(qapp, tmp_path, monkeypatch):
-    from vcf_ops_telegraf_helper.gui import main_window as mw
-    window = MainWindow(state_store=StateStore(state_file=tmp_path / 'state.json'))
-    window.ep_host_input.setText('host')
-    window.ep_auth_radio_key.setChecked(True)
-    window.ep_pass_input.setText("C:\\Users\\O'Brien\\my key")
-    monkeypatch.setattr(mw.sys, 'platform', 'win32')
-    command = window._build_cli_command()
-    assert "O''Brien" in command
-    assert '\n' not in command
-    assert '--install-telegraf' in command
-
-
-def test_blank_password_mode_does_not_enable_ambient_ssh_keys(qapp, tmp_path):
-    window = MainWindow(state_store=StateStore(state_file=tmp_path / 'state.json'))
-    window.ep_auth_radio_pass.setChecked(True)
-    assert window._get_endpoint_target().password == ''
+    d, window, _world = session.start()
+    window._show_release_notice(ReleaseNotice("v9.9.9", "https://example.invalid/v9.9.9"))
+    d.pump(60)
+    assert "New version available: v9.9.9" in d.text("update-notice")
+    window.settings.updates = False
+    window.render_side()
+    d.pump(60)
+    assert not d.has("update-notice")
 
 
 def test_macos_gui_does_not_require_linux_display_variables(qapp, monkeypatch, tmp_path):
     import sys
-    from unittest.mock import patch
-    from vcf_ops_telegraf_helper.gui.app import run_gui
 
-    monkeypatch.setattr(sys, 'platform', 'darwin')
-    for key in ('DISPLAY', 'WAYLAND_DISPLAY', 'QT_QPA_PLATFORM'):
-        monkeypatch.delenv(key, raising=False)
-    with patch.object(qapp, 'exec', return_value=0), patch(
-        'vcf_ops_telegraf_helper.gui.main_window.MainWindow',
-        return_value=MainWindow(StateStore(state_file=tmp_path / 'state.json')),
-    ) as window:
-        assert run_gui() == 0
-        assert window.return_value.isVisible()
-        window.return_value.close()
+    from vcf_ops_telegraf_helper.gui import app as gui_app
+
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.delenv("DISPLAY", raising=False)
+    monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
+    monkeypatch.setenv("VCF_HELPER_GUI_SMOKE_REPORT", str(tmp_path / "window.png"))
+    monkeypatch.setattr(QApplication, "exec", lambda self=None: 0)
+    assert gui_app.run_gui() == 0
 
 
-def test_network_wait_keeps_gui_events_running_and_propagates_errors(qapp):
-    import time
-    from PySide6.QtCore import QThread, QTimer
-    from vcf_ops_telegraf_helper.gui.busy import run_busy
-
-    ticks = []
-    timer = QTimer()
-    timer.setInterval(5)
-    timer.timeout.connect(lambda: ticks.append(True))
-    timer.start()
-
-    def query():
-        assert QThread.currentThread() != qapp.thread()
-        time.sleep(0.08)
-        return ['vm-one']
-
-    assert run_busy(None, 'Loading inventory...', query) == ['vm-one']
-    timer.stop()
-    assert len(ticks) >= 3
-    with pytest.raises(RuntimeError, match='TLS failed'):
-        run_busy(None, 'Connecting...', lambda: (_ for _ in ()).throw(RuntimeError('TLS failed')))
-    assert run_busy(None, 'Retrying...', lambda: 'recovered') == 'recovered'
-
-
-def test_agent_defaults_follow_detection_but_keep_explicit_choice(qapp, tmp_path):
-    window = MainWindow(StateStore(state_file=tmp_path / 'state.json'))
-    assert window._get_endpoint_target().install_telegraf
-    window._default_installation(True)
-    assert not window._get_endpoint_target().install_telegraf
-    window._default_installation(False)
-    assert window._get_endpoint_target().install_telegraf
-    window.ep_version_combo.setCurrentText('Do Not Install (Use Existing Host Agent)')
-    window._default_installation(False)
-    assert not window._get_endpoint_target().install_telegraf
-
-
-def test_perfmon_discovery_updates_visible_metrics_without_custom_fragment(qapp, tmp_path, monkeypatch):
-    from vcf_ops_telegraf_helper.gui import main_window as mw
-    from vcf_ops_telegraf_helper.models.discovery import DiscoveredPerfmonSet
-    from unittest.mock import MagicMock
-    window = MainWindow(StateStore(state_file=tmp_path / 'state.json'))
-    window.ep_os_combo.setCurrentText('Windows')
-    window.ep_host_input.setText('win-host')
-    counters = [f'Counter {i}' for i in range(12)]
-    chosen = [DiscoveredPerfmonSet(name='SQLServer:General Statistics', counters=counters)]
-    executor = MagicMock()
-    executor.discover_perfmon_sets.return_value = chosen
-    monkeypatch.setattr(window, '_create_discovery_executor', lambda target: executor)
-    dialog = MagicMock()
-    dialog.exec.return_value = mw.QDialog.Accepted
-    dialog.selected_sets = chosen
-    monkeypatch.setattr(mw, 'PerfmonDiscoveryDialog', lambda *args: dialog)
-    window._on_browse_perfmon_clicked()
-    assert 'SQLServer:General Statistics' in window.perfmon_metrics_box.toPlainText()
-    assert 'Counter 11' in window.perfmon_metrics_box.toPlainText()
-    assert not window.custom_toml_check.isChecked()
-    assert not window.custom_toml_input.toPlainText()
-    first = window._get_monitoring_config().model_dump_json()
-    window._on_browse_perfmon_clicked()
-    assert window._get_monitoring_config().model_dump_json() == first
-    window._apply_baseline_preset()
-    assert 'SQLServer:General Statistics' not in window.perfmon_metrics_box.toPlainText()
-
-
-@pytest.mark.parametrize('installed', [False, True])
-def test_choosing_displayed_version_still_counts_as_explicit(qapp, tmp_path, installed):
-    window = MainWindow(StateStore(state_file=tmp_path / 'state.json'))
-    window._default_installation(installed)
-    selected = window.ep_version_combo.currentText()
-    window.ep_version_combo.activated.emit(window.ep_version_combo.currentIndex())
-    window._default_installation(not installed)
-    assert window.ep_version_combo.currentText() == selected
-
-
-
-def test_active_workflow_cannot_be_started_again_or_reenabled_by_navigation(qapp, tmp_path, monkeypatch):
-    from unittest.mock import MagicMock
-    window = MainWindow(StateStore(state_file=tmp_path / 'state.json'))
-    start = MagicMock()
-    monkeypatch.setattr(window, '_start_workflow_worker', start)
-    window._run_workflow()
-    window._on_step_changed(window.STEP_CONNECT)
-    assert not window.execute_btn.isEnabled()
-    window._run_workflow()
-    start.assert_called_once()
-    window._finish_running_ui()
-
-
-@pytest.mark.parametrize('started_dry_run', [False, True])
-def test_completion_uses_captured_run_options(qapp, tmp_path, started_dry_run):
-    from vcf_ops_telegraf_helper.models.workflow import RunSummary
-    window = MainWindow(StateStore(state_file=tmp_path / 'state.json'))
-    window._running_dry_run = started_dry_run
-    window.dry_run_check.setChecked(not started_dry_run)
-    window._on_worker_finished(RunSummary(target_hostname='vm',vcf_environment='ops',collector_address='proxy',success=True))
-    assert window.execute_btn.isEnabled() == started_dry_run
-    assert ('DRY-RUN' in window.result_banner.text()) == started_dry_run
-
-
-def test_repeat_command_preserves_discovered_perfmon(qapp, tmp_path):
-    import shlex
-    from click.testing import CliRunner
-    from vcf_ops_telegraf_helper.cli.main import cli
-    from vcf_ops_telegraf_helper.models.monitoring import PerfmonObject
-    from vcf_ops_telegraf_helper.renderer.renderer import TelegrafRenderer
-    window = MainWindow(StateStore(state_file=tmp_path / 'state.json'))
-    window.ep_os_combo.setCurrentText('Windows')
-    window._additional_perfmon = [PerfmonObject(object_name='Process', measurement='win_process', counters=['Extra "counter"'], instances=['*'])]
-    parts = shlex.split(window._build_cli_command())
-    value = parts[parts.index('--win-perf-object') + 1]
-    result = CliRunner().invoke(cli, ['render', '--os', 'windows', '--win-perf-object', value])
-    assert result.exit_code == 0
-    expected = TelegrafRenderer.render_system_inputs(window._get_monitoring_config())
-    assert expected in result.output
-
-
-def test_update_notice_matches_mock_and_theme(qapp, tmp_path):
-    from vcf_ops_telegraf_helper.updates import ReleaseNotice, RELEASES
-    window = MainWindow(StateStore(state_file=tmp_path / 'state.json'))
-    window.show()
-    assert window.update_notice.isHidden()
-    notice = ReleaseNotice('v0.7.6', f'{RELEASES}/tag/v0.7.6')
-    window._show_release_notice(notice)
-    assert not window.update_notice.isHidden()
-    assert 'New version available: v0.7.6' in window.update_notice.text()
-    assert notice.url in window.update_notice.text()
-    assert window.update_notice.openExternalLinks()
-    assert '#8fbcf5' in window.update_notice.text()
-    window._toggle_theme()
-    assert '#12376f' in window.update_notice.text()
-    window.close()
-
-
-def test_update_check_returns_through_gui_timer(qapp, monkeypatch, tmp_path):
-    from unittest.mock import Mock
-    from vcf_ops_telegraf_helper.updates import ReleaseNotice, RELEASES
-    notice = ReleaseNotice('v0.7.6', f'{RELEASES}/tag/v0.7.6')
-    check = Mock(return_value=notice)
-    monkeypatch.setattr('vcf_ops_telegraf_helper.updates.check_release', check)
-    class ImmediateThread:
-        def __init__(self, target, **kwargs):
-            self.target = target
-        def start(self):
-            self.target()
-    monkeypatch.setattr('threading.Thread', ImmediateThread)
-    window = MainWindow(StateStore(state_file=tmp_path / 'state.json'))
-    window.start_update_check()
-    window._update_timer.timeout.emit()
-    assert window._release_notice == notice
-    assert not window._update_timer.isActive()
-    window.start_update_check()
-    check.assert_called_once()
-    window.close()
-
-
-def test_main_window_shows_platform_detection_notice(qapp, tmp_path, monkeypatch):
-    """When platform detection is unavailable the Select VM screen says so next to the VM count."""
-    from vcf_ops_telegraf_helper.adapters.mock import MockVCFOpsIntegration
-
-    window = _mock_window(qapp, tmp_path, monkeypatch)
-    window._test_vcf_connection()
-    assert "detection unavailable" not in window.vm_count_label.text()
-
-    monkeypatch.setattr(
-        MockVCFOpsIntegration, "platform_notice", "Platform VM detection unavailable: test notice", raising=False
-    )
-    monkeypatch.setattr(MockVCFOpsIntegration, "inventory_warning", "Agent status unavailable: test", raising=False)
-    window._fetch_vcf_inventory()
-    notice, warning = "Platform VM detection unavailable: test notice", "Agent status unavailable: test"
-    assert notice in window.vm_count_label.text() and warning in window.vm_count_label.text()
-
-    window.vm_show_platform_check.setChecked(True)
-    window.vm_search_input.setText("webapp")
-    window.vm_os_filter.setCurrentText("Linux")
-    assert notice in window.vm_count_label.text() and warning in window.vm_count_label.text()
-
-
-def test_main_window_upgrade_state_cleared_when_target_changes(qapp, tmp_path, monkeypatch):
-    """A different target must not inherit the previous host's discovered agent or upgrade banner."""
-    window = _mock_window(qapp, tmp_path, monkeypatch)
-    window.discovered_telegraf_installed = True
-    window.discovered_telegraf_version = "Telegraf 1.32.1"
-    window._default_installation(True)
-    window.ep_version_combo.setCurrentText("Auto-install Official 1.40.2 (1.40 Series)")
-    assert not window.ep_upgrade_banner.isHidden()
-
-    window._on_target_host_changed("other-host")
-
-    assert window.ep_upgrade_banner.isHidden()
-    assert not window.discovered_telegraf_installed
-    window._update_preview()
-    assert "Upgrade existing Telegraf agent" not in window.review_summary_box.toPlainText()
-
-
-def test_main_window_upgrade_banner_and_preview(qapp, tmp_path, monkeypatch):
-    """Verify GUI detection of older agent displays upgrade banner and updates Review preview."""
-    window = _mock_window(qapp, tmp_path, monkeypatch)
-    window.discovered_telegraf_installed = True
-    window.discovered_telegraf_version = "Telegraf 1.32.1"
-    window._default_installation(True)
-
-    # When on "Do Not Install" (default for installed agent), upgrade banner is offered
-    assert not window.ep_upgrade_banner.isHidden()
-    assert "Telegraf Upgrade Available" in window.ep_upgrade_title.text()
-    assert "Host is currently running Telegraf 1.32.1" in window.ep_upgrade_desc.text()
-
-    # Pick newer version 1.40.2
-    window.ep_version_combo.setCurrentText("Auto-install Official 1.40.2 (1.40 Series)")
-    assert not window.ep_upgrade_banner.isHidden()
-    assert "Telegraf Upgrade Selected" in window.ep_upgrade_title.text()
-    assert "1.40.2" in window.ep_upgrade_desc.text()
-
-    # Verify preview text reflects upgrade
-    window._update_preview()
-    preview = window.review_summary_box.toPlainText()
-    assert "Upgrade existing Telegraf agent from Telegraf 1.32.1 to 1.40.2" in preview
-
-    # Pick identical version 1.32.1
-    window.ep_version_combo.setCurrentText("Auto-install Official 1.32.1 (1.32 Series)")
-    assert not window.ep_upgrade_banner.isHidden()
-    assert "Telegraf Version Unchanged" in window.ep_upgrade_title.text()
-    window._update_preview()
-    preview_same = window.review_summary_box.toPlainText()
-    assert "Telegraf agent version unchanged: installed version (Telegraf 1.32.1) matches requested 1.32.1" in preview_same
-
-    # Pick older version 1.30.0 (downgrade refusal)
-    window.ep_version_combo.setCurrentText("Auto-install Official 1.30.0 (1.30 Series)")
-    assert not window.ep_upgrade_banner.isHidden()
-    assert "Downgrade Not Permitted" in window.ep_upgrade_title.text()
-    window._update_preview()
-    preview_older = window.review_summary_box.toPlainText()
-    assert "Telegraf agent version unchanged: installed version (Telegraf 1.32.1) is newer than requested 1.30.0" in preview_older
-    assert "downgrade not permitted" in preview_older
-
+def test_fresh_window_does_not_touch_the_real_home(session, tmp_path):
+    _d, window, _world = session.start(connect=False)
+    assert tmp_path in window.state_store.state_file.parents
+    assert tmp_path in window.history.history_file.parents and tmp_path in window.journal.directory.parents
+    assert isinstance(window, MainWindow) and isinstance(window.state_store, StateStore)

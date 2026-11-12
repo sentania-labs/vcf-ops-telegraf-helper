@@ -55,6 +55,11 @@ class EndpointExecutor(ABC):
         """Check if a file exists on the target."""
         pass
 
+    def upload_file(self, local_path: str, destination_path: str, mode: int = 0o644) -> None:
+        """Copy a file from this computer to the target. Executors override this for large files."""
+        with open(local_path, "rb") as handle:
+            self.upload(handle.read(), destination_path, mode)
+
     def discover_services(self) -> list[DiscoveredService]:
         """Discover installed or running services on endpoint."""
         return []

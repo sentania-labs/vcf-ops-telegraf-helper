@@ -101,6 +101,7 @@ class WorkflowOptions(BaseModel):
     force_new_cert: bool = False
     replace_inputs: bool = False
     allow_managed_agent: bool = False  # takeover preflight: plan the install as if the Ops agent were already gone
+    send_telegraf: bool = False  # the endpoint cannot download Telegraf: download it here and upload it
 
 
 class RunSummary(BaseModel):
@@ -112,6 +113,7 @@ class RunSummary(BaseModel):
     collector_address: str
     deployment_mode: str = "push"
     success: bool
+    stopped: bool = Field(default=False, description="Stopped on request before the endpoint was changed")
     stages: List[StageResult] = Field(default_factory=list)
     verifications: Dict[str, str] = Field(default_factory=dict)
     managed_files: List[str] = Field(default_factory=list)
@@ -134,7 +136,7 @@ class RunSummary(BaseModel):
             f"**VCF Environment:** `{self.vcf_environment}`  ",
             f"**Collector Destination:** `{self.collector_address}`  ",
             f"**Deployment Mode:** `{self.deployment_mode}`  ",
-            f"**Overall Status:** `{'SUCCESS' if self.success else 'FAILED'}`  ",
+            f"**Overall Status:** `{'STOPPED BEFORE ANY CHANGE' if self.stopped else ('SUCCESS' if self.success else 'FAILED')}`  ",
             "",
             "## Stage Execution",
             "",

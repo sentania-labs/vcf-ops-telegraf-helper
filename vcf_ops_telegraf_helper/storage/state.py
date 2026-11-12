@@ -26,6 +26,10 @@ class LocalAppState(BaseModel):
     environments: Dict[str, VCFEnvironment] = Field(default_factory=dict)
     recent_endpoints: List[str] = Field(default_factory=list)
     preferences: Dict[str, str] = Field(default_factory=dict)
+    trusted_certs: Dict[str, Dict[str, str]] = Field(
+        default_factory=dict,
+        description="Certificates the person chose to trust, keyed by host: fingerprint and what was shown",
+    )
 
 
 class StateStore:
@@ -106,3 +110,17 @@ class StateStore:
         """Retrieve a user interface preference."""
         state = self.load()
         return state.preferences.get(key, default)
+
+    def trust_certificate(self, host: str, details: Dict[str, str]) -> None:
+        """Remember a certificate the person chose to trust for this host."""
+        state = self.load()
+        state.trusted_certs[host.lower()] = dict(details)
+        self.save(state)
+
+    def trusted_certificate(self, host: str) -> Optional[Dict[str, str]]:
+        return self.load().trusted_certs.get(host.lower())
+
+    def forget_certificate(self, host: str) -> None:
+        state = self.load()
+        if state.trusted_certs.pop(host.lower(), None) is not None:
+            self.save(state)

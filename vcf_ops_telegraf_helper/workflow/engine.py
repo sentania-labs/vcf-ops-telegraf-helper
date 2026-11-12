@@ -16,7 +16,7 @@ except ImportError:
     import tomli as tomllib
 
 from datetime import datetime, timezone
-from typing import Dict, List, Optional
+from typing import Callable, Dict, List, Optional
 
 from cryptography import x509
 from vcf_ops_telegraf_helper.adapters.base import IntegrationArtifacts, VCFOpsIntegration
@@ -97,6 +97,13 @@ class ConfigureEndpointWorkflow:
     ):
         self.started_at = time.time()
         self.preview_callback = None
+        # Asked before each stage that does not change the endpoint; True stops the run there
+        self.should_stop: Optional[Callable[[], bool]] = None
+        self.stopped = False
+        # Told "install" and "write" as the apply stage moves from the agent to its settings
+        self.phase_callback: Optional[Callable[[str], None]] = None
+        # Downloads a Telegraf release on this computer: (version, is_windows, is_arm) -> (path, sha256)
+        self.package_fetcher: Optional[Callable[[str, bool, bool], tuple]] = None
         self.input_diff = ""
         self.allow_resume_stock_sample = False
         self.env = environment
@@ -817,6 +824,7 @@ class ConfigureEndpointWorkflow:
                         self.reporter.on_message(msg)
 
             if should_install or should_upgrade:
+                self._phase("install")
                 action_name = "upgrade" if should_upgrade else "auto-install"
                 action_verb = "Upgrade" if should_upgrade else "Auto-install"
                 # Pre-flight disk space check: require at least 500 MB free
@@ -862,6 +870,23 @@ class ConfigureEndpointWorkflow:
                     if "\\" in existing_bin:
                         win_dest_dir = existing_bin.rsplit("\\", 1)[0] or win_dest_dir
                 win_dest_ps = win_dest_dir.replace("'", "''")
+                sent_path = sent_sha = None
+                if self.options.send_telegraf:
+                    # The endpoint has no way out to the download site: fetch the release on this
+                    # computer and copy it across; the endpoint checks it arrived intact before use.
+                    try:
+                        sent_path, sent_sha = self._send_telegraf_package(telegraf_ver, is_win, is_arm)
+                    except Exception as exc:
+                        dur = int((time.monotonic() - start) * 1000)
+                        res = StageResult(
+                            stage=WorkflowStage.APPLY,
+                            status=StageStatus.FAIL,
+                            message=f"Telegraf {telegraf_ver} could not be sent from this computer: {exc}",
+                            details=self._sanitize(str(exc)),
+                            duration_ms=dur,
+                        )
+                        self.reporter.on_stage_complete(res)
+                        return res
                 if is_win:
                     win_arch = "arm64" if is_arm else "amd64"
                     zip_url = f"https://dl.influxdata.com/telegraf/releases/telegraf-{telegraf_ver}_windows_{win_arch}.zip"
@@ -869,7 +894,12 @@ class ConfigureEndpointWorkflow:
                         "$ErrorActionPreference = 'Stop'; "
                         "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; "
                         f"$zipUrl = '{zip_url}'; "
-                        "$destZip = \"$env:TEMP\\telegraf.zip\"; "
+                        + (
+                            f"$destZip = '{sent_path}'; "
+                            if sent_path
+                            else "$destZip = \"$env:TEMP\\telegraf.zip\"; "
+                        )
+                        +
                         f"$destDir = '{win_dest_ps}'; "
                         + (
                             "$hadConf = $true; "
@@ -882,7 +912,13 @@ class ConfigureEndpointWorkflow:
                             if should_upgrade
                             else "if (-not (Test-Path \"$destDir\\telegraf.d\")) { New-Item -ItemType Directory -Path \"$destDir\\telegraf.d\" -Force | Out-Null }; "
                         )
-                        + "Invoke-WebRequest -Uri $zipUrl -OutFile $destZip -UseBasicParsing; "
+                        + (
+                            f"if ((Get-FileHash -Path $destZip -Algorithm SHA256).Hash.ToLower() -ne '{sent_sha}') "
+                            "{ throw 'The Telegraf package sent from this computer did not arrive intact (checksum mismatch)' }; "
+                            if sent_path
+                            else "Invoke-WebRequest -Uri $zipUrl -OutFile $destZip -UseBasicParsing; "
+                        )
+                        +
                         "Expand-Archive -Path $destZip -DestinationPath \"$env:TEMP\\telegraf_extract\" -Force; "
                         "$bin = Get-ChildItem -Path \"$env:TEMP\\telegraf_extract\" -Filter 'telegraf.exe' -Recurse | Select-Object -First 1; "
                         "if (-not $bin) { throw 'telegraf.exe binary not found in extracted archive' }; "
@@ -929,27 +965,42 @@ class ConfigureEndpointWorkflow:
                     install_cmd = (
                         f"{sudo_pfx}bash -c '"
                         "had_conf=0; if [ -f /etc/telegraf/telegraf.conf ]; then had_conf=1; fi; "
-                        "if command -v apt-get >/dev/null 2>&1; then "
-                        "distro=\"debian\"; if [ -f /etc/os-release ]; then . /etc/os-release; if [ \"$ID\" = \"ubuntu\" ]; then distro=\"ubuntu\"; fi; fi; "
-                        "mkdir -p /etc/apt/trusted.gpg.d; "
-                        "if command -v gpg >/dev/null 2>&1; then "
-                        "curl -fsSL https://repos.influxdata.com/influxdata-archive.key | gpg --dearmor --yes -o /etc/apt/trusted.gpg.d/influxdata-archive.gpg 2>/dev/null; "
-                        "else "
-                        "curl -fsSL https://repos.influxdata.com/influxdata-archive_compat.key -o /etc/apt/trusted.gpg.d/influxdata.asc 2>/dev/null; "
-                        "fi; "
-                        "keyfile=\"/etc/apt/trusted.gpg.d/influxdata-archive.gpg\"; "
-                        "if [ ! -f \"$keyfile\" ]; then keyfile=\"/etc/apt/trusted.gpg.d/influxdata.asc\"; fi; "
-                        "echo \"deb [signed-by=$keyfile] https://repos.influxdata.com/$distro stable main\" > /etc/apt/sources.list.d/influxdata.list && "
-                        f"DEBIAN_FRONTEND=noninteractive UCF_FORCE_CONFFOLD=1 apt-get update -qq && (DEBIAN_FRONTEND=noninteractive UCF_FORCE_CONFFOLD=1 apt-get install -y -qq -o Dpkg::Options::=\"--force-confdef\" -o Dpkg::Options::=\"--force-confold\" telegraf={telegraf_ver}-1 2>/dev/null || true); "
-                        "elif command -v dnf >/dev/null 2>&1 || command -v yum >/dev/null 2>&1; then "
-                        "(echo \"[influxdata]\"; echo \"name = InfluxData Repository\"; echo \"baseurl = https://repos.influxdata.com/rhel/\\$releasever/\\$basearch/stable\"; echo \"enabled = 1\"; echo \"gpgcheck = 1\"; echo \"gpgkey = https://repos.influxdata.com/influxdata-archive_compat.key\") > /etc/yum.repos.d/influxdata.repo && "
-                        f"(dnf install -y -q telegraf-{telegraf_ver} 2>/dev/null || yum install -y -q telegraf-{telegraf_ver} 2>/dev/null) || true; "
-                        "fi; "
+                        + (
+                            (
+                                f'echo "{sent_sha}  {sent_path}" | sha256sum -c - >/dev/null 2>&1 || '
+                                '{ echo "The Telegraf package sent from this computer did not arrive intact (checksum mismatch)" >&2; exit 91; }; '
+                            )
+                            if sent_path
+                            else (
+                                "if command -v apt-get >/dev/null 2>&1; then "
+                                "distro=\"debian\"; if [ -f /etc/os-release ]; then . /etc/os-release; if [ \"$ID\" = \"ubuntu\" ]; then distro=\"ubuntu\"; fi; fi; "
+                                "mkdir -p /etc/apt/trusted.gpg.d; "
+                                "if command -v gpg >/dev/null 2>&1; then "
+                                "curl -fsSL https://repos.influxdata.com/influxdata-archive.key | gpg --dearmor --yes -o /etc/apt/trusted.gpg.d/influxdata-archive.gpg 2>/dev/null; "
+                                "else "
+                                "curl -fsSL https://repos.influxdata.com/influxdata-archive_compat.key -o /etc/apt/trusted.gpg.d/influxdata.asc 2>/dev/null; "
+                                "fi; "
+                                "keyfile=\"/etc/apt/trusted.gpg.d/influxdata-archive.gpg\"; "
+                                "if [ ! -f \"$keyfile\" ]; then keyfile=\"/etc/apt/trusted.gpg.d/influxdata.asc\"; fi; "
+                                "echo \"deb [signed-by=$keyfile] https://repos.influxdata.com/$distro stable main\" > /etc/apt/sources.list.d/influxdata.list && "
+                                f"DEBIAN_FRONTEND=noninteractive UCF_FORCE_CONFFOLD=1 apt-get update -qq && (DEBIAN_FRONTEND=noninteractive UCF_FORCE_CONFFOLD=1 apt-get install -y -qq -o Dpkg::Options::=\"--force-confdef\" -o Dpkg::Options::=\"--force-confold\" telegraf={telegraf_ver}-1 2>/dev/null || true); "
+                                "elif command -v dnf >/dev/null 2>&1 || command -v yum >/dev/null 2>&1; then "
+                                "(echo \"[influxdata]\"; echo \"name = InfluxData Repository\"; echo \"baseurl = https://repos.influxdata.com/rhel/\\$releasever/\\$basearch/stable\"; echo \"enabled = 1\"; echo \"gpgcheck = 1\"; echo \"gpgkey = https://repos.influxdata.com/influxdata-archive_compat.key\") > /etc/yum.repos.d/influxdata.repo && "
+                                f"(dnf install -y -q telegraf-{telegraf_ver} 2>/dev/null || yum install -y -q telegraf-{telegraf_ver} 2>/dev/null) || true; "
+                                "fi; "
+                            )
+                        )
+                        +
                         "if ! command -v telegraf >/dev/null 2>&1 || ! telegraf version 2>/dev/null | grep -q \""
                         f"{telegraf_ver}"
                         "\"; then "
                         "td=$(mktemp -d /tmp/telegraf.XXXXXX) && "
-                        f"curl -fsSL \"{tar_url}\" | tar -xz -C \"$td\" && "
+                        + (
+                            f"tar -xzf \"{sent_path}\" -C \"$td\" && rm -f \"{sent_path}\" && "
+                            if sent_path
+                            else f"curl -fsSL \"{tar_url}\" | tar -xz -C \"$td\" && "
+                        )
+                        +
                         "cp -f \"$td\"/telegraf-*/usr/bin/telegraf /usr/bin/telegraf && "
                         "mkdir -p /etc/telegraf/telegraf.d && "
                         "if [ ! -f /etc/telegraf/telegraf.conf ]; then cp \"$td\"/telegraf-*/etc/telegraf/telegraf.conf /etc/telegraf/telegraf.conf; fi && "
@@ -1052,6 +1103,7 @@ class ConfigureEndpointWorkflow:
                         self.reporter.on_stage_complete(res)
                         return res
 
+            self._phase("write")
             # SHA-256 Idempotency Comparison
             self.is_idempotent = False
             main_cfg = (
@@ -1698,9 +1750,49 @@ class ConfigureEndpointWorkflow:
     PREPARE_STAGES = ("detect_target", "detect_telegraf", "configure_vcf_output", "render_inputs", "validate")
     CHANGE_STAGES = ("apply", "restart_if_needed", "verify")
 
+    def _send_telegraf_package(self, version: str, is_win: bool, is_arm: bool) -> tuple:
+        """Download the release on this computer and upload it; returns (path on the endpoint, sha256)."""
+        from vcf_ops_telegraf_helper.workflow.packages import fetch_telegraf_package
+
+        fetch = self.package_fetcher or fetch_telegraf_package
+        self.reporter.on_message(f"Downloading Telegraf {version} on this computer to send to {self.target.hostname}")
+        local_path, sha256 = fetch(version, is_win, is_arm)
+        name = os.path.basename(str(local_path))
+        if is_win:
+            temp = self.executor.execute("$env:TEMP", timeout=10)
+            folder = temp.stdout.strip().splitlines()[-1].strip() if temp.success and temp.stdout.strip() else "C:\\Windows\\Temp"
+            remote = ntpath.join(folder, name)
+        else:
+            remote = f"/tmp/{name}"
+        self.reporter.on_message(f"Sending {name} to {self.target.hostname} ({remote})")
+        self.executor.upload_file(str(local_path), remote)
+        return remote, sha256
+
+    def _phase(self, name: str) -> None:
+        if self.phase_callback:
+            try:
+                self.phase_callback(name)
+            except Exception:
+                logger.exception("Phase callback failed")
+
+    def _stop_requested(self, name: str) -> bool:
+        """A stop is honoured only where nothing has been changed on the endpoint yet.
+
+        The five preparing stages change nothing, and neither does any stage of a dry run. Once
+        the apply stage of a real run has begun, the run finishes: a half-written endpoint is
+        worse than a finished one.
+        """
+        if not self.should_stop:
+            return False
+        safe = name in self.PREPARE_STAGES or name == "apply" or self.options.dry_run or self.options.preview_only
+        return bool(safe and self.should_stop())
+
     def run_stages(self, names: tuple) -> bool:
         """Run the named stages in order, appending their results; False as soon as one fails."""
         for name in names:
+            if self._stop_requested(name):
+                self.stopped = True
+                return False
             stage_fn = getattr(self, name)
             if name == "apply" and self.preview_callback:
                 self.preview_callback()
@@ -1725,6 +1817,7 @@ class ConfigureEndpointWorkflow:
             collector_address=self.env.collector.address,
             deployment_mode=self.options.mode.value,
             success=overall_success,
+            stopped=self.stopped,
             stages=self.stage_results,
             verifications=self.verifications,
             managed_files=self.managed_files,

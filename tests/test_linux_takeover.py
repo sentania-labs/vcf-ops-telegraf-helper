@@ -275,52 +275,61 @@ def test_registry_rejects_commands_outside_vendor_scope(command):
         vendor_uninstall_commands(json.dumps({"uninstallCommand": command}))
 
 
-def test_linux_gui_import_plan_and_confirmation(tmp_path, monkeypatch):
+def test_linux_takeover_through_the_window(tmp_path):
+    """A Linux machine with the Ops-managed agent is taken over from its row, and what was left behind is said."""
     pytest.importorskip("PySide6")
-    from test_takeover_ui import _managed_vm, _window, _wait_for_summary
+    import os
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication, QLabel
+    from gui_driver import Driver
+    from vcf_ops_telegraf_helper.gui.main_window import MainWindow
+    from vcf_ops_telegraf_helper.models.vcf import VirtualMachineResource
+    from vcf_ops_telegraf_helper.storage.state import StateStore
+    from test_takeover import VC_ID, VM_MOR
+
+    QApplication.instance() or QApplication([])
     endpoint = ManagedLinuxEndpoint()
-    window = _window(tmp_path, monkeypatch, endpoint)
-    vm = _managed_vm().model_copy(update={"os_family": "LINUX", "os_name": "Ubuntu Linux", "name": "linux-demo"})
-    window.bound_vm = None
-    window._bind_vm(vm)
-    window.ep_user_input.setText("operator")
-    window.ep_pass_input.setText("synthetic-password")
-    window._vcf_validated = True
-    window._detect_endpoint()
-    assert window.managed_installation is not None
-    assert window.ep_uninstall_btn.isEnabled() is False
-    window.takeover_check.setChecked(True)
-    assert window._takeover_active()
-    assert window.cpu_check.isChecked() and not window.win_svc_check.isChecked()
-    window.step_list.setCurrentRow(window.STEP_MONITORING)
-    assert window.cpu_check.isEnabled() and not window.win_perf_check.isEnabled()
-    for index, (key, _, _, checkbox) in enumerate(window.catalog_items):
-        item = window.plugin_catalog_list.item(index)
-        if key in ("cpu", "mem", "disk", "net", "system", "processes"):
-            assert checkbox.isEnabled() and not item.isHidden()
-        if key in ("win_perf", "win_os", "win_svc"):
-            assert not checkbox.isEnabled() and item.isHidden()
-    window.cpu_check.click()
-    assert not window._get_monitoring_config().cpu.enabled
-    window.cpu_check.click()
-    assert window._get_monitoring_config().cpu.enabled
-    assert not window._get_monitoring_config().win_services.enabled
-    assert "--confirm-takeover linux-demo" in window._build_cli_command()
-    window._update_preview()
-    assert ROOT in window.review_summary_box.toPlainText()
-    assert "http_response" in window._get_monitoring_config().custom_toml
     adapter = LinuxOps(_env(), endpoint, polls_to_finish=1, flip_after_polls=0)
-    monkeypatch.setattr("vcf_ops_telegraf_helper.storage.journal.DEFAULT_JOURNAL_DIR", tmp_path / "journal")
-    monkeypatch.setattr("vcf_ops_telegraf_helper.gui.main_window.get_adapter", lambda env: adapter)
-    monkeypatch.setattr("vcf_ops_telegraf_helper.gui.main_window.QInputDialog.getText", lambda *a, **k: ("linux-demo", True))
-    window.step_list.setCurrentRow(window.STEP_EXECUTE)
-    window._run_workflow()
-    summary = _wait_for_summary(window)
-    assert summary is not None and summary.success, window.stage_list_box.toPlainText()
-    assert "2 items were left on the VM for you to review" in window.result_banner.text()
-    assert "#d95926" in window.result_banner.styleSheet()
-    assert "remove them by hand if nothing else uses them" in window.stage_list_box.toPlainText()
-    window.close()
+    adapter._vms = [VirtualMachineResource(
+        resource_id="res-vm-001", name="linux-demo", ip_address="172.17.0.2", vm_mor=VM_MOR, vc_id=VC_ID,
+        os_name="Ubuntu Linux", os_family="LINUX", power_state="Powered On", collector_group="Simulated CP Group",
+        collector_address="10.10.10.51", telegraf_status="Reporting", agent_registrations=1, managed_type="Product Managed")]
+    window = MainWindow(StateStore(state_file=tmp_path / "state" / "state.json"))
+    window.make_adapter = lambda env: adapter
+    window._create_executor = lambda target: endpoint
+    window.takeover_waits = {"uninstall_poll_seconds": 0, "continuity_poll_seconds": 0, "continuity_wait_seconds": 5}
+    window.show()
+    d = Driver(window, tmp_path / "shots")
+    d.settle()
+    try:
+        d.type("connect-address", "ops.local")
+        d.type("connect-user", "admin")
+        d.type("connect-password", "pw")
+        d.click("connect-go")
+        assert d.find("status-linux-demo").status == "VCF Operations' own agent"
+        d.click("action-linux-demo")
+        assert not d.has("signin-key-toggle")
+        d.type("signin-user-linux", "operator")
+        d.type("signin-linux-password", "synthetic-password")
+        d.click("flow-next")
+        assert d.title() == "The machine is ready"
+        result = window.flow.check["res-vm-001"]
+        assert "cpu" in result.takeover_keys and "winsvc" not in result.takeover_keys
+        d.click("flow-next")
+        assert d.page() == "takeover-review"
+        d.type("takeover-typed", "linux-demo")
+        d.click("flow-next", settle=False)
+        d.settle(60)
+        assert d.page() == "result"
+        headline = d.find("result-headline")
+        assert headline.kind == "warn" and "one thing to know" in headline.title.text()
+        said = " ".join(part.text() for part in d.find("result-linux-demo").findChildren(QLabel))
+        assert "2 items were left on the machine" in said
+        assert "--take-over-managed-agent --confirm-takeover linux-demo" in d.text("command-text")
+        assert "remove them by hand if nothing else uses them" in window.history.entries()[0].log
+        assert not endpoint.managed if hasattr(endpoint, "managed") else True
+    finally:
+        window.close()
 
 
 def test_fragment_read_failure_blocks_backup(tmp_path):

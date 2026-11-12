@@ -15,6 +15,14 @@ from vcf_ops_telegraf_helper.models.vcf import (
 )
 
 
+class CertificateNotTrusted(RuntimeError):
+    """VCF Operations presented a certificate this computer does not trust."""
+
+
+class CredentialsRejected(RuntimeError):
+    """VCF Operations was reached but refused the name, password or token."""
+
+
 class IntegrationArtifacts(BaseModel):
     """Artifacts prepared for endpoint integration."""
 
